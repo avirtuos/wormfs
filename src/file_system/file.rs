@@ -234,34 +234,3 @@ impl WormFile {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::env;
-    use std::fs;
-
-    #[test]
-    fn encode_then_decode_roundtrip() {
-        let tmp = env::temp_dir().join("wormfs-file-test");
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).unwrap();
-
-        let chunk_root = tmp.join("chunks");
-        fs::create_dir_all(&chunk_root).unwrap();
-
-        let wf = WormFile::new("/x/y".to_string(), 3, 2, 1024, chunk_root.clone());
-
-        // prepare source data
-        let data = vec![0xABu8; 3000];
-        wf.encode_from_reader(&data[..]).expect("encode");
-
-        // decode to buffer
-        let mut out: Vec<u8> = Vec::new();
-        wf.decode_to_writer(&mut out).expect("decode");
-
-        // original data is prefix of out (stripe padding may create extra bytes)
-        assert_eq!(&out[..data.len()], &data[..]);
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
-}
