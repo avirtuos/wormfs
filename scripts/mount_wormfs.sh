@@ -37,14 +37,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
 
 # Prefer local release build
-LOCAL_BIN="$REPO_ROOT/target/release/wormfs"
+LOCAL_BIN="$REPO_ROOT/target/release/worm_client"
 BIN=""
 if [ -x "$LOCAL_BIN" ]; then
   BIN="$LOCAL_BIN"
 else
   # fallback to PATH
-  if command -v wormfs >/dev/null 2>&1; then
-    BIN="$(command -v wormfs)"
+  if command -v worm_client >/dev/null 2>&1; then
+    BIN="$(command -v worm_client)"
   fi
 fi
 
