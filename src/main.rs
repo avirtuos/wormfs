@@ -13,6 +13,7 @@ use std::io::{Seek, SeekFrom, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fuser::{ReplyCreate, ReplyEmpty, ReplyWrite, ReplyOpen, TimeOrNow};
+mod erasure;
 
 /// A simple FUSE filesystem that stores metadata in redb and uses a backing directory for file data
 #[derive(Parser, Debug)]
