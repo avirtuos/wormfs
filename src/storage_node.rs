@@ -4,22 +4,26 @@
 //! file storage and retrieval operations using erasure coding, metadata storage,
 //! and local chunk placement.
 
-use crate::chunk_format::{write_chunk, read_chunk, ChunkHeader, ChunkError};
-use crate::erasure_coding::{encode_stripe, decode_stripe_with_size, ErasureCodingConfig, ErasureError};
-use crate::metadata_store::{
-    MetadataStore, FileMetadata, ChunkMetadata, StripeMetadata, StorageLocation,
-    ChunkId, StripeId, MetadataError
+use crate::chunk_format::{read_chunk, write_chunk, ChunkError, ChunkHeader};
+use crate::erasure_coding::{
+    decode_stripe_with_size, encode_stripe, ErasureCodingConfig, ErasureError,
 };
-use crate::storage_layout::{StorageLayout, StorageLayoutConfig, ChunkFolder, ChunkIndexEntry, StorageLayoutError};
+use crate::metadata_store::{
+    ChunkId, ChunkMetadata, FileMetadata, MetadataError, MetadataStore, StorageLocation, StripeId,
+    StripeMetadata,
+};
+use crate::storage_layout::{
+    ChunkFolder, ChunkIndexEntry, StorageLayout, StorageLayoutConfig, StorageLayoutError,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write, Seek, SeekFrom};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use thiserror::Error;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Configuration for the storage node
@@ -47,7 +51,7 @@ impl StorageNodeConfig {
             metadata_db_path: PathBuf::from("data/metadata.db"),
             storage_root: PathBuf::from("data/chunks"),
             erasure_config: ErasureCodingConfig::preset_4_2()?,
-            min_free_space: 1024 * 1024 * 1024, // 1GB
+            min_free_space: 1024 * 1024 * 1024,      // 1GB
             max_file_size: 100 * 1024 * 1024 * 1024, // 100GB
         })
     }
@@ -253,15 +257,20 @@ impl StorageNode {
         let file_checksum = self.calculate_file_checksum(source_path)?;
         file_meta.checksum = file_checksum;
 
-        debug!("File ID: {}, Size: {} bytes, Checksum: {:08x}", 
-               file_id, file_size, file_checksum);
+        debug!(
+            "File ID: {}, Size: {} bytes, Checksum: {:08x}",
+            file_id, file_size, file_checksum
+        );
 
         // Register file in metadata store first (required for foreign key constraints)
         self.metadata_store.create_file(file_meta.clone())?;
 
         // Create chunk folder
-        let chunk_folder = self.storage_layout
-            .create_chunk_folder(file_id, virtual_path.to_path_buf(), file_size)?;
+        let chunk_folder = self.storage_layout.create_chunk_folder(
+            file_id,
+            virtual_path.to_path_buf(),
+            file_size,
+        )?;
 
         // Open source file
         let mut source_file = File::open(source_path)?;
@@ -293,7 +302,8 @@ impl StorageNode {
             );
 
             // Store stripe metadata first (required for foreign key constraints)
-            self.metadata_store.create_stripe(stripe_id, stripe_metadata.clone())?;
+            self.metadata_store
+                .create_stripe(stripe_id, stripe_metadata.clone())?;
 
             // Store each chunk
             for (chunk_index, chunk_data) in encoded_stripe.shards.iter().enumerate() {
@@ -305,7 +315,8 @@ impl StorageNode {
                     stripe_id.file_id,
                     file_id,
                     stripe_index * self.config.erasure_config.stripe_size as u64,
-                    (stripe_index * self.config.erasure_config.stripe_size as u64) + bytes_read as u64,
+                    (stripe_index * self.config.erasure_config.stripe_size as u64)
+                        + bytes_read as u64,
                     chunk_index as u8,
                     self.config.erasure_config.data_shards as u8,
                     self.config.erasure_config.parity_shards as u8,
@@ -343,7 +354,8 @@ impl StorageNode {
                 );
 
                 // Register chunk in metadata store
-                self.metadata_store.register_chunk(chunk_id, chunk_metadata)?;
+                self.metadata_store
+                    .register_chunk(chunk_id, chunk_metadata)?;
 
                 debug!("Stored chunk {}: {} bytes", chunk_id, chunk_size);
                 total_chunks_stored += 1;
@@ -351,12 +363,15 @@ impl StorageNode {
 
             // Update stripe count in file metadata and update in database
             file_meta.add_stripe();
-            self.metadata_store.update_file(file_id, file_meta.clone())?;
+            self.metadata_store
+                .update_file(file_id, file_meta.clone())?;
             stripe_index += 1;
         }
 
-        info!("File stored successfully: {} stripes, {} chunks", 
-              stripe_index, total_chunks_stored);
+        info!(
+            "File stored successfully: {} stripes, {} chunks",
+            stripe_index, total_chunks_stored
+        );
 
         Ok(file_id)
     }
@@ -373,8 +388,10 @@ impl StorageNode {
 
         // Get file metadata
         let file_metadata = self.metadata_store.get_file(file_id)?;
-        debug!("File metadata: {} bytes, {} stripes", 
-               file_metadata.size, file_metadata.stripe_count);
+        debug!(
+            "File metadata: {} bytes, {} stripes",
+            file_metadata.size, file_metadata.stripe_count
+        );
 
         // Create output file
         let mut output_file = BufWriter::new(File::create(output_path)?);
@@ -406,8 +423,10 @@ impl StorageNode {
                     crate::chunk_format::validate_chunk(&chunk_header, &chunk_data)?;
 
                     chunks[chunk_metadata.chunk_index as usize] = Some(chunk_data);
-                    debug!("Read chunk {}: {} bytes", 
-                           chunk_metadata.chunk_index, chunk_metadata.size);
+                    debug!(
+                        "Read chunk {}: {} bytes",
+                        chunk_metadata.chunk_index, chunk_metadata.size
+                    );
                 } else {
                     warn!("Chunk file missing: {:?}", chunk_file_path);
                 }
@@ -424,8 +443,11 @@ impl StorageNode {
             output_file.write_all(&reconstructed_data)?;
             bytes_written += reconstructed_data.len() as u64;
 
-            debug!("Reconstructed stripe {}: {} bytes", 
-                   stripe_index, reconstructed_data.len());
+            debug!(
+                "Reconstructed stripe {}: {} bytes",
+                stripe_index,
+                reconstructed_data.len()
+            );
         }
 
         output_file.flush()?;
@@ -502,7 +524,8 @@ impl StorageNode {
 
         // Remove chunk folder if it exists
         if self.storage_layout.chunk_folder_exists(&file_metadata.path) {
-            self.storage_layout.remove_chunk_folder(&file_metadata.path)?;
+            self.storage_layout
+                .remove_chunk_folder(&file_metadata.path)?;
             debug!("Removed chunk folder for: {:?}", file_metadata.path);
         }
 
@@ -559,8 +582,8 @@ impl StorageNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::io::Write;
+    use tempfile::TempDir;
 
     fn create_test_config() -> (StorageNodeConfig, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -586,7 +609,7 @@ mod tests {
     fn test_storage_node_creation() {
         let (config, _temp_dir) = create_test_config();
         let storage_node = StorageNode::new(config).unwrap();
-        
+
         // Basic functionality check
         let stats = storage_node.get_stats().unwrap();
         assert_eq!(stats.total_files, 0);
@@ -604,7 +627,9 @@ mod tests {
         let virtual_path = PathBuf::from("/test/file.txt");
 
         // Store file
-        let file_id = storage_node.store_file(&source_path, &virtual_path).unwrap();
+        let file_id = storage_node
+            .store_file(&source_path, &virtual_path)
+            .unwrap();
 
         // Verify file was stored
         let files = storage_node.list_files().unwrap();
@@ -635,7 +660,9 @@ mod tests {
         // Store a file
         let test_data = b"File to be deleted";
         let source_path = create_test_file(temp_dir.path(), "delete_test.txt", test_data);
-        let file_id = storage_node.store_file(&source_path, "/delete/test.txt").unwrap();
+        let file_id = storage_node
+            .store_file(&source_path, "/delete/test.txt")
+            .unwrap();
 
         // Verify file exists
         let files_before = storage_node.list_files().unwrap();
@@ -685,7 +712,10 @@ mod tests {
 
         // Verify they match
         assert_eq!(config.node_id, loaded_config.node_id);
-        assert_eq!(config.erasure_config.data_shards, loaded_config.erasure_config.data_shards);
+        assert_eq!(
+            config.erasure_config.data_shards,
+            loaded_config.erasure_config.data_shards
+        );
     }
 
     #[test]
