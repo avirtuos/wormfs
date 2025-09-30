@@ -6,7 +6,9 @@
 pub mod chunk_format;
 pub mod erasure_coding;
 pub mod metadata_store;
+pub mod storage_layout;
 
 pub use chunk_format::*;
 pub use erasure_coding::*;
 pub use metadata_store::*;
+pub use storage_layout::*;
