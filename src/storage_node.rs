@@ -12,9 +12,7 @@ use crate::metadata_store::{
     ChunkId, ChunkMetadata, FileMetadata, MetadataError, MetadataStore, StorageLocation, StripeId,
     StripeMetadata,
 };
-use crate::storage_layout::{
-    StorageLayout, StorageLayoutConfig, StorageLayoutError,
-};
+use crate::storage_layout::{StorageLayout, StorageLayoutConfig, StorageLayoutError};
 
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
