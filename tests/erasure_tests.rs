@@ -98,7 +98,8 @@ fn test_various_data_sizes() {
 
     for size in test_sizes {
         // Use appropriate stripe size for each test data size
-        let stripe_size = (size + 3) / 4 * 4; // Round up to multiple of 4 for alignment
+        #[allow(clippy::manual_div_ceil)] // Avoiding type ambiguity with div_ceil
+        let stripe_size = ((size + 3) / 4) * 4; // Round up to multiple of 4 for alignment
         let config = create_test_config(4, 2, stripe_size.max(1024));
         let test_data = create_test_data(size, 0xAB);
 
@@ -182,8 +183,8 @@ fn test_different_configurations() {
 
         // Test reconstruction with exactly minimum required chunks
         let mut chunks: Vec<Option<Vec<u8>>> = vec![None; config.total_shards()];
-        for i in 0..data_shards {
-            chunks[i] = Some(encoded.shards[i].clone());
+        for (i, chunk) in chunks.iter_mut().enumerate().take(data_shards) {
+            *chunk = Some(encoded.shards[i].clone());
         }
 
         let decoded = decode_stripe_with_size(&chunks, &config, test_data.len()).unwrap();

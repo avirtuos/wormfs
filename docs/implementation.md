@@ -10,6 +10,13 @@ This implementation plan breaks down WormFS development into small, manageable p
 - **Flexibility**: Easy to pivot or adjust based on learnings
 - **Maintainable Motivation**: Regular completions and working software
 
+#### Coding Standards
+
+- Ensure Clippy has no errors or warnings using `cargo clippy --all-targets --all-features -- -D warnings` command/.
+- Ensure all tests past
+- Ensure Cargo Formatting is applied using `cargo fmt`
+- Ensure no cargo build errors or warnings
+
 ### Foundation Phases (0A-0D): Core Building Blocks
 
 #### **Phase 0A: Chunk Format Foundation (1-2 weeks)**

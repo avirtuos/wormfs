@@ -16,9 +16,8 @@ fn generate_test_data(size: usize) -> Vec<u8> {
 fn bench_encoding_stripe_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("encode_stripe_sizes");
 
-    let config = ErasureCodingConfig::new(4, 2, 1024 * 1024).unwrap(); // 1MB base stripe
     let stripe_sizes = vec![
-        1 * 1024,        // 1KB
+        1024,            // 1KB
         4 * 1024,        // 4KB
         16 * 1024,       // 16KB
         64 * 1024,       // 64KB
@@ -51,7 +50,7 @@ fn bench_decoding_stripe_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode_stripe_sizes");
 
     let stripe_sizes = vec![
-        1 * 1024,        // 1KB
+        1024,            // 1KB
         4 * 1024,        // 4KB
         16 * 1024,       // 16KB
         64 * 1024,       // 64KB
@@ -218,8 +217,8 @@ fn bench_chunk_availability_analysis(c: &mut Criterion) {
         }),
         ("minimal_available", {
             let mut chunks: Vec<Option<Vec<u8>>> = vec![None; encoded.shards.len()];
-            for i in 0..config.data_shards {
-                chunks[i] = Some(encoded.shards[i].clone());
+            for (i, chunk) in chunks.iter_mut().enumerate().take(config.data_shards) {
+                *chunk = Some(encoded.shards[i].clone());
             }
             chunks
         }),
@@ -311,15 +310,15 @@ fn bench_configuration_overhead(c: &mut Criterion) {
     });
 
     group.bench_function("config_preset_4_2", |b| {
-        b.iter(|| ErasureCodingConfig::preset_4_2());
+        b.iter(ErasureCodingConfig::preset_4_2);
     });
 
     group.bench_function("config_preset_6_3", |b| {
-        b.iter(|| ErasureCodingConfig::preset_6_3());
+        b.iter(ErasureCodingConfig::preset_6_3);
     });
 
     group.bench_function("config_preset_8_4", |b| {
-        b.iter(|| ErasureCodingConfig::preset_8_4());
+        b.iter(ErasureCodingConfig::preset_8_4);
     });
 
     let config = ErasureCodingConfig::new(4, 2, 1024 * 1024).unwrap();
