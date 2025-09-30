@@ -3,6 +3,8 @@
 //! This module defines the binary format for WormFS chunks, including header structure,
 //! serialization/deserialization, and validation operations.
 
+#![allow(dead_code)] // Allow dead code for public API that will be used by other modules
+
 use std::io::{Read, Write, Cursor};
 use uuid::Uuid;
 use crc32fast::Hasher;
@@ -87,6 +89,7 @@ pub struct ChunkHeader {
 
 impl ChunkHeader {
     /// Create a new chunk header
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chunk_id: Uuid,
         stripe_id: Uuid,
@@ -123,6 +126,7 @@ impl ChunkHeader {
             compression_algorithm,
         })
     }
+
 
     /// Calculate the size of the serialized header
     pub fn serialized_size(&self) -> u16 {

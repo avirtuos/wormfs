@@ -65,7 +65,8 @@ fn bench_chunk_write(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("write_chunk", size), size, |b, _| {
             b.iter(|| {
                 let mut buffer = Vec::new();
-                black_box(write_chunk(&mut buffer, header.clone(), &data).unwrap())
+                write_chunk(&mut buffer, header.clone(), &data).unwrap();
+                black_box(())
             })
         });
     }
@@ -107,7 +108,8 @@ fn bench_chunk_validation(c: &mut Criterion) {
         
         group.bench_with_input(BenchmarkId::new("validate_chunk", size), size, |b, _| {
             b.iter(|| {
-                black_box(validate_chunk(&header, &data).unwrap())
+                validate_chunk(&header, &data).unwrap();
+                black_box(())
             })
         });
     }

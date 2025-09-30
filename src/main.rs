@@ -78,19 +78,19 @@ mod tests {
     #[test]
     fn test_cli_parsing() {
         // Test that CLI parsing works
-        let cli = Cli::try_parse_from(&["wormfs", "health-check"]);
+        let cli = Cli::try_parse_from(["wormfs", "health-check"]);
         assert!(cli.is_ok());
     }
 
     #[test]
     fn test_version_command() {
-        let cli = Cli::try_parse_from(&["wormfs", "version"]);
+        let cli = Cli::try_parse_from(["wormfs", "version"]);
         assert!(cli.is_ok());
         
         if let Ok(cli) = cli {
             match cli.command {
-                Commands::Version => assert!(true),
-                _ => assert!(false, "Expected Version command"),
+                Commands::Version => {}, // Success case
+                _ => panic!("Expected Version command"),
             }
         }
     }
