@@ -13,13 +13,12 @@ use crate::metadata_store::{
     StripeMetadata,
 };
 use crate::storage_layout::{
-    ChunkFolder, ChunkIndexEntry, StorageLayout, StorageLayoutConfig, StorageLayoutError,
+    StorageLayout, StorageLayoutConfig, StorageLayoutError,
 };
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use thiserror::Error;

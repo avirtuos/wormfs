@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 use wormfs::{StorageNode, StorageNodeConfig};
 
