@@ -27,6 +27,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Can read chunk file and validate header integrity
 - Can detect corrupted headers and data
 - 100% test coverage on chunk format operations
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/chunk_format.rs`, `tests/chunk_format_tests.rs`
 
@@ -48,6 +50,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Can reconstruct original data from any k chunks
 - Proper error handling when too few chunks available
 - Benchmarks for encoding/decoding performance
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/erasure_coding.rs`, `tests/erasure_tests.rs`, `benches/erasure_bench.rs`
 
@@ -69,6 +73,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Can track which storage node has which chunks
 - Can map stripes to their constituent chunks
 - Database survives process restart with data intact
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/metadata_store.rs`, `tests/metadata_tests.rs`
 
@@ -90,6 +96,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Can create chunk folders and index files
 - Can list all chunks for a given file
 - No hash collisions in test scenarios
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/storage_layout.rs`, `tests/storage_layout_tests.rs`
 
@@ -111,6 +119,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Can retrieve and reconstruct complete file from chunks  
 - Survives restart with metadata intact
 - Command-line tools work for basic file operations
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/storage_node.rs`, `src/cli.rs`, `config/storage_node.yaml`
 
@@ -132,6 +142,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Can list stored files with their metadata
 - Can detect and report corrupted chunks
 - Configurable erasure coding parameters work correctly
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/file_operations.rs`, `src/integrity_checker.rs`
 
@@ -152,6 +164,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Proper blast radius protection (no stripe has >1 chunk per disk)
 - Balances storage across available disks by free space
 - Gracefully handles individual disk failures
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/disk_manager.rs`, `src/chunk_placement.rs`
 
@@ -173,6 +187,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Peer authentication works with configured peer IDs
 - Heartbeat detection identifies offline peers within 30 seconds
 - Handles network interruptions gracefully
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/networking.rs`, `src/peer_manager.rs`
 
@@ -194,6 +210,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Metadata operations propagate to all nodes reliably
 - Missed operations detected and replayed correctly
 - Master failover works within 10 seconds
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/gossip_protocol.rs`, `src/master_election.rs`, `src/metadata_sync.rs`
 
@@ -215,6 +233,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Can write chunks to remote storage nodes
 - Bulk transfers work reliably for rebalancing
 - Proper error handling for network failures
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/chunk_transfer.rs`, `src/remote_operations.rs`
 
@@ -235,6 +255,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Can reconstruct files from chunks on different nodes
 - Chunk placement follows blast radius rules across nodes
 - Basic cluster-wide storage balancing works
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/distributed_storage.rs`, `src/cluster_coordinator.rs`
 
@@ -256,6 +278,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Authentication and encryption working
 - All filesystem operations accessible via gRPC
 - API documentation and examples
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `proto/wormfs.proto`, `src/grpc_server.rs`, `src/grpc_client.rs`
 
@@ -277,6 +301,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Basic file operations work through standard tools (ls, cat, cp)
 - Directory operations function correctly
 - Metadata operations reflect proper file attributes
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/fuse_client.rs`, `src/fuse_operations.rs`
 
@@ -298,6 +324,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Good performance for typical file operations
 - Handles storage node failures gracefully
 - Concurrent operations work correctly
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/file_locking.rs`, `src/cache_manager.rs`, `src/performance_optimizer.rs`
 
@@ -319,6 +347,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Automatically repairs recoverable data corruption
 - Background scrubbing runs without impacting performance
 - Recovery processes coordinate properly across nodes
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/integrity_checker.rs`, `src/data_recovery.rs`, `src/scrubber.rs`
 
@@ -340,6 +370,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Can manage cluster configuration through UI
 - Real-time monitoring of cluster health
 - Administrative operations work reliably
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/web_ui.rs`, `src/rest_api.rs`, `web/` directory
 
@@ -361,6 +393,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 - Efficient memory usage under load
 - Good scalability characteristics
 - Network bandwidth used efficiently
+- No clippy errors or warnings
+- No rust format errors or warnings.
 
 **Key Files:** `src/performance/`, `benches/`, performance test suite
 

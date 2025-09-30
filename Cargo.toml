@@ -80,6 +80,10 @@ path = "src/main.rs"
 name = "chunk_bench"
 harness = false
 
+[[bench]]
+name = "erasure_bench"
+harness = false
+
 [profile.release]
 lto = true
 codegen-units = 1
