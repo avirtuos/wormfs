@@ -6,67 +6,8 @@ Much of the architecture of this project is inspired by lizardfs' simplicity wit
 
 This project is a work in progress. It is not even remotely usable at this point but I plan to chip away at it in my free time using my openai subscription, cline, and opencode.  
 
+I've never written a distributed filesystem before so I am using this project as a way to see if Claude can educate me in this domain while building an actual project. A lot of the code you will see here is written by Claude so it will very much have an evolving prototype feel while I (a) steer Claude through building my vision for WormFS (b) go back and clean up the (likely) spaghetti that will result from the combination of my inexperience with distributed filesystems and the tendency of "Vibe Coding" to layer fix on-top of fix. In an attempt to "do this right" you'll find a design spec and implementation task breakdown in the docs folder. The goal is to balance the spec driven approach with the more fluid vibe mode for ironing out bugs and refining the system.
 
-## Features
-
-- **Path Translation**: All filesystem operations are translated to a configurable target directory
-- **Read-Only Access**: Currently supports read-only operations (read, readdir, getattr, lookup)
-- **Simple Implementation**: Clean, straightforward FUSE implementation for learning and extension
-
-## Architecture
-
-- It is important that meta-data operations are fast because client applications will be accustomed to traditional (single disk) storage which has extremely fast meta-data operations (in most cases). I think we'll use something like redb for meta-data stored on each node with peer-to-peer replication but single-leader model. libp2p has much of this logic ready to go for us.
-- We'll lean in on the WORM aspect of this implementation to greatly simplify everything. Its likely that we will have a two-tier system where writes initially happen against a single node then after a few minutes of inactivity the file will get chunked up and distributed to the storage mesh. I'm not 100% on this yet, i need to think about how to handle attempts to edit an existing file. It might need to be recalled to the single writer. This way aside from the write node(s) all the other nodes are dealing with immutable data and ensuring sufficient replica counts.
-
-## Building
-
-```bash
-cargo build --release
-```
-
-## Usage
-
-```bash
-# Create a mount point
-sudo mkdir /mnt/wormfs
-
-# Mount the filesystem (replace /path/to/target with your desired target directory)
-sudo ./target/release/wormfs /mnt/wormfs --target /path/to/target
-
-# Access the filesystem
-ls /mnt/wormfs
-cat /mnt/wormfs/some-file.txt
-
-# Unmount when done
-sudo umount /mnt/wormfs
-```
-
-## Command Line Options
-
-- `mount_point`: The directory where the FUSE filesystem will be mounted
-- `--target, -t`: The target directory to translate operations to
-- `--debug, -d`: Enable debug logging
-
-## Example
-
-```bash
-# Mount your home directory through WormFS
-sudo ./target/release/wormfs /mnt/wormfs --target /home/user
-
-# Now /mnt/wormfs will show the contents of /home/user
-ls /mnt/wormfs  # Shows contents of /home/user
-```
-
-## Current Limitations
-
-- Read-only filesystem
-- Simplified inode handling
-- Basic path translation (no advanced features yet)
-
-## Future Enhancements
-
-This is the first step in a larger project. Future versions will include:
-- Write operations support
-- Advanced path mapping
-- Network filesystem capabilities
-- Caching and performance optimizations
+For more information please see
+- [WormFS Design](design.md)
+- [WormFS Implementation Plan](implementation.md)

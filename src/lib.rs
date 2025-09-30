@@ -1,10 +1,8 @@
-//! Library entrypoint for wormfs.
+//! WormFS - A distributed, erasure-coded filesystem with configurable redundancy
 //!
-//! This re-exports the erasure and file_system modules as a library surface so the binary
-//! (and other crates) can consume them via `use wormfs::...`.
+//! This crate provides the core functionality for WormFS, including chunk format,
+//! erasure coding, metadata management, and distributed storage operations.
 
-pub mod erasure;
-pub mod file_system;
+pub mod chunk_format;
 
-pub use file_system::{file::WormFile, stripe::WorkStripe, chunk::ChunkHeader};
-pub use erasure::*;
+pub use chunk_format::*;
