@@ -65,7 +65,7 @@ This implementation plan breaks down WormFS development into small, manageable p
 ---
 
 #### **Phase 0C: Metadata Storage Foundation (1-2 weeks)** COMPLETED
-**Goal:** Create redb abstraction for WormFS metadata operations
+**Goal:** Create sqlite abstraction for WormFS metadata operations
 
 **Deliverables:**
 - `metadata_store.rs` module with:
