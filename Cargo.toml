@@ -1,0 +1,23 @@
+[package]
+name = "wormfs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "A distributed, erasure-coded filesystem with configurable redundancy"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/wormfs"
+homepage = "https://github.com/yourusername/wormfs"
+documentation = "https://docs.rs/wormfs"
+keywords = ["filesystem", "distributed", "erasure-coding", "storage", "fuse"]
+categories = ["filesystem", "network-programming"]
+readme = "README.md"
+
+[dependencies]
+
+[dev-dependencies]
+
+[build-dependencies]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
