@@ -86,10 +86,10 @@ mod tests {
     fn test_version_command() {
         let cli = Cli::try_parse_from(["wormfs", "version"]);
         assert!(cli.is_ok());
-        
+
         if let Ok(cli) = cli {
             match cli.command {
-                Commands::Version => {}, // Success case
+                Commands::Version => {} // Success case
                 _ => panic!("Expected Version command"),
             }
         }

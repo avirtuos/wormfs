@@ -1,14 +1,14 @@
 //! Chunk Format Module
-//! 
+//!
 //! This module defines the binary format for WormFS chunks, including header structure,
 //! serialization/deserialization, and validation operations.
 
 #![allow(dead_code)] // Allow dead code for public API that will be used by other modules
 
-use std::io::{Read, Write, Cursor};
-use uuid::Uuid;
 use crc32fast::Hasher;
+use std::io::{Cursor, Read, Write};
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Current chunk format version
 pub const CHUNK_FORMAT_VERSION: u8 = 1;
@@ -35,25 +35,25 @@ impl From<u8> for CompressionAlgorithm {
 pub enum ChunkError {
     #[error("Invalid chunk format version: expected {expected}, found {found}")]
     InvalidVersion { expected: u8, found: u8 },
-    
+
     #[error("Header checksum mismatch: expected {expected:08x}, calculated {calculated:08x}")]
     HeaderChecksumMismatch { expected: u32, calculated: u32 },
-    
+
     #[error("Data checksum mismatch: expected {expected:08x}, calculated {calculated:08x}")]
     DataChecksumMismatch { expected: u32, calculated: u32 },
-    
+
     #[error("Invalid header length: {length}")]
     InvalidHeaderLength { length: u16 },
-    
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Invalid UUID format")]
     InvalidUuid,
-    
+
     #[error("Chunk data is empty")]
     EmptyChunkData,
-    
+
     #[error("Invalid erasure coding parameters: data_shards={data_shards}, parity_shards={parity_shards}")]
     InvalidErasureParams { data_shards: u8, parity_shards: u8 },
 }
@@ -104,11 +104,17 @@ impl ChunkHeader {
     ) -> Result<Self, ChunkError> {
         // Validate erasure coding parameters
         if data_shards == 0 || parity_shards == 0 {
-            return Err(ChunkError::InvalidErasureParams { data_shards, parity_shards });
+            return Err(ChunkError::InvalidErasureParams {
+                data_shards,
+                parity_shards,
+            });
         }
-        
+
         if chunk_index >= (data_shards + parity_shards) {
-            return Err(ChunkError::InvalidErasureParams { data_shards, parity_shards });
+            return Err(ChunkError::InvalidErasureParams {
+                data_shards,
+                parity_shards,
+            });
         }
 
         Ok(ChunkHeader {
@@ -127,7 +133,6 @@ impl ChunkHeader {
         })
     }
 
-
     /// Calculate the size of the serialized header
     pub fn serialized_size(&self) -> u16 {
         1 +  // version
@@ -143,7 +148,7 @@ impl ChunkHeader {
         1 +  // parity_shards
         4 +  // stripe_checksum
         1 +  // compression_algorithm
-        4    // reserved bytes
+        4 // reserved bytes
     }
 
     /// Serialize the header to bytes
@@ -165,7 +170,7 @@ impl ChunkHeader {
         buffer.push(self.parity_shards);
         buffer.extend_from_slice(&self.stripe_checksum.to_le_bytes());
         buffer.push(self.compression_algorithm as u8);
-        
+
         // Reserved bytes for future expansion
         buffer.extend_from_slice(&[0u8; 4]);
 
@@ -175,20 +180,22 @@ impl ChunkHeader {
     /// Deserialize header from bytes
     pub fn deserialize(data: &[u8]) -> Result<Self, ChunkError> {
         if data.len() < 3 {
-            return Err(ChunkError::InvalidHeaderLength { length: data.len() as u16 });
+            return Err(ChunkError::InvalidHeaderLength {
+                length: data.len() as u16,
+            });
         }
 
         let mut cursor = Cursor::new(data);
-        
+
         // Read version
         let mut version_buf = [0u8; 1];
         cursor.read_exact(&mut version_buf)?;
         let version = version_buf[0];
-        
+
         if version != CHUNK_FORMAT_VERSION {
-            return Err(ChunkError::InvalidVersion { 
-                expected: CHUNK_FORMAT_VERSION, 
-                found: version 
+            return Err(ChunkError::InvalidVersion {
+                expected: CHUNK_FORMAT_VERSION,
+                found: version,
             });
         }
 
@@ -198,7 +205,9 @@ impl ChunkHeader {
         let header_length = u16::from_le_bytes(header_len_buf);
 
         if data.len() < header_length as usize {
-            return Err(ChunkError::InvalidHeaderLength { length: header_length });
+            return Err(ChunkError::InvalidHeaderLength {
+                length: header_length,
+            });
         }
 
         // Read data checksum
@@ -208,13 +217,13 @@ impl ChunkHeader {
 
         // Read UUIDs
         let mut uuid_buf = [0u8; 16];
-        
+
         cursor.read_exact(&mut uuid_buf)?;
         let chunk_id = Uuid::from_bytes(uuid_buf);
-        
+
         cursor.read_exact(&mut uuid_buf)?;
         let stripe_id = Uuid::from_bytes(uuid_buf);
-        
+
         cursor.read_exact(&mut uuid_buf)?;
         let file_id = Uuid::from_bytes(uuid_buf);
 
@@ -222,7 +231,7 @@ impl ChunkHeader {
         let mut offset_buf = [0u8; 8];
         cursor.read_exact(&mut offset_buf)?;
         let stripe_start_offset = u64::from_le_bytes(offset_buf);
-        
+
         cursor.read_exact(&mut offset_buf)?;
         let stripe_end_offset = u64::from_le_bytes(offset_buf);
 
@@ -230,10 +239,10 @@ impl ChunkHeader {
         let mut byte_buf = [0u8; 1];
         cursor.read_exact(&mut byte_buf)?;
         let chunk_index = byte_buf[0];
-        
+
         cursor.read_exact(&mut byte_buf)?;
         let data_shards = byte_buf[0];
-        
+
         cursor.read_exact(&mut byte_buf)?;
         let parity_shards = byte_buf[0];
 
@@ -371,7 +380,8 @@ mod tests {
             2,
             0x12345678,
             CompressionAlgorithm::None,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -387,7 +397,7 @@ mod tests {
         let original_header = create_test_header();
         let serialized = original_header.serialize().unwrap();
         let deserialized = ChunkHeader::deserialize(&serialized).unwrap();
-        
+
         assert_eq!(original_header, deserialized);
     }
 
@@ -395,15 +405,15 @@ mod tests {
     fn test_chunk_write_read_roundtrip() {
         let header = create_test_header();
         let test_data = b"Hello, WormFS! This is test chunk data.";
-        
+
         // Write chunk
         let mut buffer = Vec::new();
         write_chunk(&mut buffer, header.clone(), test_data).unwrap();
-        
+
         // Read chunk
         let mut cursor = Cursor::new(buffer);
         let (read_header, read_data) = read_chunk(&mut cursor).unwrap();
-        
+
         assert_eq!(read_data, test_data);
         assert_eq!(read_header.chunk_id, header.chunk_id);
         assert_eq!(read_header.stripe_id, header.stripe_id);
@@ -414,12 +424,12 @@ mod tests {
     fn test_checksum_validation() {
         let test_data = b"Test data for checksum validation";
         let checksum = calculate_checksum(test_data);
-        
+
         let mut header = create_test_header();
         header.data_checksum = checksum;
-        
+
         assert!(validate_chunk(&header, test_data).is_ok());
-        
+
         // Test with wrong checksum
         header.data_checksum = 0xDEADBEEF;
         assert!(validate_chunk(&header, test_data).is_err());
@@ -439,19 +449,22 @@ mod tests {
             0x12345678,
             CompressionAlgorithm::None,
         );
-        
+
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ChunkError::InvalidErasureParams { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ChunkError::InvalidErasureParams { .. }
+        ));
     }
 
     #[test]
     fn test_empty_chunk_data() {
         let header = create_test_header();
         let empty_data = b"";
-        
+
         let mut buffer = Vec::new();
         let result = write_chunk(&mut buffer, header, empty_data);
-        
+
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ChunkError::EmptyChunkData));
     }
