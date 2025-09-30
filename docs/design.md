@@ -9,8 +9,8 @@ This project is a work in progress. It is not even remotely usable at this point
 ## Key Terms
 
 - **Stripe** - refers to a continuous range of bytes in a file. Stripe size is consistent for all Stripes in a file. Only the final Stripe of a file may have a size that is smaller than the configured Stripe size.
-- **Chunk Metadata** - refers to the collection of meta-data stored in redb that authoritatively outlines which storage node houses a given chunk, which Stripe a chunk belongs to, and which File the Stripe belongs to. 
-- **File Metadata** - refers to the collection of meta-data stored in redb that is required to satisfy basic FUSE filesystem metadata operations without having to read all Stripes and chunks. This includes file permissions, size, inode details, and path information.
+- **Chunk Metadata** - refers to the collection of meta-data stored in sqlite that authoritatively outlines which storage node houses a given chunk, which Stripe a chunk belongs to, and which File the Stripe belongs to. 
+- **File Metadata** - refers to the collection of meta-data stored in sqlite that is required to satisfy basic FUSE filesystem metadata operations without having to read all Stripes and chunks. This includes file permissions, size, inode details, and path information.
 - **Backing Storage** - refers to the traditional, non-distributed, filesystem that Storage Nodes use to durably store chunks.
 - **Chunk Folder** - refers to the single folder that contains all chunks for a given file on a Storage Node. This ensures it is easy to find all the chunks for a given file in backing storage of a Storage Node.
 - **Erasure Coding** - mathematical technique to provide redundancy by creating additional parity chunks from data chunks. Enables reconstruction of lost data from remaining chunks.
@@ -59,10 +59,10 @@ WormFS takes a simple approach to consistency and concurrency by using basic Rea
 
 ### Storage Node - Storage Design
 
-- All meta-data should be stored in redb for fast access and durability across node restarts.
+- All meta-data should be stored in sqlite for fast access and durability across node restarts.
 - wormfs storage nodes will use a traditional ext4 filesystem to store chunks as files.
 - All chunks for a file stored in given wormfs storage node should exist within a single "chunk folder".
-- In addition to writing chunks to the backing storage, each "Chunk Folder" should have an index file that contains basic details of the user file these chunks belong to as well as statistics about the chunks on that storage node. We'll use this file both in aiding rebuilding chunk meta-data in the event of redb corruption but also to power some of our operators tools that perform periodic reconciliation of chunk storage.
+- In addition to writing chunks to the backing storage, each "Chunk Folder" should have an index file that contains basic details of the user file these chunks belong to as well as statistics about the chunks on that storage node. We'll use this file both in aiding rebuilding chunk meta-data in the event of sqlite corruption but also to power some of our operators tools that perform periodic reconciliation of chunk storage.
 - Chunk Folders should be named using a 10 character alphanumeric hash of the fully qualified actual user file name and path.
 - Chunk Folders should be hashed into one of a 1000 top level storage folders that are simply named 1 to 1000.
 - Chunk placement can be simple for now, following two basic rules. A disk is not allowed to store more than 1 Chunk per Stripe in order to limit blast radius. Storage Nodes can have multiple disks. Chunks placement should favor disks with the most free space but not violate the prior blast radius rule that limits how many chunks of a Stripe can be put ona  single disk.

@@ -8,7 +8,7 @@ use reed_solomon_erasure::Error as ReedSolomonError;
 use thiserror::Error;
 
 /// Configuration for erasure coding operations
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ErasureCodingConfig {
     /// Number of data shards (k)
     pub data_shards: usize,

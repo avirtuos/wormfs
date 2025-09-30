@@ -19,7 +19,7 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ### Foundation Phases (0A-0D): Core Building Blocks
 
-#### **Phase 0A: Chunk Format Foundation (1-2 weeks)**
+#### **Phase 0A: Chunk Format Foundation (1-2 weeks)** COMPLETED
 **Goal:** Create the basic chunk file format with headers and validation
 
 **Deliverables:**
@@ -41,7 +41,7 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ---
 
-#### **Phase 0B: Erasure Coding Abstraction (1-2 weeks)**
+#### **Phase 0B: Erasure Coding Abstraction (1-2 weeks)** COMPLETED
 **Goal:** Wrap reed-solomon-erasure crate with WormFS-specific interface
 
 **Deliverables:**
@@ -64,8 +64,8 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ---
 
-#### **Phase 0C: Metadata Storage Foundation (1-2 weeks)**
-**Goal:** Create redb abstraction for WormFS metadata operations
+#### **Phase 0C: Metadata Storage Foundation (1-2 weeks)** COMPLETED
+**Goal:** Create sqlite abstraction for WormFS metadata operations
 
 **Deliverables:**
 - `metadata_store.rs` module with:
