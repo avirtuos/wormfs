@@ -143,7 +143,7 @@ jobs:
       with:
         tool: 'cargo'
         output-file-path: target/criterion/report/index.html
-        github-token: ${{ secrets.GITHUB_TOKEN }}
+        github-token: ${{ secrets.CI_TOKEN }}
         auto-push: true
         comment-on-alert: true
         alert-threshold: '200%'
@@ -192,7 +192,7 @@ jobs:
 
     - name: Update apt-get
       run: sudo apt-get update
-      
+
     - name: Install FUSE3 and dependencies
       run: sudo apt-get install -y fuse3 libfuse3-dev
 
