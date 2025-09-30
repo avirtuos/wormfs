@@ -29,7 +29,7 @@ tonic-build = "0.10"
 prost = "0.12"
 
 # Database
-redb = "1.5"
+rusqlite = { version = "0.30", features = ["bundled"] }
 
 # Erasure coding
 reed-solomon-erasure = "6.0"
