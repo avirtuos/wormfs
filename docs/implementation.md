@@ -133,7 +133,7 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ---
 
-#### **Phase 1B: Local File Operations (1-2 weeks)**
+#### **Phase 1B: Local File Operations (1-2 weeks)** COMPLETED
 **Goal:** Add comprehensive file management operations
 
 **Deliverables:**
@@ -405,7 +405,21 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 **Key Files:** `src/performance/`, `benches/`, performance test suite
 
-### Future Phases (5A+): Production Readiness
+
+#### **Phase 5: Clean Ups & Optimizations (2-3 weeks)**
+**Goal:** Adress clean up tasks identified along the way
+
+**Deliverables:**
+- Performance enhancements with:
+  - MetadataStore::list_files() should support streaming or paginating results to reduce memory pressure to hold all files in memory at once. This is especially relevant for integrity check activities that walk all files.
+
+**Success Criteria:**
+- Its possible to process the list of all files in a paginated fashion without holding all files in memory at the same time and without running the sqlite query repeatedly.
+- No clippy errors or warnings
+- No rust format errors or warnings.
+
+
+### Future Phases (6A+): Production Readiness
 
 Additional phases will cover:
 - **Security hardening** (authentication, authorization, audit logging)

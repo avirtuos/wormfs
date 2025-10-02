@@ -552,6 +552,36 @@ impl StorageNode {
         &self.config
     }
 
+    /// Get a reference to the metadata store
+    pub fn metadata_store(&self) -> &MetadataStore {
+        &self.metadata_store
+    }
+
+    /// Perform an integrity check on the storage system
+    pub fn check_integrity(
+        &self,
+        config: crate::integrity_checker::IntegrityCheckConfig,
+    ) -> Result<
+        crate::integrity_checker::IntegrityCheckResult,
+        crate::integrity_checker::IntegrityError,
+    > {
+        let checker =
+            crate::integrity_checker::IntegrityChecker::new(&self.metadata_store, &self.config);
+        checker.check_integrity(config)
+    }
+
+    /// Perform a quick health check on the storage system
+    pub fn quick_health_check(
+        &self,
+    ) -> Result<
+        crate::integrity_checker::IntegrityCheckResult,
+        crate::integrity_checker::IntegrityError,
+    > {
+        let checker =
+            crate::integrity_checker::IntegrityChecker::new(&self.metadata_store, &self.config);
+        checker.quick_health_check()
+    }
+
     /// Calculate the checksum of a file
     fn calculate_file_checksum<P: AsRef<Path>>(&self, path: P) -> StorageNodeResult<u32> {
         let mut file = File::open(path)?;
