@@ -87,7 +87,7 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ---
 
-#### **Phase 0D: Basic Storage Layout (1 week)**
+#### **Phase 0D: Basic Storage Layout (1 week)** COMPLETED
 **Goal:** Implement local chunk storage organization
 
 **Deliverables:**
@@ -110,7 +110,7 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ### Single Node Phases (1A-1C): Local Storage Operations
 
-#### **Phase 1A: Single-Node Storage Node (2 weeks)**
+#### **Phase 1A: Single-Node Storage Node (2 weeks)** COMPLETED
 **Goal:** Combine all Phase 0 components into basic storage node
 
 **Deliverables:**

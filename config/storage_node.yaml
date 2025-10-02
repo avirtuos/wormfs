@@ -1,0 +1,46 @@
+# WormFS Storage Node Configuration
+# This file contains the configuration settings for a WormFS storage node
+
+# Unique identifier for this storage node
+node_id: "550e8400-e29b-41d4-a716-446655440000"
+
+# Path to the SQLite metadata database
+metadata_db_path: "data/metadata.db"
+
+# Root directory for chunk storage
+storage_root: "data/chunks"
+
+# Erasure coding configuration
+erasure_config:
+  # Number of data shards (k)
+  data_shards: 4
+  # Number of parity shards (m) 
+  parity_shards: 2
+  # Target stripe size in bytes (1MB default)
+  stripe_size: 1048576
+
+# Minimum free space required before rejecting new chunks (1GB default)
+min_free_space: 1073741824
+
+# Maximum file size to accept (100GB default)
+max_file_size: 107374182400
+
+# Example configurations for different use cases:
+
+# High redundancy (6+3):
+# erasure_config:
+#   data_shards: 6
+#   parity_shards: 3
+#   stripe_size: 2097152
+
+# Low latency (8+4):
+# erasure_config:
+#   data_shards: 8
+#   parity_shards: 4
+#   stripe_size: 4194304
+
+# Storage constrained (3+1):
+# erasure_config:
+#   data_shards: 3
+#   parity_shards: 1
+#   stripe_size: 524288
