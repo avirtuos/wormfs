@@ -1,5 +1,5 @@
 # Multi-stage build for WormFS
-FROM rust:1.75-slim as builder
+FROM rust:latest AS builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -11,21 +11,19 @@ RUN apt-get update && apt-get install -y \
 # Create app directory
 WORKDIR /usr/src/app
 
-# Copy manifests
+# Copy manifests and benchmarks
 COPY Cargo.toml Cargo.lock ./
+COPY benches ./benches
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-
-# Build dependencies (this will be cached)
-RUN cargo build --release && rm -rf src
+# Create a dummy main.rs and lib.rs to build dependencies
+RUN mkdir src 
 
 # Copy source code
 COPY src ./src
 COPY proto ./proto
 
 # Build the application
-RUN touch src/main.rs && cargo build --release
+RUN cargo build --release
 
 # Runtime stage
 FROM debian:bookworm-slim

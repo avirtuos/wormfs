@@ -1,0 +1,25 @@
+syntax = "proto3";
+package wormfs;
+
+// Placeholder for future WormFS gRPC API
+// This will be expanded in Phase 3A: gRPC API Foundation
+// 
+// Planned services based on implementation.md:
+// - Client-storage communication protocol
+// - Chunk read/write operations
+// - File metadata operations
+// - Health check endpoints
+
+service WormFSService {
+  // TODO: Add actual service methods in Phase 3A
+  // Examples of planned methods:
+  // - rpc StoreFile(StoreFileRequest) returns (StoreFileResponse);
+  // - rpc RetrieveFile(RetrieveFileRequest) returns (RetrieveFileResponse);
+  // - rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  // - rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Placeholder message types
+message Empty {
+  // Placeholder empty message
+}
