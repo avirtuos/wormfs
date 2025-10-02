@@ -59,6 +59,13 @@ bytes = "1.0"
 futures = "0.3"
 once_cell = "1.19"
 
+# System calls (for disk space checking)
+libc = "0.2"
+
+# Windows API (for disk space checking on Windows)
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["fileapi", "winbase"] }
+
 # Web interface
 axum = "0.7"
 tower = "0.4"

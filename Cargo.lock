@@ -4295,6 +4295,7 @@ dependencies = [
  "criterion",
  "fuser",
  "futures",
+ "libc",
  "libp2p",
  "once_cell",
  "proptest",
@@ -4316,6 +4317,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "winapi",
 ]
 
 [[package]]

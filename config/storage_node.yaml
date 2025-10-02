@@ -7,8 +7,44 @@ node_id: "550e8400-e29b-41d4-a716-446655440000"
 # Path to the SQLite metadata database
 metadata_db_path: "data/metadata.db"
 
-# Root directory for chunk storage
-storage_root: "data/chunks"
+# Storage configuration
+storage_config:
+  # OPTION 1: Single disk mode (backward compatibility)
+  # Uncomment the line below for single-disk setup
+  # storage_root: "data/chunks"
+  
+  # OPTION 2: Multi-disk mode (recommended for production)
+  # Multi-disk configuration for enhanced reliability and performance
+  disks:
+    - disk_id: "primary"
+      path: "data/chunks/disk1"
+      min_free_space: 1073741824  # 1GB
+    - disk_id: "secondary"
+      path: "data/chunks/disk2"  
+      min_free_space: 1073741824  # 1GB
+    - disk_id: "tertiary"
+      path: "data/chunks/disk3"
+      min_free_space: 1073741824  # 1GB
+
+# Disk monitoring configuration
+disk_monitoring:
+  # Interval between disk health checks (seconds)
+  check_interval_seconds: 30
+  # Number of consecutive failures before marking disk offline
+  failure_threshold_consecutive: 3
+  # Percentage of disk usage that triggers space alerts
+  space_alert_threshold_percent: 90
+
+# Chunk placement configuration
+chunk_placement:
+  # Minimum number of disks required for chunk placement
+  min_disks_required: 1
+  # Whether to prefer disks with more available space
+  prefer_more_space: true
+  # Maximum attempts to find placement before giving up
+  max_placement_attempts: 10
+  # Whether to allow degraded placement (fewer disks than chunks)
+  allow_degraded_placement: false
 
 # Erasure coding configuration
 erasure_config:
@@ -18,9 +54,6 @@ erasure_config:
   parity_shards: 2
   # Target stripe size in bytes (1MB default)
   stripe_size: 1048576
-
-# Minimum free space required before rejecting new chunks (1GB default)
-min_free_space: 1073741824
 
 # Maximum file size to accept (100GB default)
 max_file_size: 107374182400
