@@ -4,6 +4,8 @@
 //! erasure coding, and distributed storage operations.
 
 pub mod chunk_format;
+pub mod chunk_placement;
+pub mod disk_manager;
 pub mod erasure_coding;
 pub mod integrity_checker;
 pub mod metadata_store;
@@ -11,6 +13,8 @@ pub mod storage_layout;
 pub mod storage_node;
 
 pub use chunk_format::*;
+pub use chunk_placement::*;
+pub use disk_manager::*;
 pub use erasure_coding::*;
 pub use integrity_checker::*;
 pub use metadata_store::*;
