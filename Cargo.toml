@@ -23,7 +23,7 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 
 # Networking
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "mdns", "kad", "macros", "tokio"] }
+libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "gossipsub", "mdns", "kad", "macros", "tokio"] }
 tonic = "0.10"
 tonic-build = "0.10"
 prost = "0.12"
