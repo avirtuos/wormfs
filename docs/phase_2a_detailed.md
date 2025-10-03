@@ -66,7 +66,7 @@ By breaking this into smaller phases, we achieve:
 
 ---
 
-### **Phase 2A.2: Two-Node Connection (2-3 days)**
+### **Phase 2A.2: Two-Node Connection (2-3 days)** COMPLETED
 **Goal:** Establish a connection between two nodes
 
 **Context:** Prove that two instances can find and connect to each other. This validates our transport layer and basic connection handling.

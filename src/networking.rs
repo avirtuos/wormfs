@@ -21,12 +21,16 @@ use tracing::{debug, error, info, warn};
 pub struct NetworkConfig {
     /// The multiaddr to listen on (e.g., "/ip4/0.0.0.0/tcp/4001")
     pub listen_address: String,
+    /// List of peer addresses to dial on startup (optional)
+    #[serde(default)]
+    pub initial_peers: Vec<String>,
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             listen_address: "/ip4/0.0.0.0/tcp/4001".to_string(),
+            initial_peers: Vec::new(),
         }
     }
 }
@@ -48,6 +52,16 @@ pub enum NetworkCommand {
     /// Dial a peer at the given address
     Dial {
         address: Multiaddr,
+        response: oneshot::Sender<Result<()>>,
+    },
+    /// Dial multiple peers concurrently
+    DialMany {
+        addresses: Vec<Multiaddr>,
+        response: oneshot::Sender<Vec<Result<()>>>,
+    },
+    /// Disconnect from a specific peer
+    Disconnect {
+        peer_id: PeerId,
         response: oneshot::Sender<Result<()>>,
     },
     /// Get the list of connected peers
@@ -234,6 +248,36 @@ impl NetworkService {
                     }
                 }
             }
+            NetworkCommand::DialMany {
+                addresses,
+                response,
+            } => {
+                debug!("Dialing {} peers concurrently", addresses.len());
+                let mut results = Vec::new();
+                for address in addresses {
+                    let result = match self.swarm.dial(address.clone()) {
+                        Ok(_) => Ok(()),
+                        Err(e) => {
+                            warn!("Failed to dial {}: {}", address, e);
+                            Err(anyhow!("Failed to dial {}: {}", address, e))
+                        }
+                    };
+                    results.push(result);
+                }
+                let _ = response.send(results);
+            }
+            NetworkCommand::Disconnect { peer_id, response } => {
+                debug!("Disconnecting from peer: {}", peer_id);
+                match self.swarm.disconnect_peer_id(peer_id) {
+                    Ok(()) => {
+                        let _ = response.send(Ok(()));
+                    }
+                    Err(()) => {
+                        warn!("Failed to disconnect from {}", peer_id);
+                        let _ = response.send(Err(anyhow!("Failed to disconnect from peer")));
+                    }
+                }
+            }
             NetworkCommand::ListPeers { response } => {
                 let peers: Vec<PeerId> = self.connected_peers.iter().cloned().collect();
                 let _ = response.send(peers);
@@ -266,6 +310,26 @@ impl NetworkServiceHandle {
         let (tx, rx) = oneshot::channel();
         self.command_tx.send(NetworkCommand::Dial {
             address,
+            response: tx,
+        })?;
+        rx.await?
+    }
+
+    /// Dial multiple peers concurrently
+    pub async fn dial_many(&self, addresses: Vec<Multiaddr>) -> Result<Vec<Result<()>>> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx.send(NetworkCommand::DialMany {
+            addresses,
+            response: tx,
+        })?;
+        Ok(rx.await?)
+    }
+
+    /// Disconnect from a specific peer
+    pub async fn disconnect(&self, peer_id: PeerId) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx.send(NetworkCommand::Disconnect {
+            peer_id,
             response: tx,
         })?;
         rx.await?
@@ -311,6 +375,7 @@ mod tests {
     async fn test_invalid_listen_address() {
         let config = NetworkConfig {
             listen_address: "invalid-address".to_string(),
+            initial_peers: Vec::new(),
         };
         let (mut service, _handle) = NetworkService::new(config.clone()).unwrap();
         let result = service.start(config).await;
