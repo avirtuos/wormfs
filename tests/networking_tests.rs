@@ -27,6 +27,7 @@ async fn test_service_creation_and_startup() {
         listen_address: "/ip4/127.0.0.1/tcp/4010".to_string(),
         initial_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig::default(),
     };
 
     // Test service creation
@@ -63,6 +64,7 @@ async fn test_invalid_listen_address() {
         listen_address: "invalid-address".to_string(),
         initial_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig::default(),
     };
 
     let (mut service, _handle) = NetworkService::new(config.clone()).unwrap();
@@ -772,4 +774,639 @@ async fn test_batch_dial_with_failures() {
     // Clean shutdown
     handle.shutdown().unwrap();
     let _ = timeout(Duration::from_secs(5), service_handle).await;
+}
+
+// ========== Phase 2A.5 Tests (Peer Authentication) ==========
+
+#[tokio::test]
+async fn test_disabled_mode() {
+    init_tracing();
+
+    use tempfile::TempDir;
+    use wormfs::networking::AuthenticationMode;
+
+    let temp_dir = TempDir::new().unwrap();
+    let peers_file = temp_dir.path().join("peers.json");
+
+    // Create nodes with authentication disabled
+    let config_a = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5000".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Disabled,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let config_b = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5001".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Disabled,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_a, mut handle_a) =
+        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+    let (mut service_b, handle_b) =
+        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+
+    service_a.start(config_a).await.unwrap();
+    service_b.start(config_b).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect A to B - should work in disabled mode
+    handle_a.dial(localhost_multiaddr(5001)).await.unwrap();
+
+    wait_for_connection_event(&mut handle_a, peer_b_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    println!("✓ Disabled mode: Connection accepted");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_learn_mode_new_peer() {
+    init_tracing();
+
+    use tempfile::TempDir;
+    use wormfs::networking::AuthenticationMode;
+
+    let temp_dir = TempDir::new().unwrap();
+    let peers_file = temp_dir.path().join("peers.json");
+
+    let config_a = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5010".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Learn,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let config_b = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5011".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Learn,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_a, mut handle_a) =
+        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+    let (mut service_b, handle_b) =
+        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+
+    service_a.start(config_a).await.unwrap();
+    service_b.start(config_b).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect - should be learned
+    handle_a.dial(localhost_multiaddr(5011)).await.unwrap();
+
+    wait_for_connection_event(&mut handle_a, peer_b_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    println!("✓ Learn mode: New peer accepted and learned");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_learn_mode_file_persistence() {
+    init_tracing();
+
+    use tempfile::TempDir;
+    use wormfs::networking::AuthenticationMode;
+
+    let temp_dir = TempDir::new().unwrap();
+    let peers_file = temp_dir.path().join("peers.json");
+
+    let config_a = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5020".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Learn,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let config_b = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5021".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Learn,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_a, mut handle_a) =
+        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+    let (mut service_b, handle_b) =
+        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+
+    service_a.start(config_a).await.unwrap();
+    service_b.start(config_b).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect and learn
+    handle_a.dial(localhost_multiaddr(5021)).await.unwrap();
+    wait_for_connection_event(&mut handle_a, peer_b_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    sleep(Duration::from_secs(1)).await;
+
+    // Verify peers file was created
+    assert!(peers_file.exists(), "Peers file should be created");
+
+    let content = std::fs::read_to_string(&peers_file).unwrap();
+    assert!(
+        content.contains(&peer_b_id.to_string()),
+        "Peer should be in file"
+    );
+
+    println!("✓ Learn mode: Peers file persisted correctly");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_enforce_mode_allowed_peer() {
+    init_tracing();
+
+    use tempfile::TempDir;
+    use wormfs::networking::AuthenticationMode;
+
+    let temp_dir = TempDir::new().unwrap();
+    let peers_file = temp_dir.path().join("peers.json");
+
+    // First create a node in learn mode to populate the peers file
+    let config_learn = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5030".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Learn,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let config_b = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5031".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Learn,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_learn, mut handle_learn) =
+        wormfs::networking::NetworkService::new(config_learn.clone()).unwrap();
+    let (mut service_b, handle_b) =
+        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+
+    service_learn.start(config_learn).await.unwrap();
+    service_b.start(config_b).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+
+    let service_learn_handle = tokio::spawn(async move { service_learn.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Learn the peer first
+    handle_learn.dial(localhost_multiaddr(5031)).await.unwrap();
+    wait_for_connection_event(&mut handle_learn, peer_b_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    sleep(Duration::from_secs(1)).await;
+
+    // Shutdown learn node
+    handle_learn.shutdown().unwrap();
+    let _ = timeout(Duration::from_secs(5), service_learn_handle).await;
+
+    // Now create a node in enforce mode with the populated peers file
+    let config_enforce = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5032".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Enforce,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_enforce, mut handle_enforce) =
+        wormfs::networking::NetworkService::new(config_enforce.clone()).unwrap();
+    service_enforce.start(config_enforce).await.unwrap();
+    let service_enforce_handle = tokio::spawn(async move { service_enforce.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Should be able to connect because peer is in file
+    handle_enforce
+        .dial(localhost_multiaddr(5031))
+        .await
+        .unwrap();
+    wait_for_connection_event(&mut handle_enforce, peer_b_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    println!("✓ Enforce mode: Allowed peer accepted");
+
+    // Clean shutdown
+    handle_enforce.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_enforce_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_enforce_mode_unknown_peer() {
+    init_tracing();
+
+    use tempfile::TempDir;
+    use wormfs::networking::AuthenticationMode;
+
+    let temp_dir = TempDir::new().unwrap();
+    let peers_file = temp_dir.path().join("peers.json");
+
+    // Create empty peers file
+    std::fs::write(&peers_file, r#"{"version":"1.0","peers":[]}"#).unwrap();
+
+    let config_a = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5040".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Enforce,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let config_b = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5041".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Enforce,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_a, mut handle_a) =
+        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+    let (mut service_b, handle_b) =
+        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+
+    service_a.start(config_a).await.unwrap();
+    service_b.start(config_b).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Try to connect - should be rejected
+    handle_a.dial(localhost_multiaddr(5041)).await.unwrap();
+
+    // Wait for AuthenticationFailed event
+    let result = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(event) = handle_a.next_event().await {
+                match event {
+                    wormfs::networking::NetworkEvent::AuthenticationFailed { peer_id, reason } => {
+                        assert_eq!(peer_id, peer_b_id);
+                        assert!(reason.contains("not in authorized list"));
+                        return;
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(result.is_ok(), "Should receive AuthenticationFailed event");
+
+    println!("✓ Enforce mode: Unknown peer rejected");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_manual_peer_addition() {
+    init_tracing();
+
+    use tempfile::TempDir;
+    use wormfs::networking::AuthenticationMode;
+
+    let temp_dir = TempDir::new().unwrap();
+    let peers_file = temp_dir.path().join("peers.json");
+
+    // Create node B first to get its peer ID
+    let config_b = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5051".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Disabled,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_b, handle_b) =
+        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+    service_b.start(config_b).await.unwrap();
+    let peer_b_id = handle_b.local_peer_id();
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    // Manually create peers file with peer B
+    let peers_json = format!(
+        r#"{{"version":"1.0","peers":[{{"peer_id":"{}","ip_addresses":["127.0.0.1"],"first_seen":"2025-01-01T00:00:00Z","last_seen":"2025-01-01T00:00:00Z","connection_count":0,"source":"manual"}}]}}"#,
+        peer_b_id
+    );
+    std::fs::write(&peers_file, peers_json).unwrap();
+
+    // Create node A in enforce mode
+    let config_a = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5050".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Enforce,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_a, mut handle_a) =
+        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+    service_a.start(config_a).await.unwrap();
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Should be able to connect with manually added peer
+    handle_a.dial(localhost_multiaddr(5051)).await.unwrap();
+    wait_for_connection_event(&mut handle_a, peer_b_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    println!("✓ Manual peer addition: Connection successful");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_mode_transition_learn_to_enforce() {
+    init_tracing();
+
+    use tempfile::TempDir;
+    use wormfs::networking::AuthenticationMode;
+
+    let temp_dir = TempDir::new().unwrap();
+    let peers_file = temp_dir.path().join("peers.json");
+
+    // Phase 1: Learn mode
+    let config_learn = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5060".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Learn,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let config_b = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5061".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Disabled,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_learn, mut handle_learn) =
+        wormfs::networking::NetworkService::new(config_learn.clone()).unwrap();
+    let (mut service_b, handle_b) =
+        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+
+    service_learn.start(config_learn).await.unwrap();
+    service_b.start(config_b).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+
+    let service_learn_handle = tokio::spawn(async move { service_learn.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Learn the peer
+    handle_learn.dial(localhost_multiaddr(5061)).await.unwrap();
+    wait_for_connection_event(&mut handle_learn, peer_b_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    sleep(Duration::from_secs(1)).await;
+
+    // Shutdown learn node
+    handle_learn.shutdown().unwrap();
+    let _ = timeout(Duration::from_secs(5), service_learn_handle).await;
+
+    // Phase 2: Restart in enforce mode
+    let config_enforce = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5062".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Enforce,
+            peers_file: peers_file.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_enforce, mut handle_enforce) =
+        wormfs::networking::NetworkService::new(config_enforce.clone()).unwrap();
+    service_enforce.start(config_enforce).await.unwrap();
+    let service_enforce_handle = tokio::spawn(async move { service_enforce.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Should still be able to connect in enforce mode
+    handle_enforce
+        .dial(localhost_multiaddr(5061))
+        .await
+        .unwrap();
+    wait_for_connection_event(&mut handle_enforce, peer_b_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    println!("✓ Mode transition: Learn -> Enforce successful");
+
+    // Clean shutdown
+    handle_enforce.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_enforce_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_learn_mode_ip_mismatch_rejection() {
+    init_tracing();
+
+    use tempfile::TempDir;
+    use wormfs::networking::AuthenticationMode;
+
+    let temp_dir_a = TempDir::new().unwrap();
+    let temp_dir_b = TempDir::new().unwrap();
+    let peers_file_a = temp_dir_a.path().join("peers.json");
+    let peers_file_b = temp_dir_b.path().join("peers.json");
+
+    // Create node B with disabled authentication
+    let config_b = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5071".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Disabled,
+            peers_file: peers_file_b.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_b, handle_b) =
+        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+    let peer_b_id = handle_b.local_peer_id();
+    service_b.start(config_b).await.unwrap();
+
+    // Manually create peers file for node A with peer B but wrong IP
+    let peers_json = format!(
+        r#"{{"version":"1.0","peers":[{{"peer_id":"{}","ip_addresses":["192.168.1.1"],"first_seen":"2025-01-01T00:00:00Z","last_seen":"2025-01-01T00:00:00Z","connection_count":1,"source":"learned"}}]}}"#,
+        peer_b_id
+    );
+    std::fs::write(&peers_file_a, peers_json).unwrap();
+
+    // Create node A in learn mode
+    let config_a = wormfs::networking::NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/5070".to_string(),
+        initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: AuthenticationMode::Learn,
+            peers_file: peers_file_a.to_str().unwrap().to_string(),
+        },
+    };
+
+    let (mut service_a, mut handle_a) =
+        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+    service_a.start(config_a).await.unwrap();
+
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Try to connect - should be rejected due to IP mismatch
+    handle_a.dial(localhost_multiaddr(5071)).await.unwrap();
+
+    // Wait for AuthenticationFailed event
+    let result = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(event) = handle_a.next_event().await {
+                match event {
+                    wormfs::networking::NetworkEvent::AuthenticationFailed { peer_id, reason } => {
+                        assert_eq!(peer_id, peer_b_id);
+                        assert!(reason.contains("IP mismatch"));
+                        return;
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should receive AuthenticationFailed event for IP mismatch"
+    );
+
+    println!("✓ Learn mode: IP mismatch rejection successful");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
 }

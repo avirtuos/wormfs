@@ -14,6 +14,10 @@ pub async fn create_test_node(port: u16) -> Result<(NetworkService, NetworkServi
         listen_address: format!("/ip4/127.0.0.1/tcp/{}", port),
         initial_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: wormfs::networking::AuthenticationMode::Disabled,
+            peers_file: "peers.json".to_string(),
+        },
     };
 
     let (mut service, handle) = NetworkService::new(config.clone())?;

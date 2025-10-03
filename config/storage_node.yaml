@@ -11,6 +11,16 @@ metadata_db_path: "data/metadata.db"
 networking:
   # Address to listen on for libp2p connections
   listen_address: "/ip4/0.0.0.0/tcp/4001"
+  
+  # Peer authentication configuration (Phase 2A.5)
+  authentication:
+    # Mode: disabled (testing only), learn (auto-discover), enforce (production)
+    # - disabled: Accept all connections (insecure, for testing only)
+    # - learn: Accept new peers and record them, reject IP mismatches
+    # - enforce: Only accept peers listed in peers_file
+    mode: enforce
+    # Path to peers file (relative to config file or absolute)
+    peers_file: "data/peers.json"
 
 # Storage configuration
 storage_config:
