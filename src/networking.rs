@@ -7,14 +7,51 @@ use anyhow::{anyhow, Result};
 use libp2p::{
     core::upgrade,
     futures::StreamExt,
-    identity, noise,
+    identity, noise, ping,
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Transport,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration as StdDuration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
+
+/// Configuration for ping/heartbeat behavior
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PingConfig {
+    /// Interval between ping attempts (seconds)
+    #[serde(default = "default_ping_interval")]
+    pub interval_secs: u64,
+    /// Ping timeout (seconds)
+    #[serde(default = "default_ping_timeout")]
+    pub timeout_secs: u64,
+    /// Maximum consecutive failures before marking unresponsive
+    #[serde(default = "default_max_failures")]
+    pub max_failures: u32,
+}
+
+fn default_ping_interval() -> u64 {
+    15
+}
+
+fn default_ping_timeout() -> u64 {
+    20
+}
+
+fn default_max_failures() -> u32 {
+    3
+}
+
+impl Default for PingConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: default_ping_interval(),
+            timeout_secs: default_ping_timeout(),
+            max_failures: default_max_failures(),
+        }
+    }
+}
 
 /// Configuration for the networking service
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +61,9 @@ pub struct NetworkConfig {
     /// List of peer addresses to dial on startup (optional)
     #[serde(default)]
     pub initial_peers: Vec<String>,
+    /// Ping/heartbeat configuration
+    #[serde(default)]
+    pub ping: PingConfig,
 }
 
 impl Default for NetworkConfig {
@@ -31,6 +71,7 @@ impl Default for NetworkConfig {
         Self {
             listen_address: "/ip4/0.0.0.0/tcp/4001".to_string(),
             initial_peers: Vec::new(),
+            ping: PingConfig::default(),
         }
     }
 }
@@ -42,6 +83,10 @@ pub enum NetworkEvent {
     ConnectionEstablished { peer_id: PeerId },
     /// A peer connection was closed
     ConnectionClosed { peer_id: PeerId },
+    /// A ping succeeded with the given RTT
+    PingSuccess { peer_id: PeerId, rtt: StdDuration },
+    /// A ping failed to a peer
+    PingFailure { peer_id: PeerId },
     /// An error occurred in the network layer
     Error { message: String },
 }
@@ -72,27 +117,66 @@ pub enum NetworkCommand {
     Shutdown,
 }
 
-/// Empty network behaviour for minimal setup
-/// Uses libp2p's dummy behaviour which provides the required ConnectionHandler
-type EmptyBehaviour = libp2p::swarm::dummy::Behaviour;
+/// Statistics for a connected peer
+#[derive(Debug, Clone)]
+pub struct PeerStats {
+    /// Last measured RTT
+    pub last_rtt: Option<StdDuration>,
+    /// Number of consecutive ping failures
+    pub consecutive_failures: u32,
+    /// Last time a successful ping was received
+    pub last_seen: Instant,
+}
+
+impl PeerStats {
+    fn new() -> Self {
+        Self {
+            last_rtt: None,
+            consecutive_failures: 0,
+            last_seen: Instant::now(),
+        }
+    }
+}
+
+/// Custom network behaviour with ping support
+#[derive(NetworkBehaviour)]
+pub struct WormFSBehaviour {
+    ping: ping::Behaviour,
+}
+
+impl WormFSBehaviour {
+    fn new(config: &PingConfig) -> Self {
+        let ping_config = ping::Config::new()
+            .with_interval(StdDuration::from_secs(config.interval_secs))
+            .with_timeout(StdDuration::from_secs(config.timeout_secs));
+
+        Self {
+            ping: ping::Behaviour::new(ping_config),
+        }
+    }
+}
 
 /// The main networking service
 pub struct NetworkService {
     /// The libp2p swarm
-    swarm: Swarm<EmptyBehaviour>,
+    swarm: Swarm<WormFSBehaviour>,
     /// Channel for receiving commands
     command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
     /// Channel for sending events
     event_tx: mpsc::UnboundedSender<NetworkEvent>,
     /// Set of connected peers
     connected_peers: HashSet<PeerId>,
+    /// Peer statistics for tracking RTT and failures
+    peer_stats: HashMap<PeerId, PeerStats>,
     /// Local peer ID
     local_peer_id: PeerId,
+    /// Ping configuration
+    ping_config: PingConfig,
 }
 
 impl NetworkService {
     /// Create a new NetworkService
-    pub fn new(_config: NetworkConfig) -> Result<(Self, NetworkServiceHandle)> {
+    pub fn new(config: NetworkConfig) -> Result<(Self, NetworkServiceHandle)> {
         // Generate identity keypair
         let local_key = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
@@ -106,8 +190,8 @@ impl NetworkService {
             .multiplex(yamux::Config::default())
             .boxed();
 
-        // Create swarm with empty behaviour
-        let behaviour = libp2p::swarm::dummy::Behaviour;
+        // Create behaviour with ping
+        let behaviour = WormFSBehaviour::new(&config.ping);
         let swarm_config = libp2p::swarm::Config::with_tokio_executor()
             .with_idle_connection_timeout(std::time::Duration::from_secs(60));
         let swarm = Swarm::new(transport, behaviour, local_peer_id, swarm_config);
@@ -121,7 +205,9 @@ impl NetworkService {
             command_rx,
             event_tx,
             connected_peers: HashSet::new(),
+            peer_stats: HashMap::new(),
             local_peer_id,
+            ping_config: config.ping,
         };
 
         let handle = NetworkServiceHandle {
@@ -182,7 +268,7 @@ impl NetworkService {
     /// Handle swarm events
     async fn handle_swarm_event(
         &mut self,
-        event: SwarmEvent<<EmptyBehaviour as NetworkBehaviour>::ToSwarm>,
+        event: SwarmEvent<<WormFSBehaviour as NetworkBehaviour>::ToSwarm>,
     ) {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
@@ -191,6 +277,8 @@ impl NetworkService {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 info!("Connection established with peer: {}", peer_id);
                 self.connected_peers.insert(peer_id);
+                // Initialize peer stats
+                self.peer_stats.insert(peer_id, PeerStats::new());
                 let _ = self
                     .event_tx
                     .send(NetworkEvent::ConnectionEstablished { peer_id });
@@ -198,9 +286,52 @@ impl NetworkService {
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 info!("Connection closed with peer: {}", peer_id);
                 self.connected_peers.remove(&peer_id);
+                // Remove peer stats
+                self.peer_stats.remove(&peer_id);
                 let _ = self
                     .event_tx
                     .send(NetworkEvent::ConnectionClosed { peer_id });
+            }
+            SwarmEvent::Behaviour(WormFSBehaviourEvent::Ping(ping_event)) => {
+                // Handle ping events
+                match ping_event {
+                    ping::Event {
+                        peer,
+                        result: Ok(rtt),
+                        ..
+                    } => {
+                        debug!("Ping success to {}: {:?}", peer, rtt);
+                        // Update peer stats
+                        if let Some(stats) = self.peer_stats.get_mut(&peer) {
+                            stats.last_rtt = Some(rtt);
+                            stats.consecutive_failures = 0;
+                            stats.last_seen = Instant::now();
+                        }
+                        let _ = self
+                            .event_tx
+                            .send(NetworkEvent::PingSuccess { peer_id: peer, rtt });
+                    }
+                    ping::Event {
+                        peer,
+                        result: Err(err),
+                        ..
+                    } => {
+                        warn!("Ping failure to {}: {:?}", peer, err);
+                        // Update failure count
+                        if let Some(stats) = self.peer_stats.get_mut(&peer) {
+                            stats.consecutive_failures += 1;
+                            if stats.consecutive_failures >= self.ping_config.max_failures {
+                                info!(
+                                    "Peer {} marked as unresponsive after {} failures",
+                                    peer, stats.consecutive_failures
+                                );
+                            }
+                        }
+                        let _ = self
+                            .event_tx
+                            .send(NetworkEvent::PingFailure { peer_id: peer });
+                    }
+                }
             }
             SwarmEvent::IncomingConnection { .. } => {
                 debug!("Incoming connection");
@@ -376,6 +507,7 @@ mod tests {
         let config = NetworkConfig {
             listen_address: "invalid-address".to_string(),
             initial_peers: Vec::new(),
+            ping: PingConfig::default(),
         };
         let (mut service, _handle) = NetworkService::new(config.clone()).unwrap();
         let result = service.start(config).await;

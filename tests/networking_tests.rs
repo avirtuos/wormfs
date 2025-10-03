@@ -26,6 +26,7 @@ async fn test_service_creation_and_startup() {
     let config = NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/4010".to_string(),
         initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
     };
 
     // Test service creation
@@ -61,6 +62,7 @@ async fn test_invalid_listen_address() {
     let config = NetworkConfig {
         listen_address: "invalid-address".to_string(),
         initial_peers: Vec::new(),
+        ping: wormfs::networking::PingConfig::default(),
     };
 
     let (mut service, _handle) = NetworkService::new(config.clone()).unwrap();
@@ -314,6 +316,84 @@ async fn test_multiple_connections() {
 }
 
 // ========== Phase 2A.2 Tests ==========
+
+#[tokio::test]
+async fn test_ping_between_nodes() {
+    init_tracing();
+
+    // Create two nodes
+    let (mut service_a, mut handle_a) = create_test_node(4070).await.unwrap();
+    let (mut service_b, handle_b) = create_test_node(4071).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+
+    println!("Testing ping functionality between two nodes");
+
+    // Start both services
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect A to B
+    let dial_addr = localhost_multiaddr(4071);
+    handle_a.dial(dial_addr).await.unwrap();
+
+    // Wait for connection
+    let connection_timeout = Duration::from_secs(5);
+    wait_for_connection_event(&mut handle_a, peer_b_id, connection_timeout)
+        .await
+        .unwrap();
+
+    println!("✓ Nodes connected, waiting for ping events...");
+
+    // Wait for at least one ping success event (pings happen every 15s by default)
+    // With default config, we should see pings within 20 seconds
+    let ping_timeout = Duration::from_secs(20);
+    let result: Result<Result<Duration, ()>, _> = timeout(ping_timeout, async {
+        loop {
+            if let Some(event) = handle_a.next_event().await {
+                match event {
+                    NetworkEvent::PingSuccess { peer_id, rtt } => {
+                        println!("✓ Ping success to {}: {:?}", peer_id, rtt);
+                        if peer_id == peer_b_id {
+                            return Ok(rtt);
+                        }
+                    }
+                    NetworkEvent::PingFailure { peer_id } => {
+                        println!("⚠ Ping failure to {}", peer_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(result.is_ok(), "Should receive ping success event");
+    let rtt = result.unwrap().unwrap();
+    println!("✓ Measured RTT: {:?}", rtt);
+
+    // RTT should be reasonable (< 1 second for localhost)
+    assert!(
+        rtt < Duration::from_secs(1),
+        "RTT too high for localhost: {:?}",
+        rtt
+    );
+
+    println!("✓ Ping test successful!");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+// ========== Phase 2A.2 Tests (continued) ==========
 
 #[tokio::test]
 async fn test_explicit_disconnect() {
