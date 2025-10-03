@@ -1,11 +1,13 @@
 //! Integration tests for the NetworkService
 //!
-//! This module contains comprehensive tests for Phase 2A.1 including the
-//! two-node communication test requested by the user.
+//! This module contains comprehensive tests for Phase 2A.1 and 2A.2 including
+//! connection, disconnection, and batch dialing tests.
 
-use anyhow::Result;
-use libp2p::{Multiaddr, PeerId};
+mod test_helpers;
+
+use libp2p::Multiaddr;
 use std::time::Duration;
+use test_helpers::*;
 use tokio::time::{sleep, timeout};
 use wormfs::networking::{NetworkConfig, NetworkEvent, NetworkService};
 
@@ -17,56 +19,13 @@ fn init_tracing() {
         .try_init();
 }
 
-/// Helper function to create a test node with a specific port
-async fn create_test_node(
-    port: u16,
-) -> Result<(NetworkService, wormfs::networking::NetworkServiceHandle)> {
-    let config = NetworkConfig {
-        listen_address: format!("/ip4/127.0.0.1/tcp/{}", port),
-    };
-
-    let (mut service, handle) = NetworkService::new(config.clone())?;
-    service.start(config).await?;
-
-    Ok((service, handle))
-}
-
-/// Helper function to wait for a connection event
-async fn wait_for_connection_event(
-    handle: &mut wormfs::networking::NetworkServiceHandle,
-    expected_peer: PeerId,
-    timeout_duration: Duration,
-) -> Result<()> {
-    let result = timeout(timeout_duration, async {
-        loop {
-            if let Some(event) = handle.next_event().await {
-                match event {
-                    NetworkEvent::ConnectionEstablished { peer_id } if peer_id == expected_peer => {
-                        return Ok(());
-                    }
-                    NetworkEvent::Error { message } => {
-                        return Err(anyhow::anyhow!("Network error: {}", message));
-                    }
-                    _ => continue,
-                }
-            }
-        }
-    })
-    .await;
-
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(anyhow::anyhow!("Timeout waiting for connection event")),
-    }
-}
-
 #[tokio::test]
 async fn test_service_creation_and_startup() {
     init_tracing();
 
     let config = NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/4010".to_string(),
+        initial_peers: Vec::new(),
     };
 
     // Test service creation
@@ -101,6 +60,7 @@ async fn test_invalid_listen_address() {
 
     let config = NetworkConfig {
         listen_address: "invalid-address".to_string(),
+        initial_peers: Vec::new(),
     };
 
     let (mut service, _handle) = NetworkService::new(config.clone()).unwrap();
@@ -351,4 +311,190 @@ async fn test_multiple_connections() {
         timeout(Duration::from_secs(5), service_b_handle),
         timeout(Duration::from_secs(5), service_c_handle)
     );
+}
+
+// ========== Phase 2A.2 Tests ==========
+
+#[tokio::test]
+async fn test_explicit_disconnect() {
+    init_tracing();
+
+    // Create two nodes
+    let (mut service_a, mut handle_a) = create_test_node(4040).await.unwrap();
+    let (mut service_b, mut handle_b) = create_test_node(4041).await.unwrap();
+
+    let peer_a_id = handle_a.local_peer_id();
+    let peer_b_id = handle_b.local_peer_id();
+
+    println!("Testing explicit disconnect");
+    println!("Node A: {}", peer_a_id);
+    println!("Node B: {}", peer_b_id);
+
+    // Start both services
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect A to B
+    let dial_addr = localhost_multiaddr(4041);
+    handle_a.dial(dial_addr).await.unwrap();
+
+    // Wait for connection
+    let connection_timeout = Duration::from_secs(5);
+    wait_for_connection_event(&mut handle_a, peer_b_id, connection_timeout)
+        .await
+        .unwrap();
+    wait_for_connection_event(&mut handle_b, peer_a_id, connection_timeout)
+        .await
+        .unwrap();
+
+    // Verify connected
+    assert_peer_connected(&handle_a, peer_b_id).await.unwrap();
+    assert_peer_connected(&handle_b, peer_a_id).await.unwrap();
+
+    println!("✓ Nodes connected successfully");
+
+    // Explicitly disconnect from Node A's side
+    println!("Disconnecting from Node A...");
+    handle_a.disconnect(peer_b_id).await.unwrap();
+
+    // Wait for both sides to see the disconnection
+    let disconnect_timeout = Duration::from_secs(5);
+    wait_for_disconnection_event(&mut handle_a, peer_b_id, disconnect_timeout)
+        .await
+        .unwrap();
+    wait_for_disconnection_event(&mut handle_b, peer_a_id, disconnect_timeout)
+        .await
+        .unwrap();
+
+    // Verify disconnected
+    assert_peer_disconnected(&handle_a, peer_b_id)
+        .await
+        .unwrap();
+    assert_peer_disconnected(&handle_b, peer_a_id)
+        .await
+        .unwrap();
+
+    println!("✓ Explicit disconnect test successful!");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_batch_dial() {
+    init_tracing();
+
+    // Create one central node and three target nodes
+    let (mut service_main, handle_main) = create_test_node(4050).await.unwrap();
+    let (mut service_1, handle_1) = create_test_node(4051).await.unwrap();
+    let (mut service_2, handle_2) = create_test_node(4052).await.unwrap();
+    let (mut service_3, handle_3) = create_test_node(4053).await.unwrap();
+
+    let peer_1_id = handle_1.local_peer_id();
+    let peer_2_id = handle_2.local_peer_id();
+    let peer_3_id = handle_3.local_peer_id();
+
+    println!("Testing batch dial to multiple peers");
+
+    // Start all services
+    let main_handle = tokio::spawn(async move { service_main.run().await });
+    let s1_handle = tokio::spawn(async move { service_1.run().await });
+    let s2_handle = tokio::spawn(async move { service_2.run().await });
+    let s3_handle = tokio::spawn(async move { service_3.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Batch dial to all three nodes
+    let addresses = vec![
+        localhost_multiaddr(4051),
+        localhost_multiaddr(4052),
+        localhost_multiaddr(4053),
+    ];
+
+    println!("Dialing {} peers concurrently...", addresses.len());
+    let dial_results = handle_main.dial_many(addresses).await.unwrap();
+
+    // All dials should succeed
+    for (i, result) in dial_results.iter().enumerate() {
+        assert!(
+            result.is_ok(),
+            "Dial to peer {} failed: {:?}",
+            i + 1,
+            result
+        );
+    }
+
+    println!("✓ All dial attempts succeeded");
+
+    // Wait for connections to establish
+    sleep(Duration::from_secs(2)).await;
+
+    // Verify all three are connected
+    let peers = handle_main.list_connected_peers().await.unwrap();
+    assert!(
+        peers.len() >= 3,
+        "Expected at least 3 connections, got {}",
+        peers.len()
+    );
+    assert!(peers.contains(&peer_1_id));
+    assert!(peers.contains(&peer_2_id));
+    assert!(peers.contains(&peer_3_id));
+
+    println!(
+        "✓ Batch dial test successful! Connected to {} peers",
+        peers.len()
+    );
+
+    // Clean shutdown
+    handle_main.shutdown().unwrap();
+    handle_1.shutdown().unwrap();
+    handle_2.shutdown().unwrap();
+    handle_3.shutdown().unwrap();
+
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), main_handle),
+        timeout(Duration::from_secs(5), s1_handle),
+        timeout(Duration::from_secs(5), s2_handle),
+        timeout(Duration::from_secs(5), s3_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_batch_dial_with_failures() {
+    init_tracing();
+
+    let (mut service, handle) = create_test_node(4060).await.unwrap();
+    let service_handle = tokio::spawn(async move { service.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Try to dial a mix of valid and invalid addresses
+    let addresses = vec![
+        localhost_multiaddr(9991), // Invalid
+        localhost_multiaddr(9992), // Invalid
+        localhost_multiaddr(9993), // Invalid
+    ];
+
+    let dial_results = handle.dial_many(addresses).await.unwrap();
+
+    // All should "succeed" in the sense that dial attempts were made
+    // (actual connection will fail asynchronously)
+    assert_eq!(dial_results.len(), 3);
+    for result in &dial_results {
+        assert!(result.is_ok(), "Dial attempt should succeed: {:?}", result);
+    }
+
+    println!("✓ Batch dial with invalid addresses handled correctly");
+
+    // Clean shutdown
+    handle.shutdown().unwrap();
+    let _ = timeout(Duration::from_secs(5), service_handle).await;
 }
