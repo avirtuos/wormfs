@@ -113,27 +113,89 @@ pub enum NetworkCommand {
     ListPeers {
         response: oneshot::Sender<Vec<PeerId>>,
     },
+    /// Get the state of a specific peer
+    GetPeerState {
+        peer_id: PeerId,
+        response: oneshot::Sender<Option<PeerState>>,
+    },
+    /// Get complete info about a specific peer
+    GetPeerInfo {
+        peer_id: PeerId,
+        response: oneshot::Sender<Option<PeerInfo>>,
+    },
+    /// List all peers with a specific state
+    ListPeersByState {
+        state: PeerState,
+        response: oneshot::Sender<Vec<PeerId>>,
+    },
     /// Shutdown the service
     Shutdown,
 }
 
-/// Statistics for a connected peer
+/// Peer connection state
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PeerState {
+    /// Peer is connected and responsive
+    Connected,
+    /// Peer was disconnected (cleanly or via network)
+    Disconnected,
+    /// Peer is connected but unresponsive (consecutive ping failures exceeded)
+    Failed,
+}
+
+/// Complete information about a peer
 #[derive(Debug, Clone)]
-pub struct PeerStats {
+pub struct PeerInfo {
+    /// The peer's ID
+    pub peer_id: PeerId,
+    /// Current state of the peer
+    pub state: PeerState,
     /// Last measured RTT
     pub last_rtt: Option<StdDuration>,
     /// Number of consecutive ping failures
     pub consecutive_failures: u32,
     /// Last time a successful ping was received
     pub last_seen: Instant,
+    /// When the peer connected (if currently connected)
+    pub connected_at: Option<Instant>,
+    /// When the peer disconnected (if currently disconnected)
+    pub disconnected_at: Option<Instant>,
 }
 
-impl PeerStats {
-    fn new() -> Self {
+impl PeerInfo {
+    fn new(peer_id: PeerId) -> Self {
         Self {
+            peer_id,
+            state: PeerState::Connected,
             last_rtt: None,
             consecutive_failures: 0,
             last_seen: Instant::now(),
+            connected_at: Some(Instant::now()),
+            disconnected_at: None,
+        }
+    }
+
+    /// Update state with logging
+    fn set_state(&mut self, new_state: PeerState) {
+        if self.state != new_state {
+            info!(
+                "Peer {} state transition: {:?} -> {:?}",
+                self.peer_id, self.state, new_state
+            );
+            self.state = new_state;
+
+            match new_state {
+                PeerState::Connected => {
+                    self.connected_at = Some(Instant::now());
+                    self.disconnected_at = None;
+                }
+                PeerState::Disconnected => {
+                    self.disconnected_at = Some(Instant::now());
+                }
+                PeerState::Failed => {
+                    // Failed state maintains connection timestamps
+                }
+            }
         }
     }
 }
@@ -166,8 +228,8 @@ pub struct NetworkService {
     event_tx: mpsc::UnboundedSender<NetworkEvent>,
     /// Set of connected peers
     connected_peers: HashSet<PeerId>,
-    /// Peer statistics for tracking RTT and failures
-    peer_stats: HashMap<PeerId, PeerStats>,
+    /// Peer information for tracking state, RTT and failures
+    peer_info: HashMap<PeerId, PeerInfo>,
     /// Local peer ID
     local_peer_id: PeerId,
     /// Ping configuration
@@ -205,7 +267,7 @@ impl NetworkService {
             command_rx,
             event_tx,
             connected_peers: HashSet::new(),
-            peer_stats: HashMap::new(),
+            peer_info: HashMap::new(),
             local_peer_id,
             ping_config: config.ping,
         };
@@ -277,8 +339,10 @@ impl NetworkService {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 info!("Connection established with peer: {}", peer_id);
                 self.connected_peers.insert(peer_id);
-                // Initialize peer stats
-                self.peer_stats.insert(peer_id, PeerStats::new());
+                // Initialize peer info with Connected state
+                let mut info = PeerInfo::new(peer_id);
+                info.set_state(PeerState::Connected);
+                self.peer_info.insert(peer_id, info);
                 let _ = self
                     .event_tx
                     .send(NetworkEvent::ConnectionEstablished { peer_id });
@@ -286,8 +350,10 @@ impl NetworkService {
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 info!("Connection closed with peer: {}", peer_id);
                 self.connected_peers.remove(&peer_id);
-                // Remove peer stats
-                self.peer_stats.remove(&peer_id);
+                // Update peer state to Disconnected
+                if let Some(info) = self.peer_info.get_mut(&peer_id) {
+                    info.set_state(PeerState::Disconnected);
+                }
                 let _ = self
                     .event_tx
                     .send(NetworkEvent::ConnectionClosed { peer_id });
@@ -301,11 +367,15 @@ impl NetworkService {
                         ..
                     } => {
                         debug!("Ping success to {}: {:?}", peer, rtt);
-                        // Update peer stats
-                        if let Some(stats) = self.peer_stats.get_mut(&peer) {
-                            stats.last_rtt = Some(rtt);
-                            stats.consecutive_failures = 0;
-                            stats.last_seen = Instant::now();
+                        // Update peer info
+                        if let Some(info) = self.peer_info.get_mut(&peer) {
+                            info.last_rtt = Some(rtt);
+                            info.consecutive_failures = 0;
+                            info.last_seen = Instant::now();
+                            // Reset to Connected if was Failed
+                            if info.state == PeerState::Failed {
+                                info.set_state(PeerState::Connected);
+                            }
                         }
                         let _ = self
                             .event_tx
@@ -317,14 +387,11 @@ impl NetworkService {
                         ..
                     } => {
                         warn!("Ping failure to {}: {:?}", peer, err);
-                        // Update failure count
-                        if let Some(stats) = self.peer_stats.get_mut(&peer) {
-                            stats.consecutive_failures += 1;
-                            if stats.consecutive_failures >= self.ping_config.max_failures {
-                                info!(
-                                    "Peer {} marked as unresponsive after {} failures",
-                                    peer, stats.consecutive_failures
-                                );
+                        // Update failure count and possibly mark as Failed
+                        if let Some(info) = self.peer_info.get_mut(&peer) {
+                            info.consecutive_failures += 1;
+                            if info.consecutive_failures >= self.ping_config.max_failures {
+                                info.set_state(PeerState::Failed);
                             }
                         }
                         let _ = self
@@ -413,6 +480,23 @@ impl NetworkService {
                 let peers: Vec<PeerId> = self.connected_peers.iter().cloned().collect();
                 let _ = response.send(peers);
             }
+            NetworkCommand::GetPeerState { peer_id, response } => {
+                let state = self.peer_info.get(&peer_id).map(|info| info.state);
+                let _ = response.send(state);
+            }
+            NetworkCommand::GetPeerInfo { peer_id, response } => {
+                let info = self.peer_info.get(&peer_id).cloned();
+                let _ = response.send(info);
+            }
+            NetworkCommand::ListPeersByState { state, response } => {
+                let peers: Vec<PeerId> = self
+                    .peer_info
+                    .values()
+                    .filter(|info| info.state == state)
+                    .map(|info| info.peer_id)
+                    .collect();
+                let _ = response.send(peers);
+            }
             NetworkCommand::Shutdown => {
                 info!("Shutdown command received");
                 return false;
@@ -483,6 +567,36 @@ impl NetworkServiceHandle {
     /// Receive network events
     pub async fn next_event(&mut self) -> Option<NetworkEvent> {
         self.event_rx.recv().await
+    }
+
+    /// Get the state of a specific peer
+    pub async fn get_peer_state(&self, peer_id: PeerId) -> Result<Option<PeerState>> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx.send(NetworkCommand::GetPeerState {
+            peer_id,
+            response: tx,
+        })?;
+        Ok(rx.await?)
+    }
+
+    /// Get complete information about a specific peer
+    pub async fn get_peer_info(&self, peer_id: PeerId) -> Result<Option<PeerInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx.send(NetworkCommand::GetPeerInfo {
+            peer_id,
+            response: tx,
+        })?;
+        Ok(rx.await?)
+    }
+
+    /// List all peers in a specific state
+    pub async fn list_peers_by_state(&self, state: PeerState) -> Result<Vec<PeerId>> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx.send(NetworkCommand::ListPeersByState {
+            state,
+            response: tx,
+        })?;
+        Ok(rx.await?)
     }
 
     /// Get the local peer ID
