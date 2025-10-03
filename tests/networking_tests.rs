@@ -393,6 +393,201 @@ async fn test_ping_between_nodes() {
     );
 }
 
+// ========== Phase 2A.3 Tests (Ping) ==========
+
+// ========== Phase 2A.4 Tests (Peer State Tracking) ==========
+
+#[tokio::test]
+async fn test_peer_state_connected() {
+    init_tracing();
+
+    // Create two nodes
+    let (mut service_a, handle_a) = create_test_node(4080).await.unwrap();
+    let (mut service_b, handle_b) = create_test_node(4081).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+
+    println!("Testing peer state tracking - Connected state");
+
+    // Start both services
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect A to B
+    let dial_addr = localhost_multiaddr(4081);
+    handle_a.dial(dial_addr).await.unwrap();
+
+    // Wait for connection
+    sleep(Duration::from_secs(1)).await;
+
+    // Check peer state - should be Connected
+    let state = handle_a.get_peer_state(peer_b_id).await.unwrap();
+    assert_eq!(
+        state,
+        Some(wormfs::networking::PeerState::Connected),
+        "Peer should be in Connected state"
+    );
+
+    // Get full peer info
+    let info = handle_a.get_peer_info(peer_b_id).await.unwrap();
+    assert!(info.is_some(), "Peer info should exist");
+    let info = info.unwrap();
+    assert_eq!(info.state, wormfs::networking::PeerState::Connected);
+    assert!(info.connected_at.is_some());
+    assert!(info.disconnected_at.is_none());
+
+    println!("✓ Peer state Connected verified!");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_peer_state_disconnected() {
+    init_tracing();
+
+    // Create two nodes
+    let (mut service_a, mut handle_a) = create_test_node(4082).await.unwrap();
+    let (mut service_b, handle_b) = create_test_node(4083).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+
+    println!("Testing peer state tracking - Disconnected state");
+
+    // Start both services
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect A to B
+    let dial_addr = localhost_multiaddr(4083);
+    handle_a.dial(dial_addr).await.unwrap();
+
+    // Wait for connection
+    let connection_timeout = Duration::from_secs(5);
+    wait_for_connection_event(&mut handle_a, peer_b_id, connection_timeout)
+        .await
+        .unwrap();
+
+    // Verify Connected state
+    let state = handle_a.get_peer_state(peer_b_id).await.unwrap();
+    assert_eq!(state, Some(wormfs::networking::PeerState::Connected));
+
+    // Disconnect
+    handle_a.disconnect(peer_b_id).await.unwrap();
+
+    // Wait for disconnection
+    sleep(Duration::from_secs(1)).await;
+
+    // Check peer state - should be Disconnected
+    let state = handle_a.get_peer_state(peer_b_id).await.unwrap();
+    assert_eq!(
+        state,
+        Some(wormfs::networking::PeerState::Disconnected),
+        "Peer should be in Disconnected state"
+    );
+
+    // Get full peer info
+    let info = handle_a.get_peer_info(peer_b_id).await.unwrap();
+    assert!(
+        info.is_some(),
+        "Peer info should still exist after disconnect"
+    );
+    let info = info.unwrap();
+    assert_eq!(info.state, wormfs::networking::PeerState::Disconnected);
+    assert!(info.disconnected_at.is_some());
+
+    println!("✓ Peer state Disconnected verified!");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_peer_state_query_api() {
+    init_tracing();
+
+    // Create nodes
+    let (mut service_a, handle_a) = create_test_node(4084).await.unwrap();
+    let (mut service_b, handle_b) = create_test_node(4085).await.unwrap();
+    let (mut service_c, handle_c) = create_test_node(4086).await.unwrap();
+
+    let peer_b_id = handle_b.local_peer_id();
+    let peer_c_id = handle_c.local_peer_id();
+
+    println!("Testing peer state query API");
+
+    // Start all services
+    let service_a_handle = tokio::spawn(async move { service_a.run().await });
+    let service_b_handle = tokio::spawn(async move { service_b.run().await });
+    let service_c_handle = tokio::spawn(async move { service_c.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect A to B and C
+    handle_a.dial(localhost_multiaddr(4085)).await.unwrap();
+    handle_a.dial(localhost_multiaddr(4086)).await.unwrap();
+
+    // Wait for connections
+    sleep(Duration::from_secs(1)).await;
+
+    // List peers by state - should have 2 Connected
+    let connected = handle_a
+        .list_peers_by_state(wormfs::networking::PeerState::Connected)
+        .await
+        .unwrap();
+    assert_eq!(connected.len(), 2, "Should have 2 connected peers");
+    assert!(connected.contains(&peer_b_id));
+    assert!(connected.contains(&peer_c_id));
+
+    // Disconnect from B
+    handle_a.disconnect(peer_b_id).await.unwrap();
+    sleep(Duration::from_secs(1)).await;
+
+    // Now should have 1 Connected, 1 Disconnected
+    let connected = handle_a
+        .list_peers_by_state(wormfs::networking::PeerState::Connected)
+        .await
+        .unwrap();
+    assert_eq!(connected.len(), 1, "Should have 1 connected peer");
+    assert!(connected.contains(&peer_c_id));
+
+    let disconnected = handle_a
+        .list_peers_by_state(wormfs::networking::PeerState::Disconnected)
+        .await
+        .unwrap();
+    assert_eq!(disconnected.len(), 1, "Should have 1 disconnected peer");
+    assert!(disconnected.contains(&peer_b_id));
+
+    println!("✓ Peer state query API verified!");
+
+    // Clean shutdown
+    handle_a.shutdown().unwrap();
+    handle_b.shutdown().unwrap();
+    handle_c.shutdown().unwrap();
+
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_a_handle),
+        timeout(Duration::from_secs(5), service_b_handle),
+        timeout(Duration::from_secs(5), service_c_handle)
+    );
+}
+
 // ========== Phase 2A.2 Tests (continued) ==========
 
 #[tokio::test]
