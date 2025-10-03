@@ -106,7 +106,7 @@ By breaking this into smaller phases, we achieve:
 
 ---
 
-### **Phase 2A.3: Ping/Heartbeat Protocol (2-3 days)**
+### **Phase 2A.3: Ping/Heartbeat Protocol (2-3 days)** COMPLETED
 **Goal:** Add basic liveness detection using libp2p's ping behavior
 
 **Context:** Integrate the first libp2p behavior to enable heartbeat monitoring. This provides the foundation for failure detection.
