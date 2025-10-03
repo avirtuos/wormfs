@@ -184,7 +184,7 @@ By breaking this into smaller phases, we achieve:
 
 ---
 
-### **Phase 2A.5: Basic Peer Authentication (2-3 days)**
+### **Phase 2A.5: Basic Peer Authentication (2-3 days)** COMPLETED
 **Goal:** Implement allowlist-based peer authentication
 
 **Context:** Add security by controlling which peers can connect. Start with simple allowlist approach before more sophisticated authentication.
@@ -194,7 +194,7 @@ By breaking this into smaller phases, we achieve:
 - Check peer ID against allowlist on connection
 - Disconnect unauthorized peers immediately
 - Log authentication failures with reasons
-- Support for "allow all" mode (empty allowlist)
+- Support for "learn" mode (empty allowlist)
 - Graceful handling of authentication edge cases
 
 **Success Criteria:**
