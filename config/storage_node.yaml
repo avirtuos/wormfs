@@ -7,6 +7,11 @@ node_id: "550e8400-e29b-41d4-a716-446655440000"
 # Path to the SQLite metadata database
 metadata_db_path: "data/metadata.db"
 
+# Networking configuration
+networking:
+  # Address to listen on for libp2p connections
+  listen_address: "/ip4/0.0.0.0/tcp/4001"
+
 # Storage configuration
 storage_config:
   # OPTION 1: Single disk mode (backward compatibility)
