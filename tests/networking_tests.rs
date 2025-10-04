@@ -29,6 +29,7 @@ async fn test_service_creation_and_startup() {
         bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig::default(),
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     // Test service creation
@@ -67,6 +68,7 @@ async fn test_invalid_listen_address() {
         bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig::default(),
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service, _handle) = NetworkService::new(config.clone()).unwrap();
@@ -800,6 +802,7 @@ async fn test_disabled_mode() {
             mode: AuthenticationMode::Disabled,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let config_b = wormfs::networking::NetworkConfig {
@@ -811,6 +814,7 @@ async fn test_disabled_mode() {
             mode: AuthenticationMode::Disabled,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_a, mut handle_a) =
@@ -865,6 +869,7 @@ async fn test_learn_mode_new_peer() {
             mode: AuthenticationMode::Learn,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let config_b = wormfs::networking::NetworkConfig {
@@ -876,6 +881,7 @@ async fn test_learn_mode_new_peer() {
             mode: AuthenticationMode::Learn,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_a, mut handle_a) =
@@ -930,6 +936,7 @@ async fn test_learn_mode_file_persistence() {
             mode: AuthenticationMode::Learn,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let config_b = wormfs::networking::NetworkConfig {
@@ -941,6 +948,7 @@ async fn test_learn_mode_file_persistence() {
             mode: AuthenticationMode::Learn,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_a, mut handle_a) =
@@ -1006,6 +1014,7 @@ async fn test_enforce_mode_allowed_peer() {
             mode: AuthenticationMode::Learn,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let config_b = wormfs::networking::NetworkConfig {
@@ -1017,6 +1026,7 @@ async fn test_enforce_mode_allowed_peer() {
             mode: AuthenticationMode::Learn,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_learn, mut handle_learn) =
@@ -1056,6 +1066,7 @@ async fn test_enforce_mode_allowed_peer() {
             mode: AuthenticationMode::Enforce,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_enforce, mut handle_enforce) =
@@ -1107,6 +1118,7 @@ async fn test_enforce_mode_unknown_peer() {
             mode: AuthenticationMode::Enforce,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let config_b = wormfs::networking::NetworkConfig {
@@ -1118,6 +1130,7 @@ async fn test_enforce_mode_unknown_peer() {
             mode: AuthenticationMode::Enforce,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_a, mut handle_a) =
@@ -1188,6 +1201,7 @@ async fn test_manual_peer_addition() {
             mode: AuthenticationMode::Disabled,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_b, handle_b) =
@@ -1213,6 +1227,7 @@ async fn test_manual_peer_addition() {
             mode: AuthenticationMode::Enforce,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_a, mut handle_a) =
@@ -1259,6 +1274,7 @@ async fn test_mode_transition_learn_to_enforce() {
             mode: AuthenticationMode::Learn,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let config_b = wormfs::networking::NetworkConfig {
@@ -1270,6 +1286,7 @@ async fn test_mode_transition_learn_to_enforce() {
             mode: AuthenticationMode::Disabled,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_learn, mut handle_learn) =
@@ -1309,6 +1326,7 @@ async fn test_mode_transition_learn_to_enforce() {
             mode: AuthenticationMode::Enforce,
             peers_file: peers_file.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_enforce, mut handle_enforce) =
@@ -1360,6 +1378,7 @@ async fn test_learn_mode_ip_mismatch_rejection() {
             mode: AuthenticationMode::Disabled,
             peers_file: peers_file_b.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_b, handle_b) =
@@ -1384,6 +1403,7 @@ async fn test_learn_mode_ip_mismatch_rejection() {
             mode: AuthenticationMode::Learn,
             peers_file: peers_file_a.to_str().unwrap().to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_a, mut handle_a) =
@@ -1496,6 +1516,7 @@ async fn test_bootstrap_peers_auto_dial() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_main, handle_main) =
@@ -1560,6 +1581,7 @@ async fn test_bootstrap_peers_with_invalid_addresses() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_main, handle_main) =
@@ -1619,6 +1641,7 @@ async fn test_bootstrap_peer_tracking() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_main, handle_main) =
@@ -1672,6 +1695,7 @@ async fn test_peer_unresponsive_detection() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let config_b = NetworkConfig {
@@ -1683,6 +1707,7 @@ async fn test_peer_unresponsive_detection() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_a, mut handle_a) =
@@ -1794,6 +1819,7 @@ async fn test_peer_unresponsive_recovery() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let config_b = NetworkConfig {
@@ -1805,6 +1831,7 @@ async fn test_peer_unresponsive_recovery() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_a, mut handle_a) =
@@ -1942,6 +1969,7 @@ async fn test_consecutive_failures_tracking() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let config_b = NetworkConfig {
@@ -1953,6 +1981,7 @@ async fn test_consecutive_failures_tracking() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service_a, mut handle_a) =
@@ -2038,6 +2067,7 @@ async fn test_multiple_unresponsive_peers() {
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     // Create 3 target nodes
@@ -2063,6 +2093,7 @@ async fn test_multiple_unresponsive_peers() {
                 mode: wormfs::networking::AuthenticationMode::Disabled,
                 peers_file: "peers.json".to_string(),
             },
+            reconnection: wormfs::networking::ReconnectionConfig::default(),
         };
 
         let (mut service, handle) =

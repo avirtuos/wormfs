@@ -121,6 +121,50 @@ impl Default for PingConfig {
     }
 }
 
+/// Configuration for reconnection behavior
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconnectionConfig {
+    /// Whether reconnection is enabled
+    #[serde(default = "default_reconnection_enabled")]
+    pub enabled: bool,
+    /// Initial backoff duration in seconds
+    #[serde(default = "default_initial_backoff")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff duration in seconds
+    #[serde(default = "default_max_backoff")]
+    pub max_backoff_secs: u64,
+    /// Backoff multiplier (exponential backoff)
+    #[serde(default = "default_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+}
+
+fn default_reconnection_enabled() -> bool {
+    true
+}
+
+fn default_initial_backoff() -> u64 {
+    5
+}
+
+fn default_max_backoff() -> u64 {
+    300
+}
+
+fn default_backoff_multiplier() -> f64 {
+    2.0
+}
+
+impl Default for ReconnectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_reconnection_enabled(),
+            initial_backoff_secs: default_initial_backoff(),
+            max_backoff_secs: default_max_backoff(),
+            backoff_multiplier: default_backoff_multiplier(),
+        }
+    }
+}
+
 /// Bootstrap peer address in format: peer_id@multiaddr
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapPeer {
@@ -174,6 +218,9 @@ pub struct NetworkConfig {
     /// Authentication configuration
     #[serde(default)]
     pub authentication: AuthenticationConfig,
+    /// Reconnection configuration
+    #[serde(default)]
+    pub reconnection: ReconnectionConfig,
 }
 
 impl Default for NetworkConfig {
@@ -184,6 +231,7 @@ impl Default for NetworkConfig {
             bootstrap_peers: Vec::new(),
             ping: PingConfig::default(),
             authentication: AuthenticationConfig::default(),
+            reconnection: ReconnectionConfig::default(),
         }
     }
 }
@@ -280,6 +328,14 @@ pub struct PeerInfo {
     pub connected_at: Option<Instant>,
     /// When the peer disconnected (if currently disconnected)
     pub disconnected_at: Option<Instant>,
+    /// Last successful multiaddr for this peer
+    pub last_multiaddr: Option<Multiaddr>,
+    /// Number of reconnection attempts
+    pub retry_count: u32,
+    /// Next scheduled reconnection time
+    pub next_retry_time: Option<Instant>,
+    /// Current backoff duration
+    pub current_backoff: StdDuration,
 }
 
 impl PeerInfo {
@@ -292,6 +348,10 @@ impl PeerInfo {
             last_seen: Instant::now(),
             connected_at: Some(Instant::now()),
             disconnected_at: None,
+            last_multiaddr: None,
+            retry_count: 0,
+            next_retry_time: None,
+            current_backoff: StdDuration::from_secs(5), // Default initial backoff
         }
     }
 
@@ -317,6 +377,13 @@ impl PeerInfo {
                 }
             }
         }
+    }
+
+    /// Reset reconnection state after successful connection
+    fn reset_reconnection(&mut self, initial_backoff_secs: u64) {
+        self.retry_count = 0;
+        self.next_retry_time = None;
+        self.current_backoff = StdDuration::from_secs(initial_backoff_secs);
     }
 }
 
@@ -396,6 +463,14 @@ fn extract_ip_from_endpoint(endpoint: &ConnectedPoint) -> Option<IpAddr> {
     None
 }
 
+/// Extract Multiaddr from a ConnectedPoint
+fn extract_multiaddr_from_endpoint(endpoint: &ConnectedPoint) -> Multiaddr {
+    match endpoint {
+        ConnectedPoint::Dialer { address, .. } => address.clone(),
+        ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr.clone(),
+    }
+}
+
 /// Custom network behaviour with ping support
 #[derive(NetworkBehaviour)]
 pub struct WormFSBehaviour {
@@ -438,6 +513,10 @@ pub struct NetworkService {
     peers_file_path: PathBuf,
     /// Bootstrap peers (peers to connect to on startup)
     bootstrap_peers: HashSet<PeerId>,
+    /// Reconnection configuration
+    reconnection_config: ReconnectionConfig,
+    /// Peers that should be reconnected to when disconnected
+    reconnectable_peers: HashSet<PeerId>,
 }
 
 impl NetworkService {
@@ -493,6 +572,8 @@ impl NetworkService {
             known_peers,
             peers_file_path,
             bootstrap_peers: HashSet::new(),
+            reconnection_config: config.reconnection,
+            reconnectable_peers: HashSet::new(),
         };
 
         let handle = NetworkServiceHandle {
@@ -555,6 +636,9 @@ impl NetworkService {
 
     /// Run the main event loop
     pub async fn run(&mut self) -> Result<()> {
+        // Create a timer for checking reconnections every second
+        let mut reconnection_timer = tokio::time::interval(StdDuration::from_secs(1));
+
         loop {
             tokio::select! {
                 // Handle swarm events
@@ -575,6 +659,12 @@ impl NetworkService {
                             warn!("Command channel closed, shutting down");
                             break;
                         }
+                    }
+                }
+                // Check for pending reconnections
+                _ = reconnection_timer.tick() => {
+                    if self.reconnection_config.enabled {
+                        self.check_reconnections().await;
                     }
                 }
             }
@@ -609,10 +699,37 @@ impl NetworkService {
                 }
 
                 self.connected_peers.insert(peer_id);
-                // Initialize peer info with Connected state
-                let mut info = PeerInfo::new(peer_id);
-                info.set_state(PeerState::Connected);
-                self.peer_info.insert(peer_id, info);
+
+                // Store the multiaddr for reconnection
+                let multiaddr = extract_multiaddr_from_endpoint(&endpoint);
+
+                // Mark peer as reconnectable (bootstrap peers, known peers, or successfully connected peers)
+                let is_reconnectable = self.bootstrap_peers.contains(&peer_id)
+                    || self.known_peers.contains_key(&peer_id);
+
+                if is_reconnectable || self.reconnection_config.enabled {
+                    self.reconnectable_peers.insert(peer_id);
+                }
+
+                // Initialize or update peer info with Connected state
+                if let Some(info) = self.peer_info.get_mut(&peer_id) {
+                    info.set_state(PeerState::Connected);
+                    info.last_multiaddr = Some(multiaddr);
+                    // Reset reconnection state on successful connection
+                    info.reset_reconnection(self.reconnection_config.initial_backoff_secs);
+                    info!(
+                        "Reconnected to peer {} (retry count was: {})",
+                        peer_id, info.retry_count
+                    );
+                } else {
+                    let mut info = PeerInfo::new(peer_id);
+                    info.set_state(PeerState::Connected);
+                    info.last_multiaddr = Some(multiaddr);
+                    info.current_backoff =
+                        StdDuration::from_secs(self.reconnection_config.initial_backoff_secs);
+                    self.peer_info.insert(peer_id, info);
+                }
+
                 let _ = self
                     .event_tx
                     .send(NetworkEvent::ConnectionEstablished { peer_id });
@@ -620,10 +737,19 @@ impl NetworkService {
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 info!("Connection closed with peer: {}", peer_id);
                 self.connected_peers.remove(&peer_id);
-                // Update peer state to Disconnected
+
+                // Update peer state to Disconnected and schedule reconnection if needed
                 if let Some(info) = self.peer_info.get_mut(&peer_id) {
                     info.set_state(PeerState::Disconnected);
+
+                    // Schedule reconnection if this is a reconnectable peer and reconnection is enabled
+                    if self.reconnection_config.enabled
+                        && self.reconnectable_peers.contains(&peer_id)
+                    {
+                        self.schedule_reconnection(peer_id);
+                    }
                 }
+
                 let _ = self
                     .event_tx
                     .send(NetworkEvent::ConnectionClosed { peer_id });
@@ -897,6 +1023,73 @@ impl NetworkService {
         }
     }
 
+    /// Schedule a reconnection attempt for a disconnected peer
+    fn schedule_reconnection(&mut self, peer_id: PeerId) {
+        if let Some(info) = self.peer_info.get_mut(&peer_id) {
+            // Calculate next retry time with exponential backoff
+            let backoff_secs = (info.current_backoff.as_secs() as f64
+                * self.reconnection_config.backoff_multiplier)
+                as u64;
+            let backoff_secs = backoff_secs.min(self.reconnection_config.max_backoff_secs);
+
+            info.current_backoff = StdDuration::from_secs(backoff_secs);
+            info.next_retry_time = Some(Instant::now() + info.current_backoff);
+            info.retry_count += 1;
+
+            info!(
+                "Scheduled reconnection to peer {} in {:?} (attempt #{}, backoff: {:?})",
+                peer_id, info.current_backoff, info.retry_count, info.current_backoff
+            );
+        }
+    }
+
+    /// Check for peers that need reconnection and attempt to reconnect
+    async fn check_reconnections(&mut self) {
+        let now = Instant::now();
+        let mut peers_to_reconnect = Vec::new();
+
+        // Find peers that need reconnection
+        for (peer_id, info) in &self.peer_info {
+            if let Some(next_retry_time) = info.next_retry_time {
+                if now >= next_retry_time && info.state == PeerState::Disconnected {
+                    if let Some(multiaddr) = &info.last_multiaddr {
+                        peers_to_reconnect.push((*peer_id, multiaddr.clone()));
+                    }
+                }
+            }
+        }
+
+        // Attempt reconnections
+        for (peer_id, multiaddr) in peers_to_reconnect {
+            self.attempt_reconnection(peer_id, multiaddr).await;
+        }
+    }
+
+    /// Attempt to reconnect to a peer
+    async fn attempt_reconnection(&mut self, peer_id: PeerId, multiaddr: Multiaddr) {
+        if let Some(info) = self.peer_info.get_mut(&peer_id) {
+            info!(
+                "Attempting reconnection to peer {} at {} (attempt #{})",
+                peer_id, multiaddr, info.retry_count
+            );
+
+            // Clear the next_retry_time to prevent repeated attempts
+            info.next_retry_time = None;
+
+            // Attempt to dial the peer
+            match self.swarm.dial(multiaddr.clone()) {
+                Ok(_) => {
+                    debug!("Reconnection dial initiated for peer {}", peer_id);
+                }
+                Err(e) => {
+                    warn!("Failed to dial peer {} during reconnection: {}", peer_id, e);
+                    // Reschedule for next attempt
+                    self.schedule_reconnection(peer_id);
+                }
+            }
+        }
+    }
+
     /// Check authentication in Enforce mode
     async fn check_enforce_mode(&mut self, peer_id: PeerId, endpoint: &ConnectedPoint) -> bool {
         let peer_ip = match extract_ip_from_endpoint(endpoint) {
@@ -1063,6 +1256,7 @@ mod tests {
             bootstrap_peers: Vec::new(),
             ping: PingConfig::default(),
             authentication: AuthenticationConfig::default(),
+            reconnection: ReconnectionConfig::default(),
         };
         let (mut service, _handle) = NetworkService::new(config.clone()).unwrap();
         let result = service.start(config).await;

@@ -30,6 +30,17 @@ networking:
     mode: enforce
     # Path to peers file (relative to config file or absolute)
     peers_file: "data/peers.json"
+  
+  # Reconnection configuration (Phase 2A.8)
+  reconnection:
+    # Enable automatic reconnection to disconnected peers
+    enabled: true
+    # Initial backoff duration in seconds (default: 5)
+    initial_backoff_secs: 5
+    # Maximum backoff duration in seconds (default: 300 = 5 minutes)
+    max_backoff_secs: 300
+    # Backoff multiplier for exponential backoff (default: 2.0)
+    backoff_multiplier: 2.0
 
 # Storage configuration
 storage_config:
