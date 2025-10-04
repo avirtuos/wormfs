@@ -347,7 +347,7 @@ By breaking this into smaller phases, we achieve:
 
 ---
 
-### **Phase 2A.9: PeerManager Integration (2-3 days)**
+### **Phase 2A.9: PeerManager Integration (2-3 days)** COMPLETED
 **Goal:** Separate peer lifecycle management from network layer
 
 **Context:** Clean up the architecture by separating concerns. NetworkService handles libp2p events, PeerManager handles peer lifecycle.
@@ -389,7 +389,7 @@ By breaking this into smaller phases, we achieve:
 
 ---
 
-### **Phase 2A.10: Multi-Node Integration Test (2-3 days)**
+### **Phase 2A.10: Multi-Node Integration Test (2-3 days)** COMPLETED
 **Goal:** Test all Phase 2A functionality with multiple nodes
 
 **Context:** Validate the complete networking system under realistic conditions with multiple peers and various failure scenarios.

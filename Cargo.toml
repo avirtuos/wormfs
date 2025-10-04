@@ -74,8 +74,9 @@ tower-http = { version = "0.5", features = ["cors", "fs"] }
 
 [dev-dependencies]
 tempfile = "3.8"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 proptest = "1.4"
+rand = "0.8"
 
 [build-dependencies]
 tonic-build = "0.10"
@@ -90,6 +91,10 @@ harness = false
 
 [[bench]]
 name = "erasure_bench"
+harness = false
+
+[[bench]]
+name = "networking_bench"
 harness = false
 
 [profile.release]
