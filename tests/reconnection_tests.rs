@@ -4,10 +4,15 @@
 
 mod test_helpers;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use test_helpers::*;
+use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout};
-use wormfs::networking::{NetworkConfig, PingConfig, ReconnectionConfig};
+use wormfs::networking::{AuthenticationMode, NetworkConfig, PingConfig, ReconnectionConfig};
+use wormfs::peer_authorizer::PeerAuthorizer;
 
 /// Initialize tracing for tests
 fn init_tracing() {
@@ -15,6 +20,16 @@ fn init_tracing() {
         .with_env_filter("debug")
         .with_test_writer()
         .try_init();
+}
+
+/// Create a test authorizer for integration tests
+fn create_test_authorizer() -> PeerAuthorizer {
+    let known_peers = Arc::new(RwLock::new(HashMap::new()));
+    PeerAuthorizer::new(
+        AuthenticationMode::Disabled,
+        known_peers,
+        PathBuf::from("test_peers.json"),
+    )
 }
 
 #[tokio::test]
@@ -42,20 +57,24 @@ async fn test_basic_reconnection_after_disconnect() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), create_test_authorizer())
+            .unwrap();
     service_a.start(config_a).await.unwrap();
 
-    let (mut service_b, handle_b) = wormfs::networking::NetworkService::new(NetworkConfig {
-        listen_address: "/ip4/127.0.0.1/tcp/8001".to_string(),
-        initial_peers: Vec::new(),
-        bootstrap_peers: Vec::new(),
-        ping: PingConfig::default(),
-        authentication: wormfs::networking::AuthenticationConfig {
-            mode: wormfs::networking::AuthenticationMode::Disabled,
-            peers_file: "peers.json".to_string(),
+    let (mut service_b, handle_b) = wormfs::networking::NetworkService::new(
+        NetworkConfig {
+            listen_address: "/ip4/127.0.0.1/tcp/8001".to_string(),
+            initial_peers: Vec::new(),
+            bootstrap_peers: Vec::new(),
+            ping: PingConfig::default(),
+            authentication: wormfs::networking::AuthenticationConfig {
+                mode: wormfs::networking::AuthenticationMode::Disabled,
+                peers_file: "peers.json".to_string(),
+            },
+            reconnection: reconnection_config,
         },
-        reconnection: reconnection_config,
-    })
+        create_test_authorizer(),
+    )
     .unwrap();
     service_b
         .start(NetworkConfig {
@@ -117,17 +136,20 @@ async fn test_reconnection_with_bootstrap_peer() {
     init_tracing();
 
     // Create node B first
-    let (mut service_b, handle_b) = wormfs::networking::NetworkService::new(NetworkConfig {
-        listen_address: "/ip4/127.0.0.1/tcp/8101".to_string(),
-        initial_peers: Vec::new(),
-        bootstrap_peers: Vec::new(),
-        ping: PingConfig::default(),
-        authentication: wormfs::networking::AuthenticationConfig {
-            mode: wormfs::networking::AuthenticationMode::Disabled,
-            peers_file: "peers.json".to_string(),
+    let (mut service_b, handle_b) = wormfs::networking::NetworkService::new(
+        NetworkConfig {
+            listen_address: "/ip4/127.0.0.1/tcp/8101".to_string(),
+            initial_peers: Vec::new(),
+            bootstrap_peers: Vec::new(),
+            ping: PingConfig::default(),
+            authentication: wormfs::networking::AuthenticationConfig {
+                mode: wormfs::networking::AuthenticationMode::Disabled,
+                peers_file: "peers.json".to_string(),
+            },
+            reconnection: ReconnectionConfig::default(),
         },
-        reconnection: ReconnectionConfig::default(),
-    })
+        create_test_authorizer(),
+    )
     .unwrap();
 
     service_b
@@ -171,7 +193,8 @@ async fn test_reconnection_with_bootstrap_peer() {
     };
 
     let (mut service_a, handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), create_test_authorizer())
+            .unwrap();
     service_a.start(config_a).await.unwrap();
     let service_a_handle = tokio::spawn(async move { service_a.run().await });
 
@@ -219,7 +242,8 @@ async fn test_exponential_backoff() {
         reconnection: reconnection_config,
     };
 
-    let (mut service, handle) = wormfs::networking::NetworkService::new(config.clone()).unwrap();
+    let (mut service, handle) =
+        wormfs::networking::NetworkService::new(config.clone(), create_test_authorizer()).unwrap();
     service.start(config).await.unwrap();
     let service_handle = tokio::spawn(async move { service.run().await });
 

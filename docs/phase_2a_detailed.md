@@ -356,6 +356,9 @@ By breaking this into smaller phases, we achieve:
 - `PeerManager` component separate from NetworkService
 - Channel-based communication between components
 - PeerManager handles reconnection logic
+- PeerManager handles the list of bootstrap, known, and learned peers
+- PeerManager is responsible for loading and maintaining the peer file
+- Create a PeerAuthorizer that is created by PeerManager for use by NetworkService in authenticating peers.
 - NetworkService focuses on swarm events
 - Clean separation of concerns
 - Proper error handling between components
