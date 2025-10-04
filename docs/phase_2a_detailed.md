@@ -224,7 +224,7 @@ By breaking this into smaller phases, we achieve:
 
 ---
 
-### **Phase 2A.6: Peer Discovery from Config (2-3 days)**
+### **Phase 2A.6: Peer Discovery from Config (2-3 days)** COMPLETED
 **Goal:** Connect to bootstrap peers from configuration
 
 **Context:** Enable automatic connection to known peers on startup. This is essential for forming the initial network topology.
