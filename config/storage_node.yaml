@@ -12,6 +12,15 @@ networking:
   # Address to listen on for libp2p connections
   listen_address: "/ip4/0.0.0.0/tcp/4001"
   
+  # Bootstrap peers to connect to on startup (Phase 2A.6)
+  # Format: peer_id@multiaddr
+  # Example:
+  # bootstrap_peers:
+  #   - "12D3KooWABC...@/ip4/192.168.1.100/tcp/4001"
+  #   - "12D3KooWDEF...@/ip4/192.168.1.101/tcp/4001"
+  #   - "12D3KooWGHI...@/ip4/192.168.1.102/tcp/4001"
+  bootstrap_peers: []
+  
   # Peer authentication configuration (Phase 2A.5)
   authentication:
     # Mode: disabled (testing only), learn (auto-discover), enforce (production)

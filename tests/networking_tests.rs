@@ -26,6 +26,7 @@ async fn test_service_creation_and_startup() {
     let config = NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/4010".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig::default(),
     };
@@ -63,6 +64,7 @@ async fn test_invalid_listen_address() {
     let config = NetworkConfig {
         listen_address: "invalid-address".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig::default(),
     };
@@ -792,6 +794,7 @@ async fn test_disabled_mode() {
     let config_a = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5000".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Disabled,
@@ -802,6 +805,7 @@ async fn test_disabled_mode() {
     let config_b = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5001".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Disabled,
@@ -855,6 +859,7 @@ async fn test_learn_mode_new_peer() {
     let config_a = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5010".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Learn,
@@ -865,6 +870,7 @@ async fn test_learn_mode_new_peer() {
     let config_b = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5011".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Learn,
@@ -918,6 +924,7 @@ async fn test_learn_mode_file_persistence() {
     let config_a = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5020".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Learn,
@@ -928,6 +935,7 @@ async fn test_learn_mode_file_persistence() {
     let config_b = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5021".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Learn,
@@ -992,6 +1000,7 @@ async fn test_enforce_mode_allowed_peer() {
     let config_learn = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5030".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Learn,
@@ -1002,6 +1011,7 @@ async fn test_enforce_mode_allowed_peer() {
     let config_b = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5031".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Learn,
@@ -1040,6 +1050,7 @@ async fn test_enforce_mode_allowed_peer() {
     let config_enforce = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5032".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Enforce,
@@ -1090,6 +1101,7 @@ async fn test_enforce_mode_unknown_peer() {
     let config_a = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5040".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Enforce,
@@ -1100,6 +1112,7 @@ async fn test_enforce_mode_unknown_peer() {
     let config_b = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5041".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Enforce,
@@ -1169,6 +1182,7 @@ async fn test_manual_peer_addition() {
     let config_b = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5051".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Disabled,
@@ -1193,6 +1207,7 @@ async fn test_manual_peer_addition() {
     let config_a = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5050".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Enforce,
@@ -1238,6 +1253,7 @@ async fn test_mode_transition_learn_to_enforce() {
     let config_learn = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5060".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Learn,
@@ -1248,6 +1264,7 @@ async fn test_mode_transition_learn_to_enforce() {
     let config_b = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5061".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Disabled,
@@ -1286,6 +1303,7 @@ async fn test_mode_transition_learn_to_enforce() {
     let config_enforce = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5062".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Enforce,
@@ -1336,6 +1354,7 @@ async fn test_learn_mode_ip_mismatch_rejection() {
     let config_b = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5071".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Disabled,
@@ -1359,6 +1378,7 @@ async fn test_learn_mode_ip_mismatch_rejection() {
     let config_a = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5070".to_string(),
         initial_peers: Vec::new(),
+        bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
             mode: AuthenticationMode::Learn,
@@ -1408,5 +1428,223 @@ async fn test_learn_mode_ip_mismatch_rejection() {
     let _ = tokio::join!(
         timeout(Duration::from_secs(5), service_a_handle),
         timeout(Duration::from_secs(5), service_b_handle)
+    );
+}
+
+// ========== Phase 2A.6 Tests (Bootstrap Peer Discovery) ==========
+
+#[tokio::test]
+async fn test_bootstrap_peer_parsing() {
+    init_tracing();
+
+    // Test valid bootstrap peer format
+    let valid = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN@/ip4/192.168.1.100/tcp/4001";
+    let result = wormfs::networking::BootstrapPeer::parse(valid);
+    assert!(result.is_ok(), "Valid format should parse correctly");
+
+    // Test invalid format - missing @
+    let invalid_no_at =
+        "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/ip4/192.168.1.100/tcp/4001";
+    let result = wormfs::networking::BootstrapPeer::parse(invalid_no_at);
+    assert!(result.is_err(), "Should reject format without @");
+
+    // Test invalid format - bad peer ID
+    let invalid_peer_id = "invalid_peer_id@/ip4/192.168.1.100/tcp/4001";
+    let result = wormfs::networking::BootstrapPeer::parse(invalid_peer_id);
+    assert!(result.is_err(), "Should reject invalid peer ID");
+
+    // Test invalid format - bad multiaddr
+    let invalid_multiaddr = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN@not-a-multiaddr";
+    let result = wormfs::networking::BootstrapPeer::parse(invalid_multiaddr);
+    assert!(result.is_err(), "Should reject invalid multiaddr");
+
+    println!("✓ Bootstrap peer parsing tests passed");
+}
+
+#[tokio::test]
+async fn test_bootstrap_peers_auto_dial() {
+    init_tracing();
+
+    // Create 3 nodes - one main node and two bootstrap targets
+    let (mut service_b1, handle_b1) = create_test_node(6001).await.unwrap();
+    let (mut service_b2, handle_b2) = create_test_node(6002).await.unwrap();
+
+    let peer_b1_id = handle_b1.local_peer_id();
+    let peer_b2_id = handle_b2.local_peer_id();
+
+    println!("Bootstrap peer 1: {}", peer_b1_id);
+    println!("Bootstrap peer 2: {}", peer_b2_id);
+
+    // Start bootstrap nodes
+    let service_b1_handle = tokio::spawn(async move { service_b1.run().await });
+    let service_b2_handle = tokio::spawn(async move { service_b2.run().await });
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Create main node with bootstrap_peers configured
+    let bootstrap_peers = vec![
+        format!("{}@/ip4/127.0.0.1/tcp/6001", peer_b1_id),
+        format!("{}@/ip4/127.0.0.1/tcp/6002", peer_b2_id),
+    ];
+
+    let config_main = NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/6000".to_string(),
+        initial_peers: Vec::new(),
+        bootstrap_peers,
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: wormfs::networking::AuthenticationMode::Disabled,
+            peers_file: "peers.json".to_string(),
+        },
+    };
+
+    let (mut service_main, handle_main) =
+        wormfs::networking::NetworkService::new(config_main.clone()).unwrap();
+    service_main.start(config_main).await.unwrap();
+
+    let service_main_handle = tokio::spawn(async move { service_main.run().await });
+
+    // Wait for automatic connections to bootstrap peers
+    println!("Waiting for automatic bootstrap connections...");
+    sleep(Duration::from_secs(3)).await;
+
+    // Verify both bootstrap peers are connected
+    let peers = handle_main.list_connected_peers().await.unwrap();
+    assert!(
+        peers.contains(&peer_b1_id),
+        "Should auto-connect to bootstrap peer 1"
+    );
+    assert!(
+        peers.contains(&peer_b2_id),
+        "Should auto-connect to bootstrap peer 2"
+    );
+
+    println!("✓ Bootstrap peers auto-dial test successful!");
+
+    // Clean shutdown
+    handle_main.shutdown().unwrap();
+    handle_b1.shutdown().unwrap();
+    handle_b2.shutdown().unwrap();
+
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_main_handle),
+        timeout(Duration::from_secs(5), service_b1_handle),
+        timeout(Duration::from_secs(5), service_b2_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_bootstrap_peers_with_invalid_addresses() {
+    init_tracing();
+
+    // Create one valid bootstrap node
+    let (mut service_b1, handle_b1) = create_test_node(6101).await.unwrap();
+    let peer_b1_id = handle_b1.local_peer_id();
+
+    let service_b1_handle = tokio::spawn(async move { service_b1.run().await });
+    sleep(Duration::from_millis(500)).await;
+
+    // Configure with mix of valid and invalid bootstrap peers
+    let bootstrap_peers = vec![
+        format!("{}@/ip4/127.0.0.1/tcp/6101", peer_b1_id), // Valid
+        "invalid_format".to_string(),                      // Invalid format
+        "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN@/ip4/127.0.0.1/tcp/9999".to_string(), // Valid format, unreachable
+    ];
+
+    let config_main = NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/6100".to_string(),
+        initial_peers: Vec::new(),
+        bootstrap_peers,
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: wormfs::networking::AuthenticationMode::Disabled,
+            peers_file: "peers.json".to_string(),
+        },
+    };
+
+    let (mut service_main, handle_main) =
+        wormfs::networking::NetworkService::new(config_main.clone()).unwrap();
+
+    // Should not crash on invalid addresses
+    let start_result = service_main.start(config_main).await;
+    assert!(
+        start_result.is_ok(),
+        "Should handle invalid addresses gracefully"
+    );
+
+    let service_main_handle = tokio::spawn(async move { service_main.run().await });
+
+    // Wait for connections
+    sleep(Duration::from_secs(2)).await;
+
+    // Should still connect to the valid bootstrap peer
+    let peers = handle_main.list_connected_peers().await.unwrap();
+    assert!(
+        peers.contains(&peer_b1_id),
+        "Should connect to valid bootstrap peer despite invalid entries"
+    );
+
+    println!("✓ Bootstrap peers with invalid addresses handled gracefully!");
+
+    // Clean shutdown
+    handle_main.shutdown().unwrap();
+    handle_b1.shutdown().unwrap();
+
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_main_handle),
+        timeout(Duration::from_secs(5), service_b1_handle)
+    );
+}
+
+#[tokio::test]
+async fn test_bootstrap_peer_tracking() {
+    init_tracing();
+
+    // Create bootstrap node
+    let (mut service_b1, handle_b1) = create_test_node(6201).await.unwrap();
+    let peer_b1_id = handle_b1.local_peer_id();
+
+    let service_b1_handle = tokio::spawn(async move { service_b1.run().await });
+    sleep(Duration::from_millis(500)).await;
+
+    // Create main node with bootstrap peer
+    let bootstrap_peers = vec![format!("{}@/ip4/127.0.0.1/tcp/6201", peer_b1_id)];
+
+    let config_main = NetworkConfig {
+        listen_address: "/ip4/127.0.0.1/tcp/6200".to_string(),
+        initial_peers: Vec::new(),
+        bootstrap_peers,
+        ping: wormfs::networking::PingConfig::default(),
+        authentication: wormfs::networking::AuthenticationConfig {
+            mode: wormfs::networking::AuthenticationMode::Disabled,
+            peers_file: "peers.json".to_string(),
+        },
+    };
+
+    let (mut service_main, handle_main) =
+        wormfs::networking::NetworkService::new(config_main.clone()).unwrap();
+    service_main.start(config_main).await.unwrap();
+
+    // Check that bootstrap peer is tracked
+    assert!(
+        service_main.is_bootstrap_peer(&peer_b1_id),
+        "Should track peer as bootstrap peer"
+    );
+
+    let bootstrap_list = service_main.get_bootstrap_peers();
+    assert_eq!(bootstrap_list.len(), 1, "Should have 1 bootstrap peer");
+    assert!(bootstrap_list.contains(&peer_b1_id));
+
+    println!("✓ Bootstrap peer tracking test successful!");
+
+    // Clean shutdown
+    handle_main.shutdown().unwrap();
+    handle_b1.shutdown().unwrap();
+
+    let service_main_handle = tokio::spawn(async move { service_main.run().await });
+
+    let _ = tokio::join!(
+        timeout(Duration::from_secs(5), service_main_handle),
+        timeout(Duration::from_secs(5), service_b1_handle)
     );
 }

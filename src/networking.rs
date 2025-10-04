@@ -15,6 +15,7 @@ use libp2p::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -120,14 +121,53 @@ impl Default for PingConfig {
     }
 }
 
+/// Bootstrap peer address in format: peer_id@multiaddr
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapPeer {
+    pub peer_id: PeerId,
+    pub multiaddr: Multiaddr,
+}
+
+impl BootstrapPeer {
+    /// Parse a bootstrap peer from the format: peer_id@multiaddr
+    pub fn parse(s: &str) -> Result<Self> {
+        let parts: Vec<&str> = s.split('@').collect();
+        if parts.len() != 2 {
+            return Err(anyhow!(
+                "Invalid bootstrap peer format '{}'. Expected: peer_id@multiaddr",
+                s
+            ));
+        }
+
+        let peer_id = parts[0]
+            .parse::<PeerId>()
+            .map_err(|e| anyhow!("Invalid peer ID '{}': {}", parts[0], e))?;
+
+        let multiaddr = parts[1]
+            .parse::<Multiaddr>()
+            .map_err(|e| anyhow!("Invalid multiaddr '{}': {}", parts[1], e))?;
+
+        Ok(Self { peer_id, multiaddr })
+    }
+}
+
+impl fmt::Display for BootstrapPeer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.peer_id, self.multiaddr)
+    }
+}
+
 /// Configuration for the networking service
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// The multiaddr to listen on (e.g., "/ip4/0.0.0.0/tcp/4001")
     pub listen_address: String,
-    /// List of peer addresses to dial on startup (optional)
+    /// List of peer addresses to dial on startup (optional, deprecated - use bootstrap_peers)
     #[serde(default)]
     pub initial_peers: Vec<String>,
+    /// Bootstrap peers to connect to on startup (format: peer_id@multiaddr)
+    #[serde(default)]
+    pub bootstrap_peers: Vec<String>,
     /// Ping/heartbeat configuration
     #[serde(default)]
     pub ping: PingConfig,
@@ -141,6 +181,7 @@ impl Default for NetworkConfig {
         Self {
             listen_address: "/ip4/0.0.0.0/tcp/4001".to_string(),
             initial_peers: Vec::new(),
+            bootstrap_peers: Vec::new(),
             ping: PingConfig::default(),
             authentication: AuthenticationConfig::default(),
         }
@@ -389,6 +430,8 @@ pub struct NetworkService {
     known_peers: HashMap<PeerId, PeerEntry>,
     /// Path to peers file
     peers_file_path: PathBuf,
+    /// Bootstrap peers (peers to connect to on startup)
+    bootstrap_peers: HashSet<PeerId>,
 }
 
 impl NetworkService {
@@ -443,6 +486,7 @@ impl NetworkService {
             authentication_config: config.authentication,
             known_peers,
             peers_file_path,
+            bootstrap_peers: HashSet::new(),
         };
 
         let handle = NetworkServiceHandle {
@@ -465,6 +509,40 @@ impl NetworkService {
         // Start listening
         self.swarm.listen_on(listen_addr.clone())?;
         info!("NetworkService listening on: {}", listen_addr);
+
+        // Parse and dial bootstrap peers
+        if !config.bootstrap_peers.is_empty() {
+            info!(
+                "Connecting to {} bootstrap peers",
+                config.bootstrap_peers.len()
+            );
+
+            for peer_str in &config.bootstrap_peers {
+                match BootstrapPeer::parse(peer_str) {
+                    Ok(bootstrap_peer) => {
+                        info!(
+                            "Dialing bootstrap peer: {} at {}",
+                            bootstrap_peer.peer_id, bootstrap_peer.multiaddr
+                        );
+
+                        // Track as bootstrap peer
+                        self.bootstrap_peers.insert(bootstrap_peer.peer_id);
+
+                        // Dial the peer
+                        if let Err(e) = self.swarm.dial(bootstrap_peer.multiaddr.clone()) {
+                            warn!(
+                                "Failed to dial bootstrap peer {} at {}: {}",
+                                bootstrap_peer.peer_id, bootstrap_peer.multiaddr, e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Invalid bootstrap peer '{}': {}", peer_str, e);
+                        // Continue with other bootstrap peers
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -694,6 +772,16 @@ impl NetworkService {
     /// Get the local peer ID
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
+    }
+
+    /// Check if a peer is a bootstrap peer
+    pub fn is_bootstrap_peer(&self, peer_id: &PeerId) -> bool {
+        self.bootstrap_peers.contains(peer_id)
+    }
+
+    /// Get all bootstrap peer IDs
+    pub fn get_bootstrap_peers(&self) -> Vec<PeerId> {
+        self.bootstrap_peers.iter().cloned().collect()
     }
 
     /// Check peer authentication based on the configured mode
@@ -939,6 +1027,7 @@ mod tests {
         let config = NetworkConfig {
             listen_address: "invalid-address".to_string(),
             initial_peers: Vec::new(),
+            bootstrap_peers: Vec::new(),
             ping: PingConfig::default(),
             authentication: AuthenticationConfig::default(),
         };
