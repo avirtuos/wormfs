@@ -199,6 +199,12 @@ pub enum NetworkEvent {
     PingSuccess { peer_id: PeerId, rtt: StdDuration },
     /// A ping failed to a peer
     PingFailure { peer_id: PeerId },
+    /// A peer has become unresponsive (consecutive failures exceeded threshold)
+    PeerUnresponsive {
+        peer_id: PeerId,
+        consecutive_failures: u32,
+        time_since_last_seen: StdDuration,
+    },
     /// Authentication failed for a peer
     AuthenticationFailed { peer_id: PeerId, reason: String },
     /// An error occurred in the network layer
@@ -653,9 +659,36 @@ impl NetworkService {
                         warn!("Ping failure to {}: {:?}", peer, err);
                         // Update failure count and possibly mark as Failed
                         if let Some(info) = self.peer_info.get_mut(&peer) {
+                            let was_failed = info.state == PeerState::Failed;
                             info.consecutive_failures += 1;
+
+                            // Check if peer has become unresponsive
                             if info.consecutive_failures >= self.ping_config.max_failures {
                                 info.set_state(PeerState::Failed);
+
+                                // Calculate time since last seen
+                                let time_since_last_seen = info.last_seen.elapsed();
+
+                                // Emit PeerUnresponsive event
+                                // This emits on initial failure and continues to emit periodically
+                                // while the peer remains unresponsive
+                                let _ = self.event_tx.send(NetworkEvent::PeerUnresponsive {
+                                    peer_id: peer,
+                                    consecutive_failures: info.consecutive_failures,
+                                    time_since_last_seen,
+                                });
+
+                                if was_failed {
+                                    debug!(
+                                        "Peer {} still unresponsive ({} consecutive failures, {:?} since last seen)",
+                                        peer, info.consecutive_failures, time_since_last_seen
+                                    );
+                                } else {
+                                    warn!(
+                                        "Peer {} became unresponsive ({} consecutive failures)",
+                                        peer, info.consecutive_failures
+                                    );
+                                }
                             }
                         }
                         let _ = self
