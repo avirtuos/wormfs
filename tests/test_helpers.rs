@@ -9,6 +9,7 @@ use tokio::time::timeout;
 use wormfs::networking::{NetworkConfig, NetworkEvent, NetworkService, NetworkServiceHandle};
 
 /// Create a test node with a specific port
+#[allow(dead_code)]
 pub async fn create_test_node(port: u16) -> Result<(NetworkService, NetworkServiceHandle)> {
     let config = NetworkConfig {
         listen_address: format!("/ip4/127.0.0.1/tcp/{}", port),
@@ -19,6 +20,7 @@ pub async fn create_test_node(port: u16) -> Result<(NetworkService, NetworkServi
             mode: wormfs::networking::AuthenticationMode::Disabled,
             peers_file: "peers.json".to_string(),
         },
+        reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
     let (mut service, handle) = NetworkService::new(config.clone())?;
@@ -88,6 +90,7 @@ pub async fn wait_for_disconnection_event(
 }
 
 /// Assert that a peer is in the connected peers list
+#[allow(dead_code)]
 pub async fn assert_peer_connected(handle: &NetworkServiceHandle, peer_id: PeerId) -> Result<()> {
     let peers = handle.list_connected_peers().await?;
     if !peers.contains(&peer_id) {
@@ -101,6 +104,7 @@ pub async fn assert_peer_connected(handle: &NetworkServiceHandle, peer_id: PeerI
 }
 
 /// Assert that a peer is NOT in the connected peers list
+#[allow(dead_code)]
 pub async fn assert_peer_disconnected(
     handle: &NetworkServiceHandle,
     peer_id: PeerId,

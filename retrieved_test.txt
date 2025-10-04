@@ -1,1 +1,0 @@
-Hello, WormFS! This is a test file for Phase 1A demonstration.
