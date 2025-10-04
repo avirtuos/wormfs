@@ -3,6 +3,7 @@
 //! This module provides the NetworkService for libp2p-based peer-to-peer networking.
 //! Phase 2A.1 provides minimal libp2p setup with TCP transport and basic connection handling.
 
+use crate::peer_authorizer::{AuthResult, PeerAuthorizer};
 use anyhow::{anyhow, Result};
 use libp2p::{
     core::{upgrade, ConnectedPoint},
@@ -16,9 +17,7 @@ use libp2p::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fs;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant, SystemTime};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
@@ -76,13 +75,6 @@ pub struct PeerEntry {
     pub last_seen: SystemTime,
     pub connection_count: u32,
     pub source: String, // "learned" or "manual"
-}
-
-/// Peers file format
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PeersFileFormat {
-    version: String,
-    peers: Vec<PeerEntry>,
 }
 
 /// Configuration for ping/heartbeat behavior
@@ -255,6 +247,8 @@ pub enum NetworkEvent {
     },
     /// Authentication failed for a peer
     AuthenticationFailed { peer_id: PeerId, reason: String },
+    /// A new peer was learned (Learn mode only)
+    PeerLearned { peer_id: PeerId, entry: PeerEntry },
     /// An error occurred in the network layer
     Error { message: String },
 }
@@ -339,7 +333,7 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    fn new(peer_id: PeerId) -> Self {
+    pub fn new(peer_id: PeerId) -> Self {
         Self {
             peer_id,
             state: PeerState::Connected,
@@ -356,7 +350,7 @@ impl PeerInfo {
     }
 
     /// Update state with logging
-    fn set_state(&mut self, new_state: PeerState) {
+    pub fn set_state(&mut self, new_state: PeerState) {
         if self.state != new_state {
             info!(
                 "Peer {} state transition: {:?} -> {:?}",
@@ -380,68 +374,11 @@ impl PeerInfo {
     }
 
     /// Reset reconnection state after successful connection
-    fn reset_reconnection(&mut self, initial_backoff_secs: u64) {
+    pub fn reset_reconnection(&mut self, initial_backoff_secs: u64) {
         self.retry_count = 0;
         self.next_retry_time = None;
         self.current_backoff = StdDuration::from_secs(initial_backoff_secs);
     }
-}
-
-/// Load peers from a JSON file
-fn load_peers_file(path: &Path) -> Result<HashMap<PeerId, PeerEntry>> {
-    if !path.exists() {
-        info!(
-            "Peers file does not exist: {:?}, starting with empty peers list",
-            path
-        );
-        return Ok(HashMap::new());
-    }
-
-    let content = fs::read_to_string(path)
-        .map_err(|e| anyhow!("Failed to read peers file {:?}: {}", path, e))?;
-
-    let file_format: PeersFileFormat = serde_json::from_str(&content)
-        .map_err(|e| anyhow!("Failed to parse peers file {:?}: {}", path, e))?;
-
-    let mut peers = HashMap::new();
-    for entry in file_format.peers {
-        if let Ok(peer_id) = entry.peer_id.parse::<PeerId>() {
-            peers.insert(peer_id, entry);
-        } else {
-            warn!("Invalid peer_id in peers file: {}", entry.peer_id);
-        }
-    }
-
-    info!("Loaded {} peers from {:?}", peers.len(), path);
-    Ok(peers)
-}
-
-/// Save peers to a JSON file atomically
-fn save_peers_file(path: &Path, peers: &HashMap<PeerId, PeerEntry>) -> Result<()> {
-    let file_format = PeersFileFormat {
-        version: "1.0".to_string(),
-        peers: peers.values().cloned().collect(),
-    };
-
-    let json = serde_json::to_string_pretty(&file_format)
-        .map_err(|e| anyhow!("Failed to serialize peers: {}", e))?;
-
-    // Atomic write: write to temp file, then rename
-    let temp_path = path.with_extension("tmp");
-    fs::write(&temp_path, json)
-        .map_err(|e| anyhow!("Failed to write temp peers file {:?}: {}", temp_path, e))?;
-
-    fs::rename(&temp_path, path).map_err(|e| {
-        anyhow!(
-            "Failed to rename temp peers file {:?} to {:?}: {}",
-            temp_path,
-            path,
-            e
-        )
-    })?;
-
-    debug!("Saved {} peers to {:?}", peers.len(), path);
-    Ok(())
 }
 
 /// Extract IP address from a ConnectedPoint
@@ -505,12 +442,8 @@ pub struct NetworkService {
     local_peer_id: PeerId,
     /// Ping configuration
     ping_config: PingConfig,
-    /// Authentication configuration
-    authentication_config: AuthenticationConfig,
-    /// Known peers (loaded from peers file)
-    known_peers: HashMap<PeerId, PeerEntry>,
-    /// Path to peers file
-    peers_file_path: PathBuf,
+    /// Peer authorizer for authentication
+    authorizer: PeerAuthorizer,
     /// Bootstrap peers (peers to connect to on startup)
     bootstrap_peers: HashSet<PeerId>,
     /// Reconnection configuration
@@ -520,8 +453,11 @@ pub struct NetworkService {
 }
 
 impl NetworkService {
-    /// Create a new NetworkService
-    pub fn new(config: NetworkConfig) -> Result<(Self, NetworkServiceHandle)> {
+    /// Create a new NetworkService with a PeerAuthorizer
+    pub fn new(
+        config: NetworkConfig,
+        authorizer: PeerAuthorizer,
+    ) -> Result<(Self, NetworkServiceHandle)> {
         // Generate identity keypair
         let local_key = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
@@ -545,21 +481,6 @@ impl NetworkService {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-        // Load peers file if authentication is enabled
-        let peers_file_path = PathBuf::from(&config.authentication.peers_file);
-        let known_peers = match config.authentication.mode {
-            AuthenticationMode::Disabled => {
-                info!("Authentication disabled, not loading peers file");
-                HashMap::new()
-            }
-            AuthenticationMode::Learn | AuthenticationMode::Enforce => {
-                load_peers_file(&peers_file_path).unwrap_or_else(|e| {
-                    warn!("Failed to load peers file: {}", e);
-                    HashMap::new()
-                })
-            }
-        };
-
         let service = NetworkService {
             swarm,
             command_rx,
@@ -568,9 +489,7 @@ impl NetworkService {
             peer_info: HashMap::new(),
             local_peer_id,
             ping_config: config.ping.clone(),
-            authentication_config: config.authentication,
-            known_peers,
-            peers_file_path,
+            authorizer,
             bootstrap_peers: HashSet::new(),
             reconnection_config: config.reconnection,
             reconnectable_peers: HashSet::new(),
@@ -703,11 +622,8 @@ impl NetworkService {
                 // Store the multiaddr for reconnection
                 let multiaddr = extract_multiaddr_from_endpoint(&endpoint);
 
-                // Mark peer as reconnectable (bootstrap peers, known peers, or successfully connected peers)
-                let is_reconnectable = self.bootstrap_peers.contains(&peer_id)
-                    || self.known_peers.contains_key(&peer_id);
-
-                if is_reconnectable || self.reconnection_config.enabled {
+                // Mark peer as reconnectable if it's a bootstrap peer or reconnection is enabled
+                if self.bootstrap_peers.contains(&peer_id) || self.reconnection_config.enabled {
                     self.reconnectable_peers.insert(peer_id);
                 }
 
@@ -943,83 +859,29 @@ impl NetworkService {
         self.bootstrap_peers.iter().cloned().collect()
     }
 
-    /// Check peer authentication based on the configured mode
+    /// Check peer authentication using PeerAuthorizer
     async fn check_peer_authentication(
         &mut self,
         peer_id: PeerId,
         endpoint: &ConnectedPoint,
     ) -> bool {
-        match self.authentication_config.mode {
-            AuthenticationMode::Disabled => {
-                debug!("Authentication disabled, accepting peer {}", peer_id);
-                true
-            }
-            AuthenticationMode::Learn => self.check_learn_mode(peer_id, endpoint).await,
-            AuthenticationMode::Enforce => self.check_enforce_mode(peer_id, endpoint).await,
-        }
-    }
+        let peer_ip = extract_ip_from_endpoint(endpoint);
 
-    /// Check authentication in Learn mode
-    async fn check_learn_mode(&mut self, peer_id: PeerId, endpoint: &ConnectedPoint) -> bool {
-        let peer_ip = match extract_ip_from_endpoint(endpoint) {
-            Some(ip) => ip,
-            None => {
-                warn!("Could not extract IP from endpoint for peer {}", peer_id);
-                return true; // Accept if we can't extract IP
-            }
-        };
-
-        if let Some(entry) = self.known_peers.get_mut(&peer_id) {
-            // Known peer - verify IP matches
-            let ip_str = peer_ip.to_string();
-            if entry.ip_addresses.contains(&ip_str) {
-                info!(
-                    "Learn mode: Known peer {} with matching IP {}",
-                    peer_id, ip_str
-                );
-                entry.last_seen = SystemTime::now();
-                entry.connection_count += 1;
-                // Save updated peer info
-                if let Err(e) = save_peers_file(&self.peers_file_path, &self.known_peers) {
-                    warn!("Failed to save peers file: {}", e);
-                }
-                true
-            } else {
-                let reason = format!(
-                    "IP mismatch - expected one of {:?}, got {}",
-                    entry.ip_addresses, ip_str
-                );
-                warn!("Learn mode: Rejecting peer {} - {}", peer_id, reason);
+        match self.authorizer.authorize_peer(peer_id, peer_ip).await {
+            AuthResult::Authorized => true,
+            AuthResult::Unauthorized { reason } => {
                 let _ = self
                     .event_tx
                     .send(NetworkEvent::AuthenticationFailed { peer_id, reason });
                 false
             }
-        } else {
-            // New peer - learn it
-            let ip_str = peer_ip.to_string();
-            info!(
-                "Learn mode: Learning new peer {} with IP {}",
-                peer_id, ip_str
-            );
-
-            let entry = PeerEntry {
-                peer_id: peer_id.to_string(),
-                ip_addresses: vec![ip_str],
-                first_seen: SystemTime::now(),
-                last_seen: SystemTime::now(),
-                connection_count: 1,
-                source: "learned".to_string(),
-            };
-
-            self.known_peers.insert(peer_id, entry);
-
-            // Save new peer to file
-            if let Err(e) = save_peers_file(&self.peers_file_path, &self.known_peers) {
-                warn!("Failed to save peers file: {}", e);
+            AuthResult::LearnPeer { entry } => {
+                // Emit PeerLearned event for PeerManager to handle
+                let _ = self
+                    .event_tx
+                    .send(NetworkEvent::PeerLearned { peer_id, entry });
+                true
             }
-
-            true
         }
     }
 
@@ -1087,58 +949,6 @@ impl NetworkService {
                     self.schedule_reconnection(peer_id);
                 }
             }
-        }
-    }
-
-    /// Check authentication in Enforce mode
-    async fn check_enforce_mode(&mut self, peer_id: PeerId, endpoint: &ConnectedPoint) -> bool {
-        let peer_ip = match extract_ip_from_endpoint(endpoint) {
-            Some(ip) => ip,
-            None => {
-                let reason = "Could not extract IP from endpoint".to_string();
-                warn!("Enforce mode: Rejecting peer {} - {}", peer_id, reason);
-                let _ = self
-                    .event_tx
-                    .send(NetworkEvent::AuthenticationFailed { peer_id, reason });
-                return false;
-            }
-        };
-
-        if let Some(entry) = self.known_peers.get_mut(&peer_id) {
-            let ip_str = peer_ip.to_string();
-            if entry.ip_addresses.contains(&ip_str) {
-                info!(
-                    "Enforce mode: Authorized peer {} with IP {}",
-                    peer_id, ip_str
-                );
-                entry.last_seen = SystemTime::now();
-                entry.connection_count += 1;
-                // Save updated peer info
-                if let Err(e) = save_peers_file(&self.peers_file_path, &self.known_peers) {
-                    warn!("Failed to save peers file: {}", e);
-                }
-                true
-            } else {
-                let reason = format!(
-                    "IP mismatch - expected one of {:?}, got {}",
-                    entry.ip_addresses, ip_str
-                );
-                warn!("Enforce mode: Rejecting peer {} - {}", peer_id, reason);
-                let _ = self
-                    .event_tx
-                    .send(NetworkEvent::AuthenticationFailed { peer_id, reason });
-                false
-            }
-        } else {
-            let reason = "Peer not in authorized list".to_string();
-            warn!(
-                "Enforce mode: Rejecting unknown peer {} with IP {}",
-                peer_id, peer_ip
-            );
-            let _ = self
-                .event_tx
-                .send(NetworkEvent::AuthenticationFailed { peer_id, reason });
-            false
         }
     }
 }
@@ -1240,11 +1050,20 @@ impl NetworkServiceHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     #[tokio::test]
     async fn test_service_creation() {
         let config = NetworkConfig::default();
-        let result = NetworkService::new(config);
+        let known_peers = Arc::new(RwLock::new(HashMap::new()));
+        let authorizer = PeerAuthorizer::new(
+            AuthenticationMode::Disabled,
+            known_peers,
+            PathBuf::from("test_peers.json"),
+        );
+        let result = NetworkService::new(config, authorizer);
         assert!(result.is_ok());
     }
 
@@ -1258,7 +1077,13 @@ mod tests {
             authentication: AuthenticationConfig::default(),
             reconnection: ReconnectionConfig::default(),
         };
-        let (mut service, _handle) = NetworkService::new(config.clone()).unwrap();
+        let known_peers = Arc::new(RwLock::new(HashMap::new()));
+        let authorizer = PeerAuthorizer::new(
+            AuthenticationMode::Disabled,
+            known_peers,
+            PathBuf::from("test_peers.json"),
+        );
+        let (mut service, _handle) = NetworkService::new(config.clone(), authorizer).unwrap();
         let result = service.start(config).await;
         assert!(result.is_err());
     }
@@ -1266,7 +1091,13 @@ mod tests {
     #[tokio::test]
     async fn test_local_peer_id() {
         let config = NetworkConfig::default();
-        let (_service, handle) = NetworkService::new(config).unwrap();
+        let known_peers = Arc::new(RwLock::new(HashMap::new()));
+        let authorizer = PeerAuthorizer::new(
+            AuthenticationMode::Disabled,
+            known_peers,
+            PathBuf::from("test_peers.json"),
+        );
+        let (_service, handle) = NetworkService::new(config, authorizer).unwrap();
 
         // Peer ID should be valid
         let peer_id = handle.local_peer_id();

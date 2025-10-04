@@ -4,9 +4,17 @@
 
 use anyhow::Result;
 use libp2p::{Multiaddr, PeerId};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio::time::timeout;
-use wormfs::networking::{NetworkConfig, NetworkEvent, NetworkService, NetworkServiceHandle};
+use wormfs::networking::{
+    AuthenticationMode, NetworkConfig, NetworkEvent, NetworkService, NetworkServiceHandle,
+    PeerEntry,
+};
+use wormfs::peer_authorizer::PeerAuthorizer;
 
 /// Create a test node with a specific port
 #[allow(dead_code)]
@@ -17,13 +25,22 @@ pub async fn create_test_node(port: u16) -> Result<(NetworkService, NetworkServi
         bootstrap_peers: Vec::new(),
         ping: wormfs::networking::PingConfig::default(),
         authentication: wormfs::networking::AuthenticationConfig {
-            mode: wormfs::networking::AuthenticationMode::Disabled,
-            peers_file: "peers.json".to_string(),
+            mode: AuthenticationMode::Disabled,
+            peers_file: format!("test_peers_{}.json", port),
         },
         reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
-    let (mut service, handle) = NetworkService::new(config.clone())?;
+    // Create a simple PeerAuthorizer for testing (no PeerManager needed in tests)
+    let known_peers = Arc::new(RwLock::new(HashMap::<PeerId, PeerEntry>::new()));
+    let authorizer = PeerAuthorizer::new(
+        AuthenticationMode::Disabled,
+        known_peers,
+        PathBuf::from(format!("test_peers_{}.json", port)),
+    );
+
+    // Create NetworkService with the authorizer
+    let (mut service, handle) = NetworkService::new(config.clone(), authorizer)?;
     service.start(config).await?;
 
     Ok((service, handle))

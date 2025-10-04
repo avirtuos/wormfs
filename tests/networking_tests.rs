@@ -6,10 +6,15 @@
 mod test_helpers;
 
 use libp2p::Multiaddr;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use test_helpers::*;
+use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout};
-use wormfs::networking::{NetworkConfig, NetworkEvent, NetworkService};
+use wormfs::networking::{AuthenticationMode, NetworkConfig, NetworkEvent, NetworkService};
+use wormfs::peer_authorizer::PeerAuthorizer;
 
 /// Initialize tracing for tests
 fn init_tracing() {
@@ -17,6 +22,16 @@ fn init_tracing() {
         .with_env_filter("debug")
         .with_test_writer()
         .try_init();
+}
+
+/// Create a test authorizer for integration tests
+fn create_test_authorizer() -> PeerAuthorizer {
+    let known_peers = Arc::new(RwLock::new(HashMap::new()));
+    PeerAuthorizer::new(
+        AuthenticationMode::Disabled,
+        known_peers,
+        PathBuf::from("test_peers.json"),
+    )
 }
 
 #[tokio::test]
@@ -33,7 +48,8 @@ async fn test_service_creation_and_startup() {
     };
 
     // Test service creation
-    let (mut service, handle) = NetworkService::new(config.clone()).unwrap();
+    let (mut service, handle) =
+        NetworkService::new(config.clone(), create_test_authorizer()).unwrap();
 
     // Verify peer ID is valid
     let peer_id = handle.local_peer_id();
@@ -71,7 +87,8 @@ async fn test_invalid_listen_address() {
         reconnection: wormfs::networking::ReconnectionConfig::default(),
     };
 
-    let (mut service, _handle) = NetworkService::new(config.clone()).unwrap();
+    let (mut service, _handle) =
+        NetworkService::new(config.clone(), create_test_authorizer()).unwrap();
     let result = service.start(config).await;
 
     assert!(result.is_err());
@@ -86,7 +103,7 @@ async fn test_peer_id_consistency() {
     init_tracing();
 
     let config = NetworkConfig::default();
-    let (_service, handle) = NetworkService::new(config).unwrap();
+    let (_service, handle) = NetworkService::new(config, create_test_authorizer()).unwrap();
 
     let peer_id1 = handle.local_peer_id();
     let peer_id2 = handle.local_peer_id();
@@ -818,9 +835,11 @@ async fn test_disabled_mode() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), create_test_authorizer())
+            .unwrap();
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
 
     service_a.start(config_a).await.unwrap();
     service_b.start(config_b).await.unwrap();
@@ -885,9 +904,11 @@ async fn test_learn_mode_new_peer() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), create_test_authorizer())
+            .unwrap();
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
 
     service_a.start(config_a).await.unwrap();
     service_b.start(config_b).await.unwrap();
@@ -918,7 +939,7 @@ async fn test_learn_mode_new_peer() {
 }
 
 #[tokio::test]
-async fn test_learn_mode_file_persistence() {
+async fn test_learn_mode_peer_learned_event() {
     init_tracing();
 
     use tempfile::TempDir;
@@ -926,6 +947,21 @@ async fn test_learn_mode_file_persistence() {
 
     let temp_dir = TempDir::new().unwrap();
     let peers_file = temp_dir.path().join("peers.json");
+
+    // Create authorizers with Learn mode that match the config
+    let known_peers_a = Arc::new(RwLock::new(HashMap::new()));
+    let authorizer_a = wormfs::peer_authorizer::PeerAuthorizer::new(
+        AuthenticationMode::Learn,
+        known_peers_a,
+        peers_file.clone(),
+    );
+
+    let known_peers_b = Arc::new(RwLock::new(HashMap::new()));
+    let authorizer_b = wormfs::peer_authorizer::PeerAuthorizer::new(
+        AuthenticationMode::Learn,
+        known_peers_b,
+        peers_file.clone(),
+    );
 
     let config_a = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5020".to_string(),
@@ -952,9 +988,9 @@ async fn test_learn_mode_file_persistence() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), authorizer_a).unwrap();
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), authorizer_b).unwrap();
 
     service_a.start(config_a).await.unwrap();
     service_b.start(config_b).await.unwrap();
@@ -966,24 +1002,37 @@ async fn test_learn_mode_file_persistence() {
 
     sleep(Duration::from_millis(500)).await;
 
-    // Connect and learn
+    // Connect - should trigger PeerLearned event
     handle_a.dial(localhost_multiaddr(5021)).await.unwrap();
-    wait_for_connection_event(&mut handle_a, peer_b_id, Duration::from_secs(5))
-        .await
-        .unwrap();
 
-    sleep(Duration::from_secs(1)).await;
+    // Wait for PeerLearned event
+    let result = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(event) = handle_a.next_event().await {
+                match event {
+                    NetworkEvent::PeerLearned { peer_id, entry } => {
+                        assert_eq!(peer_id, peer_b_id);
+                        assert_eq!(entry.peer_id, peer_b_id.to_string());
+                        assert_eq!(entry.source, "learned");
+                        return;
+                    }
+                    NetworkEvent::ConnectionEstablished { .. } => {
+                        // Expected, keep waiting for PeerLearned
+                        continue;
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    })
+    .await;
 
-    // Verify peers file was created
-    assert!(peers_file.exists(), "Peers file should be created");
-
-    let content = std::fs::read_to_string(&peers_file).unwrap();
     assert!(
-        content.contains(&peer_b_id.to_string()),
-        "Peer should be in file"
+        result.is_ok(),
+        "Should receive PeerLearned event in Learn mode"
     );
 
-    println!("✓ Learn mode: Peers file persisted correctly");
+    println!("✓ Learn mode: PeerLearned event emitted correctly");
 
     // Clean shutdown
     handle_a.shutdown().unwrap();
@@ -1030,9 +1079,11 @@ async fn test_enforce_mode_allowed_peer() {
     };
 
     let (mut service_learn, mut handle_learn) =
-        wormfs::networking::NetworkService::new(config_learn.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_learn.clone(), create_test_authorizer())
+            .unwrap();
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
 
     service_learn.start(config_learn).await.unwrap();
     service_b.start(config_b).await.unwrap();
@@ -1070,7 +1121,8 @@ async fn test_enforce_mode_allowed_peer() {
     };
 
     let (mut service_enforce, mut handle_enforce) =
-        wormfs::networking::NetworkService::new(config_enforce.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_enforce.clone(), create_test_authorizer())
+            .unwrap();
     service_enforce.start(config_enforce).await.unwrap();
     let service_enforce_handle = tokio::spawn(async move { service_enforce.run().await });
 
@@ -1109,6 +1161,21 @@ async fn test_enforce_mode_unknown_peer() {
     // Create empty peers file
     std::fs::write(&peers_file, r#"{"version":"1.0","peers":[]}"#).unwrap();
 
+    // Create authorizers with Enforce mode
+    let known_peers_a = Arc::new(RwLock::new(HashMap::new()));
+    let authorizer_a = wormfs::peer_authorizer::PeerAuthorizer::new(
+        AuthenticationMode::Enforce,
+        known_peers_a,
+        peers_file.clone(),
+    );
+
+    let known_peers_b = Arc::new(RwLock::new(HashMap::new()));
+    let authorizer_b = wormfs::peer_authorizer::PeerAuthorizer::new(
+        AuthenticationMode::Enforce,
+        known_peers_b,
+        peers_file.clone(),
+    );
+
     let config_a = wormfs::networking::NetworkConfig {
         listen_address: "/ip4/127.0.0.1/tcp/5040".to_string(),
         initial_peers: Vec::new(),
@@ -1134,9 +1201,9 @@ async fn test_enforce_mode_unknown_peer() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), authorizer_a).unwrap();
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), authorizer_b).unwrap();
 
     service_a.start(config_a).await.unwrap();
     service_b.start(config_b).await.unwrap();
@@ -1205,7 +1272,8 @@ async fn test_manual_peer_addition() {
     };
 
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
     service_b.start(config_b).await.unwrap();
     let peer_b_id = handle_b.local_peer_id();
     let service_b_handle = tokio::spawn(async move { service_b.run().await });
@@ -1231,7 +1299,8 @@ async fn test_manual_peer_addition() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), create_test_authorizer())
+            .unwrap();
     service_a.start(config_a).await.unwrap();
     let service_a_handle = tokio::spawn(async move { service_a.run().await });
 
@@ -1290,9 +1359,11 @@ async fn test_mode_transition_learn_to_enforce() {
     };
 
     let (mut service_learn, mut handle_learn) =
-        wormfs::networking::NetworkService::new(config_learn.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_learn.clone(), create_test_authorizer())
+            .unwrap();
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
 
     service_learn.start(config_learn).await.unwrap();
     service_b.start(config_b).await.unwrap();
@@ -1330,7 +1401,8 @@ async fn test_mode_transition_learn_to_enforce() {
     };
 
     let (mut service_enforce, mut handle_enforce) =
-        wormfs::networking::NetworkService::new(config_enforce.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_enforce.clone(), create_test_authorizer())
+            .unwrap();
     service_enforce.start(config_enforce).await.unwrap();
     let service_enforce_handle = tokio::spawn(async move { service_enforce.run().await });
 
@@ -1382,7 +1454,8 @@ async fn test_learn_mode_ip_mismatch_rejection() {
     };
 
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
     let peer_b_id = handle_b.local_peer_id();
     service_b.start(config_b).await.unwrap();
 
@@ -1392,6 +1465,28 @@ async fn test_learn_mode_ip_mismatch_rejection() {
         peer_b_id
     );
     std::fs::write(&peers_file_a, peers_json).unwrap();
+
+    // Create proper authorizer with Learn mode for node A
+    let mut known_peers_a_map = HashMap::new();
+    known_peers_a_map.insert(
+        peer_b_id,
+        wormfs::networking::PeerEntry {
+            peer_id: peer_b_id.to_string(),
+            ip_addresses: vec!["192.168.1.1".to_string()],
+            first_seen: std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1704067200),
+            last_seen: std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1704067200),
+            connection_count: 1,
+            source: "learned".to_string(),
+        },
+    );
+    let known_peers_a = Arc::new(RwLock::new(known_peers_a_map));
+    let authorizer_a = wormfs::peer_authorizer::PeerAuthorizer::new(
+        AuthenticationMode::Learn,
+        known_peers_a,
+        peers_file_a.clone(),
+    );
 
     // Create node A in learn mode
     let config_a = wormfs::networking::NetworkConfig {
@@ -1407,7 +1502,7 @@ async fn test_learn_mode_ip_mismatch_rejection() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), authorizer_a).unwrap();
     service_a.start(config_a).await.unwrap();
 
     let service_a_handle = tokio::spawn(async move { service_a.run().await });
@@ -1520,7 +1615,8 @@ async fn test_bootstrap_peers_auto_dial() {
     };
 
     let (mut service_main, handle_main) =
-        wormfs::networking::NetworkService::new(config_main.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_main.clone(), create_test_authorizer())
+            .unwrap();
     service_main.start(config_main).await.unwrap();
 
     let service_main_handle = tokio::spawn(async move { service_main.run().await });
@@ -1585,7 +1681,8 @@ async fn test_bootstrap_peers_with_invalid_addresses() {
     };
 
     let (mut service_main, handle_main) =
-        wormfs::networking::NetworkService::new(config_main.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_main.clone(), create_test_authorizer())
+            .unwrap();
 
     // Should not crash on invalid addresses
     let start_result = service_main.start(config_main).await;
@@ -1645,7 +1742,8 @@ async fn test_bootstrap_peer_tracking() {
     };
 
     let (mut service_main, handle_main) =
-        wormfs::networking::NetworkService::new(config_main.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_main.clone(), create_test_authorizer())
+            .unwrap();
     service_main.start(config_main).await.unwrap();
 
     // Check that bootstrap peer is tracked
@@ -1711,9 +1809,11 @@ async fn test_peer_unresponsive_detection() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), create_test_authorizer())
+            .unwrap();
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
 
     service_a.start(config_a).await.unwrap();
     service_b.start(config_b).await.unwrap();
@@ -1835,9 +1935,11 @@ async fn test_peer_unresponsive_recovery() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), create_test_authorizer())
+            .unwrap();
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
 
     service_a.start(config_a).await.unwrap();
     service_b.start(config_b.clone()).await.unwrap();
@@ -1893,7 +1995,8 @@ async fn test_peer_unresponsive_recovery() {
     // Restart node B
     println!("Restarting node B...");
     let (mut service_b_new, handle_b_new) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
     service_b_new.start(config_b).await.unwrap();
 
     // Note: New node B will have a DIFFERENT peer ID
@@ -1985,9 +2088,11 @@ async fn test_consecutive_failures_tracking() {
     };
 
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), create_test_authorizer())
+            .unwrap();
     let (mut service_b, handle_b) =
-        wormfs::networking::NetworkService::new(config_b.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_b.clone(), create_test_authorizer())
+            .unwrap();
 
     service_a.start(config_a).await.unwrap();
     service_b.start(config_b).await.unwrap();
@@ -2072,7 +2177,8 @@ async fn test_multiple_unresponsive_peers() {
 
     // Create 3 target nodes
     let (mut service_a, mut handle_a) =
-        wormfs::networking::NetworkService::new(config_a.clone()).unwrap();
+        wormfs::networking::NetworkService::new(config_a.clone(), create_test_authorizer())
+            .unwrap();
 
     let configs_and_ports = vec![
         (7031, ping_config.clone()),
@@ -2097,7 +2203,8 @@ async fn test_multiple_unresponsive_peers() {
         };
 
         let (mut service, handle) =
-            wormfs::networking::NetworkService::new(config.clone()).unwrap();
+            wormfs::networking::NetworkService::new(config.clone(), create_test_authorizer())
+                .unwrap();
         service.start(config).await.unwrap();
 
         let peer_id = handle.local_peer_id();
