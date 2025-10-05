@@ -3,6 +3,7 @@
 //! This module provides the NetworkService for libp2p-based peer-to-peer networking.
 //! Phase 2A.1 provides minimal libp2p setup with TCP transport and basic connection handling.
 
+use crate::metadata_protocol_handler::create_metadata_behaviour;
 use crate::peer_authorizer::{AuthResult, PeerAuthorizer};
 use anyhow::{anyhow, Result};
 use libp2p::{
@@ -10,7 +11,7 @@ use libp2p::{
     futures::StreamExt,
     identity,
     multiaddr::Protocol,
-    noise, ping,
+    noise, ping, request_response,
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Transport,
 };
@@ -251,6 +252,16 @@ pub enum NetworkEvent {
     PeerLearned { peer_id: PeerId, entry: PeerEntry },
     /// An error occurred in the network layer
     Error { message: String },
+    /// A metadata request was received from a peer
+    MetadataRequestReceived {
+        peer_id: PeerId,
+        request: crate::metadata_protocol_handler::MetadataMessage,
+    },
+    /// A metadata response was received from a peer
+    MetadataResponseReceived {
+        peer_id: PeerId,
+        response: crate::metadata_protocol_handler::MetadataMessage,
+    },
 }
 
 /// Commands that can be sent to the NetworkService
@@ -408,10 +419,11 @@ fn extract_multiaddr_from_endpoint(endpoint: &ConnectedPoint) -> Multiaddr {
     }
 }
 
-/// Custom network behaviour with ping support
+/// Custom network behaviour with ping and metadata protocol support
 #[derive(NetworkBehaviour)]
 pub struct WormFSBehaviour {
     ping: ping::Behaviour,
+    metadata: request_response::Behaviour<crate::metadata_protocol_handler::MetadataCodec>,
 }
 
 impl WormFSBehaviour {
@@ -422,6 +434,7 @@ impl WormFSBehaviour {
 
         Self {
             ping: ping::Behaviour::new(ping_config),
+            metadata: create_metadata_behaviour(),
         }
     }
 }
@@ -669,6 +682,86 @@ impl NetworkService {
                 let _ = self
                     .event_tx
                     .send(NetworkEvent::ConnectionClosed { peer_id });
+            }
+            SwarmEvent::Behaviour(WormFSBehaviourEvent::Metadata(metadata_event)) => {
+                // Handle metadata protocol events
+                use libp2p::request_response::Event;
+                match metadata_event {
+                    Event::Message {
+                        peer,
+                        message,
+                        connection_id: _,
+                    } => {
+                        use libp2p::request_response::Message;
+                        match message {
+                            Message::Request {
+                                request_id: _,
+                                request,
+                                channel,
+                            } => {
+                                debug!("Received metadata request from {}: {:?}", peer, request);
+
+                                // Send event notification
+                                let _ = self.event_tx.send(NetworkEvent::MetadataRequestReceived {
+                                    peer_id: peer,
+                                    request: request.clone(),
+                                });
+
+                                // For now, send a simple ack response
+                                // TODO: Actual request handling will be implemented in Phase 2B.3+
+                                let response =
+                                    crate::metadata_protocol_handler::MetadataMessage::Ack(
+                                        crate::metadata_protocol::MetadataAck::default(),
+                                    );
+
+                                if let Err(e) = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .metadata
+                                    .send_response(channel, response)
+                                {
+                                    warn!("Failed to send metadata response to {}: {:?}", peer, e);
+                                }
+                            }
+                            Message::Response {
+                                request_id: _,
+                                response,
+                            } => {
+                                debug!("Received metadata response from {}: {:?}", peer, response);
+
+                                // Send event notification
+                                let _ =
+                                    self.event_tx.send(NetworkEvent::MetadataResponseReceived {
+                                        peer_id: peer,
+                                        response,
+                                    });
+                            }
+                        }
+                    }
+                    Event::OutboundFailure {
+                        peer,
+                        request_id: _,
+                        error,
+                        connection_id: _,
+                    } => {
+                        warn!("Metadata outbound failure to {}: {:?}", peer, error);
+                    }
+                    Event::InboundFailure {
+                        peer,
+                        request_id: _,
+                        error,
+                        connection_id: _,
+                    } => {
+                        warn!("Metadata inbound failure from {}: {:?}", peer, error);
+                    }
+                    Event::ResponseSent {
+                        peer,
+                        request_id: _,
+                        connection_id: _,
+                    } => {
+                        debug!("Metadata response sent to {}", peer);
+                    }
+                }
             }
             SwarmEvent::Behaviour(WormFSBehaviourEvent::Ping(ping_event)) => {
                 // Handle ping events

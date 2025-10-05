@@ -44,9 +44,9 @@ run_check() {
 echo -e "${YELLOW}Step 1/4: Building project...${NC}"
 run_check "Cargo Build" "cargo build 2>&1 | tee /tmp/wormfs_build.log && ! grep -i 'error' /tmp/wormfs_build.log && ! grep -i 'warning' /tmp/wormfs_build.log"
 
-# 2. Cargo Test - Run all tests
+# 2. Cargo Test - Run all tests (hide successful test output)
 echo -e "${YELLOW}Step 2/4: Running tests...${NC}"
-run_check "Cargo Test" "cargo test"
+run_check "Cargo Test" "cargo test 2>&1 | grep -v ' ... ok$' | grep -v '^$'"
 
 # 3. Cargo Fmt Check - Verify code formatting
 echo -e "${YELLOW}Step 3/4: Checking code format...${NC}"
