@@ -178,10 +178,11 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ### Networking Phases (2A-2D): Distributed Communications
 
-#### **Phase 2A: Basic libp2p Networking (2 weeks)** IN-PROGRESS - see phase_2a_detailed.md
+#### **Phase 2A: Basic libp2p Networking (2 weeks)** COMPLETED
 **Goal:** Establish basic peer-to-peer networking foundation
 
 **Deliverables:**
+- see phase_2a_detailed.md for more details
 - `networking.rs` module with:
   - libp2p swarm setup with transport encryption
   - Peer discovery using configured peer IPs
@@ -201,10 +202,11 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ---
 
-#### **Phase 2B: Metadata Gossip Protocol (2-3 weeks)**
+#### **Phase 2B: Metadata Gossip Protocol (2-3 weeks)** IN_PROGRESS
 **Goal:** Implement distributed metadata synchronization
 
 **Deliverables:**
+- see phase_2b_detailed.md for more details
 - Metadata gossip system with:
   - Master election using libp2p consensus
   - Metadata operation proposal and approval workflow
