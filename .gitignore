@@ -1,2 +1,5 @@
 /target
 /data
+
+# Generated protobuf code
+src/generated/
