@@ -1,20 +1,26 @@
 //! Metadata Replicator Module
 //!
 //! This module provides the MetadataReplicator component for distributing metadata
-//! events across the WormFS cluster. It implements Phase 2B.3: Event Broadcasting Foundation.
+//! events across the WormFS cluster. It implements Phase 2B.3: Event Broadcasting Foundation
+//! and Phase 2B.4: Sequence Number Management.
 //!
 //! The replicator handles:
 //! - Broadcasting metadata events to all connected peers
 //! - Preventing self-echo (sender doesn't receive own events)
 //! - Fire-and-forget delivery (reliability added in later phases)
 //! - Dynamic peer set handling (peers joining/leaving)
+//! - Sequence number generation and gap detection
+//! - Persistence of sequence state
 
 use crate::metadata_protocol::MetadataEvent;
 use crate::metadata_protocol_handler::MetadataMessage;
+use crate::metadata_store::MetadataStore;
 use crate::networking::NetworkServiceHandle;
+use crate::sequence_tracker::{SequenceEvent, SequenceStats, SequenceTracker};
 use anyhow::Result;
 use libp2p::PeerId;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -27,29 +33,59 @@ pub struct MetadataReplicator {
     local_peer_id: PeerId,
     /// Local node ID for event origination
     local_node_id: Uuid,
-    /// Sequence number for events (will be managed by master in later phases)
-    /// For now, just a simple counter
-    sequence_counter: Arc<RwLock<u64>>,
+    /// Sequence tracker for event ordering and gap detection
+    sequence_tracker: Arc<RwLock<SequenceTracker>>,
+    /// Metadata store for persistence
+    metadata_store: Arc<MetadataStore>,
+    /// Counter for events since last persistence
+    events_since_persist: Arc<RwLock<u64>>,
+    /// Last time we persisted sequences
+    last_persist_time: Arc<RwLock<Instant>>,
 }
 
 impl MetadataReplicator {
     /// Create a new MetadataReplicator
-    pub fn new(
+    pub async fn new(
         network_handle: NetworkServiceHandle,
         local_peer_id: PeerId,
         local_node_id: Uuid,
-    ) -> Self {
+        metadata_store: Arc<MetadataStore>,
+    ) -> Result<Self> {
+        info!(
+            "MetadataReplicator initializing for peer {} (node {})",
+            local_peer_id, local_node_id
+        );
+
+        // Load persisted sequence state
+        let local_sequence = metadata_store.load_sequence_number(local_node_id)?;
+        let peer_sequences = metadata_store.load_peer_sequences(local_node_id)?;
+
+        // Create sequence tracker with restored state
+        let mut tracker = if let Some(seq) = local_sequence {
+            info!("Restored local sequence: {}", seq);
+            SequenceTracker::with_sequence(local_node_id, seq)
+        } else {
+            SequenceTracker::new(local_node_id)
+        };
+
+        if !peer_sequences.is_empty() {
+            tracker.restore_peer_sequences(peer_sequences);
+        }
+
         info!(
             "MetadataReplicator initialized for peer {} (node {})",
             local_peer_id, local_node_id
         );
 
-        Self {
+        Ok(Self {
             network_handle,
             local_peer_id,
             local_node_id,
-            sequence_counter: Arc::new(RwLock::new(0)),
-        }
+            sequence_tracker: Arc::new(RwLock::new(tracker)),
+            metadata_store,
+            events_since_persist: Arc::new(RwLock::new(0)),
+            last_persist_time: Arc::new(RwLock::new(Instant::now())),
+        })
     }
 
     /// Broadcast a metadata event to all connected peers
@@ -123,12 +159,104 @@ impl MetadataReplicator {
 
     /// Get the next sequence number for event ordering
     ///
-    /// In Phase 2B.4, sequence number management will be more sophisticated
-    /// with per-node counters and gap detection
+    /// Uses the sequence tracker for proper per-node sequence management
     pub async fn next_sequence_number(&self) -> u64 {
-        let mut counter = self.sequence_counter.write().await;
-        *counter += 1;
-        *counter
+        let mut tracker = self.sequence_tracker.write().await;
+        let sequence = tracker.next_sequence();
+
+        // Save to metadata store
+        if let Err(e) = self
+            .metadata_store
+            .save_sequence_number(self.local_node_id, sequence)
+        {
+            warn!("Failed to persist sequence number: {}", e);
+        }
+
+        sequence
+    }
+
+    /// Handle a received metadata event
+    ///
+    /// Records the event sequence and detects gaps
+    pub async fn handle_received_event(&self, node_id: Uuid, sequence: u64) -> Result<()> {
+        let mut tracker = self.sequence_tracker.write().await;
+
+        match tracker.record_event(node_id, sequence)? {
+            Some(SequenceEvent::GapDetected(gap)) => {
+                warn!(
+                    "Gap detected from node {}: missing sequences {}-{} ({} events)",
+                    gap.node_id,
+                    gap.start_sequence,
+                    gap.end_sequence,
+                    gap.count()
+                );
+                // TODO: Phase 2B.8 will implement gap recovery/replay
+            }
+            Some(SequenceEvent::GapFilled {
+                node_id,
+                start_sequence,
+                end_sequence,
+            }) => {
+                info!(
+                    "Gap filled from node {}: sequences {}-{}",
+                    node_id, start_sequence, end_sequence
+                );
+            }
+            None => {
+                debug!(
+                    "Received in-order event from node {} (seq: {})",
+                    node_id, sequence
+                );
+            }
+        }
+
+        // Periodically persist peer sequences
+        self.persist_sequences_if_needed().await?;
+
+        Ok(())
+    }
+
+    /// Persist sequences if enough events have occurred or enough time has passed
+    async fn persist_sequences_if_needed(&self) -> Result<()> {
+        const PERSIST_EVENT_THRESHOLD: u64 = 100;
+        const PERSIST_TIME_THRESHOLD: Duration = Duration::from_secs(10);
+
+        let mut events_count = self.events_since_persist.write().await;
+        *events_count += 1;
+
+        let mut last_time = self.last_persist_time.write().await;
+        let now = Instant::now();
+        let time_elapsed = now.duration_since(*last_time);
+
+        let should_persist =
+            *events_count >= PERSIST_EVENT_THRESHOLD || time_elapsed >= PERSIST_TIME_THRESHOLD;
+
+        if should_persist {
+            let tracker = self.sequence_tracker.read().await;
+            let peer_sequences = tracker.get_peer_sequences();
+
+            self.metadata_store
+                .save_peer_sequences(self.local_node_id, peer_sequences)
+                .map_err(|e| anyhow::anyhow!("Failed to save peer sequences: {}", e))?;
+
+            debug!(
+                "Persisted {} peer sequences (events: {}, time: {:?})",
+                peer_sequences.len(),
+                *events_count,
+                time_elapsed
+            );
+
+            *events_count = 0;
+            *last_time = now;
+        }
+
+        Ok(())
+    }
+
+    /// Get sequence tracker statistics
+    pub async fn get_sequence_stats(&self) -> SequenceStats {
+        let tracker = self.sequence_tracker.read().await;
+        tracker.stats()
     }
 
     /// Get the local peer ID
