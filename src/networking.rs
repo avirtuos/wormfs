@@ -301,6 +301,12 @@ pub enum NetworkCommand {
         state: PeerState,
         response: oneshot::Sender<Vec<PeerId>>,
     },
+    /// Send a metadata message to a specific peer
+    SendMetadataMessage {
+        peer_id: PeerId,
+        message: Box<crate::metadata_protocol_handler::MetadataMessage>,
+        response: oneshot::Sender<Result<()>>,
+    },
     /// Shutdown the service
     Shutdown,
 }
@@ -929,6 +935,26 @@ impl NetworkService {
                     .collect();
                 let _ = response.send(peers);
             }
+            NetworkCommand::SendMetadataMessage {
+                peer_id,
+                message,
+                response,
+            } => {
+                debug!("Sending metadata message to peer {}", peer_id);
+
+                // Send the message using the metadata protocol
+                let request_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .metadata
+                    .send_request(&peer_id, *message);
+
+                debug!(
+                    "Metadata message sent to {} with request_id: {:?}",
+                    peer_id, request_id
+                );
+                let _ = response.send(Ok(()));
+            }
             NetworkCommand::Shutdown => {
                 info!("Shutdown command received");
                 return false;
@@ -1137,6 +1163,21 @@ impl NetworkServiceHandle {
     /// Get the local peer ID
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
+    }
+
+    /// Send a metadata message to a specific peer
+    pub async fn send_metadata_message(
+        &self,
+        peer_id: PeerId,
+        message: crate::metadata_protocol_handler::MetadataMessage,
+    ) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx.send(NetworkCommand::SendMetadataMessage {
+            peer_id,
+            message: Box::new(message),
+            response: tx,
+        })?;
+        rx.await?
     }
 }
 

@@ -83,14 +83,42 @@ message FileDeletedEvent {
   string path = 2;            // Path of the deleted file
 }
 
-// Event when a file is modified
-message FileModifiedEvent {
-  FileInfo file = 1;          // Updated file metadata
+// Changes that can occur to a file
+message FileUpdateChanges {
+  optional uint64 size = 1;           // New size (if changed)
+  optional uint32 permissions = 2;    // New permissions (if changed)
+  optional string path = 3;           // New path (if moved/renamed)
+  optional uint32 checksum = 4;       // New checksum (if content changed)
+  optional uint64 modified_at = 5;    // New modification time
+  optional uint64 accessed_at = 6;    // New access time
 }
 
-// Event when a chunk is placed on a node
-message ChunkPlacedEvent {
-  ChunkInfo chunk = 1;        // The placed chunk metadata
+// Event when a file is updated
+message FileUpdatedEvent {
+  string file_id = 1;         // UUID of the file
+  FileUpdateChanges changes = 2; // What changed
+}
+
+// Event when a stripe is replaced (file content modification)
+message StripeReplacedEvent {
+  string file_id = 1;         // UUID of the file
+  uint64 stripe_index = 2;    // Stripe index
+  uint32 old_checksum = 3;    // Previous checksum
+  StripeInfo new_stripe = 4;  // New stripe metadata
+}
+
+// Event when a chunk is created and stored
+message ChunkCreatedEvent {
+  ChunkInfo chunk = 1;        // The created chunk metadata
+}
+
+// Event when a chunk is moved to a new location
+message ChunkMovedEvent {
+  string file_id = 1;         // UUID of the file
+  uint64 stripe_index = 2;    // Stripe index
+  uint32 chunk_index = 3;     // Chunk index
+  StorageLocationInfo from_location = 4; // Previous location
+  StorageLocationInfo to_location = 5;   // New location
 }
 
 // Event when a chunk is removed from a node
@@ -123,11 +151,13 @@ message MetadataEvent {
   oneof event {
     FileCreatedEvent file_created = 10;
     FileDeletedEvent file_deleted = 11;
-    FileModifiedEvent file_modified = 12;
-    ChunkPlacedEvent chunk_placed = 13;
-    ChunkRemovedEvent chunk_removed = 14;
-    StripeCreatedEvent stripe_created = 15;
-    StripeDeletedEvent stripe_deleted = 16;
+    FileUpdatedEvent file_updated = 12;
+    ChunkCreatedEvent chunk_created = 13;
+    ChunkMovedEvent chunk_moved = 14;
+    ChunkRemovedEvent chunk_removed = 15;
+    StripeCreatedEvent stripe_created = 16;
+    StripeReplacedEvent stripe_replaced = 17;
+    StripeDeletedEvent stripe_deleted = 18;
   }
 }
 
