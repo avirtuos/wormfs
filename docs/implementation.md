@@ -176,96 +176,169 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 **Key Files:** `src/disk_manager.rs`, `src/chunk_placement.rs`
 
-### Networking Phases (2A-2D): Distributed Communications
+### Networking Phases (2A-2D): Distributed Communications with Raft
 
-#### **Phase 2A: Basic libp2p Networking (2 weeks)**
-**Goal:** Establish basic peer-to-peer networking foundation
+#### **Phase 2A: OpenRaft Local Implementation (2 weeks)**
+**Goal:** Implement basic Raft consensus using local channels (no network)
 
 **Deliverables:**
-- `networking.rs` module with:
-  - libp2p swarm setup with transport encryption
-  - Peer discovery using configured peer IPs
-  - Basic peer authentication using peer IDs
-  - Heartbeat protocol for peer liveness detection
-  - Connection management and reconnection logic
+- `raft/` module structure with:
+  - `types.rs`: Simple metadata operation enums and Raft type definitions
+  - `storage.rs`: RaftLogStorage implementation using redb for transaction log
+  - `state_machine.rs`: State machine that applies committed operations to SQLite
+  - `local_network.rs`: In-memory channel-based network for testing
+  - `config.rs`: Raft configuration structs
+- Basic metadata operations: CreateFile, UpdateFile, DeleteFile, RegisterChunk, Lock operations
+- Unit tests with 3-5 node local clusters
+- Leader election and log replication working end-to-end
 
 **Success Criteria:**
-- Can establish encrypted connections between storage nodes
-- Peer authentication works with configured peer IDs
-- Heartbeat detection identifies offline peers within 30 seconds
-- Handles network interruptions gracefully
+- Can start 3-node Raft cluster with local channels
+- Leader election completes within 2 seconds
+- Metadata operations replicate to majority before commit
+- SQLite state reflects committed log entries
+- Snapshot creation from SQLite state works
+- All unit tests pass
 - No clippy errors or warnings
-- No rust format errors or warnings.
+- No rust format errors or warnings
 
-**Key Files:** `src/networking.rs`, `src/peer_manager.rs`
+**Key Files:** `src/raft/mod.rs`, `src/raft/types.rs`, `src/raft/storage.rs`, `src/raft/state_machine.rs`, `src/raft/local_network.rs`, `src/raft/config.rs`, `tests/raft_local_tests.rs`
+
+**Raft Configuration (in storage_node.yaml):**
+```yaml
+raft:
+  node_id: 1
+  heartbeat_interval: 250ms
+  election_timeout_min: 1000ms
+  election_timeout_max: 2000ms
+  snapshot_interval_hours: 24
+  snapshot_log_size_mb: 10
+  use_lease_reads: true
+  lease_duration: 5s
+  log_path: "./data/raft_log"
+  state_path: "./data/metadata"
+```
 
 ---
 
-#### **Phase 2B: Metadata Gossip Protocol (2-3 weeks)**
-**Goal:** Implement distributed metadata synchronization
+#### **Phase 2B: libp2p Transport for Raft (2-3 weeks)**
+**Goal:** Replace local channels with libp2p for Raft communication
 
 **Deliverables:**
-- Metadata gossip system with:
-  - Master election using libp2p consensus
-  - Metadata operation proposal and approval workflow
-  - Event broadcasting with sequence numbers
-  - Acknowledgment tracking and replay mechanisms
-  - Conflict resolution for metadata operations
+- `raft/libp2p_network.rs` module with:
+  - Custom RaftNetwork trait implementation over libp2p
+  - Request-response protocol for Raft RPCs (AppendEntries, Vote, InstallSnapshot)
+  - Peer discovery and connection management using configured peer list
+  - Transport encryption using libp2p's noise protocol
+  - Connection pooling and automatic reconnection
+- `raft/peer_manager.rs` for health monitoring and failover
+- Protobuf message definitions for Raft RPCs in `proto/wormfs.proto`
+- Integration tests with actual network transport
+- Network partition simulation tests
 
 **Success Criteria:**
-- Single master elected and maintained across network partitions
-- Metadata operations propagate to all nodes reliably
-- Missed operations detected and replayed correctly
-- Master failover works within 10 seconds
+- Can establish Raft cluster over libp2p with 3+ nodes
+- Raft RPCs work reliably over libp2p streams
+- Leader election survives network interruptions
+- Automatic reconnection on connection failure
+- Network partitions handled correctly (majority progresses, minority stalls)
+- Performance comparable to local channel implementation
 - No clippy errors or warnings
-- No rust format errors or warnings.
+- No rust format errors or warnings
 
-**Key Files:** `src/gossip_protocol.rs`, `src/master_election.rs`, `src/metadata_sync.rs`
+**Key Files:** `src/raft/libp2p_network.rs`, `src/raft/peer_manager.rs`, `proto/wormfs.proto`, `tests/raft_network_tests.rs`
+
+**Protobuf Additions:**
+```protobuf
+message AppendEntriesRequest {
+    uint64 term = 1;
+    uint64 leader_id = 2;
+    uint64 prev_log_index = 3;
+    uint64 prev_log_term = 4;
+    repeated LogEntry entries = 5;
+    uint64 leader_commit = 6;
+}
+
+message VoteRequest {
+    uint64 term = 1;
+    uint64 candidate_id = 2;
+    uint64 last_log_index = 3;
+    uint64 last_log_term = 4;
+}
+
+message InstallSnapshotRequest {
+    uint64 term = 1;
+    uint64 leader_id = 2;
+    uint64 last_included_index = 3;
+    uint64 last_included_term = 4;
+    bytes data = 5;
+}
+```
 
 ---
 
-#### **Phase 2C: Remote Chunk Transfer (2 weeks)**
-**Goal:** Enable direct chunk operations between storage nodes
+#### **Phase 2C: Metadata Operations via Raft (2 weeks)**
+**Goal:** Route all metadata operations through Raft consensus with optimizations
 
 **Deliverables:**
-- Chunk transfer protocol with:
-  - Direct libp2p streams for chunk read/write
-  - Chunk request/response message formats
-  - Bulk chunk migration capabilities
-  - Transfer progress tracking and error handling
-  - Authentication for chunk operations
+- `raft/client.rs` with proposal and query interface:
+  - `propose()`: Submit metadata operations to Raft leader
+  - `read()`: Linearizable reads through Raft
+  - `read_lease()`: Optimized lease-based reads
+  - `read_stale()`: Local reads for minority partitions
+  - Leader discovery and automatic redirection
+- Lease-based read optimization implementation
+- Snapshot management with configurable triggers (time/size)
+- Async snapshot creation to avoid blocking consensus
+- Compressed snapshot transfer for new nodes
+- End-to-end tests for all metadata operations
 
 **Success Criteria:**
-- Can read chunks from remote storage nodes
-- Can write chunks to remote storage nodes
-- Bulk transfers work reliably for rebalancing
-- Proper error handling for network failures
+- All metadata operations go through Raft consensus
+- Lease-based reads work without consensus overhead
+- Minority partitions serve stale reads correctly
+- Snapshots triggered by time (24h) and size (10MB) thresholds
+- New nodes catch up via snapshot + log replay
+- Write operations require majority quorum
+- Linearizable consistency guaranteed for writes
 - No clippy errors or warnings
-- No rust format errors or warnings.
+- No rust format errors or warnings
 
-**Key Files:** `src/chunk_transfer.rs`, `src/remote_operations.rs`
+**Key Files:** `src/raft/client.rs`, `src/raft/snapshot.rs`, `tests/raft_metadata_tests.rs`
+
+**Read Mode Types:**
+```rust
+pub enum ReadMode {
+    Linearizable,  // Goes through Raft, requires majority
+    LeaseRead,     // Uses leader lease, requires majority  
+    StaleRead,     // Local read, works in minority partition
+}
+```
 
 ---
 
-#### **Phase 2D: Multi-Node Storage Operations (2 weeks)**
-**Goal:** Coordinate stripe operations across multiple nodes
+#### **Phase 2D: Chunk Coordination with Raft (1 week)**
+**Goal:** Coordinate chunk operations through Raft leader
 
 **Deliverables:**
-- Distributed storage coordination with:
-  - Multi-node stripe encoding and placement
-  - Distributed stripe reconstruction from remote chunks
-  - Chunk placement optimization across cluster
-  - Basic load balancing for chunk distribution
+- Update chunk placement decisions to go through Raft proposals
+- Leader-coordinated rebalancing operations
+- Direct libp2p streams for chunk transfer (unchanged from original design)
+- Integration with Raft client for chunk metadata updates
+- Recovery operations initiated via Raft consensus
 
 **Success Criteria:**
-- Can store stripes across multiple storage nodes
-- Can reconstruct files from chunks on different nodes
-- Chunk placement follows blast radius rules across nodes
-- Basic cluster-wide storage balancing works
+- Chunk placement decisions coordinated through Raft
+- Direct chunk transfers work efficiently via libp2p
+- Rebalancing operations proposed through Raft
+- Chunk metadata updates replicated consistently
+- Recovery operations coordinated by Raft leader
 - No clippy errors or warnings
-- No rust format errors or warnings.
+- No rust format errors or warnings
 
-**Key Files:** `src/distributed_storage.rs`, `src/cluster_coordinator.rs`
+**Key Files:** `src/chunk_transfer.rs`, `src/distributed_storage.rs`, `tests/chunk_coordination_tests.rs`
+
+**Note:** Chunk data transfer still uses direct libp2p streams for efficiency. Only chunk metadata operations (location tracking, placement decisions) go through Raft.
 
 ### Client Integration Phases (3A-3C): FUSE Filesystem
 
@@ -428,6 +501,37 @@ Additional phases will cover:
 - **Documentation and guides** (user manual, deployment guide, API docs)
 - **Testing infrastructure** (integration tests, chaos testing, performance tests)
 
+### Migration Strategy
+
+**Note on Migration:** The OpenRaft integration represents a fundamental architectural change to how WormFS handles metadata consensus. This design decision was made early in the project's development (Phase 2), so no migration path from a previous gossip-based system is needed.
+
+**For Future Reference:**
+If migration becomes necessary in the future (e.g., from one Raft implementation to another), the following approach would be recommended:
+
+1. **Snapshot-Based Migration:**
+   - Create a final snapshot of the source system's metadata state
+   - Initialize new Raft cluster with this snapshot as the initial state
+   - Verify metadata integrity post-migration
+   - Run both systems in parallel during transition period
+
+2. **Compatibility Layers:**
+   - Maintain read compatibility with old metadata format
+   - Gradually transition write operations to new system
+   - Provide rollback capability during migration window
+
+3. **Testing Strategy:**
+   - Full cluster migration testing in development environment
+   - Gradual rollout with canary deployments
+   - Comprehensive validation of metadata consistency
+   - Performance benchmarking pre/post migration
+
+**Current Implementation Approach:**
+Since we're implementing Raft from the start of Phase 2:
+- No legacy gossip protocol to migrate from
+- Clean slate implementation of Raft consensus
+- Focus on getting the Raft implementation right from the beginning
+- Build Phase 2 components incrementally as outlined in the plan
+
 ### Development Guidelines
 
 **Testing Strategy:**
@@ -435,6 +539,7 @@ Additional phases will cover:
 - Integration tests for multi-component interactions
 - End-to-end tests for complete workflows
 - Performance benchmarks for critical paths
+- Raft-specific tests for consensus scenarios (leader election, log replication, network partitions)
 
 **Code Quality:**
 - Use `cargo clippy` for linting
@@ -447,3 +552,10 @@ Additional phases will cover:
 - Pin dependency versions for reproducible builds
 - Regular security audits of dependencies
 - Consider alternatives for heavy dependencies
+
+**Raft Implementation Guidelines:**
+- Keep Raft types simple and focused on metadata operations
+- Separate concerns: log storage (redb) vs state machine (SQLite)
+- Test with local channels first before adding network complexity
+- Comprehensive testing of failure scenarios (node failures, partitions)
+- Monitor performance impact of consensus operations

@@ -26,7 +26,66 @@ WormFS is deployed using two types of nodes: Client Nodes and Storage Nodes. The
 
 Storage Nodes serve two primary roles: meta-data operations and storage operations. Any storage node can serve meta-data operations like creating folders, listing files, or identifying which storage node houses a given Chunk of a Stripe of a File. Similarly, and storage node can facilitate Stripe read and write operations by using its view of Chunk Metadata to issue chunk read and write operations to the appropriate storage nodes in order to Store new/updated Stripes or read existing Stripes on behalf of user requests. 
 
-Since any Storage Node is expected to handle metadata operations and coordinate storage operations by orchestrating chunk read/write operations against its peer storage nodes, it is important that all Storage Nodes have an up to date view of meta-data. To accomplish this, Storage Nodes will gossip meta-data operations using libp2p and track "ack"s of meta-data operations to eliminate drift by rebroadcasting unacknowledged events later. Chunk read and write operations will also go via libp2p but they will not be gossiped to all nodes, instead a direct libp2p stream to the appropriate storage node will be used to avoid network traffic amplification for reading and writing chunks.
+### Raft-Based Consensus Architecture
+
+WormFS uses Raft consensus (via OpenRaft) to ensure strong consistency of metadata operations across the cluster:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Storage Node Architecture                 │
+├─────────────────────────────────────────────────────────────┤
+│                                                               │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              Raft Consensus Layer                     │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │  │
+│  │  │  Leader  │  │ Follower │  │    Follower      │   │  │
+│  │  │ Election │  │   Log    │  │   Replication    │   │  │
+│  │  └──────────┘  └──────────┘  └──────────────────┘   │  │
+│  │                                                        │  │
+│  │  Transaction Log (redb) ─────┐                       │  │
+│  │  • Append-only                │                       │  │
+│  │  • Replicated to majority     │                       │  │
+│  │  • Snapshots for compaction   │                       │  │
+│  └────────────────────────────────│───────────────────────┘  │
+│                                   │                           │
+│                                   ▼ Apply committed ops      │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │         Metadata State Machine (SQLite)              │  │
+│  │  • File metadata (paths, permissions, size)          │  │
+│  │  • Chunk locations (which node has which chunks)     │  │
+│  │  • Stripe mappings (stripe → chunks)                 │  │
+│  │  • Lock state (active read/write locks)              │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                               │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │            Chunk Storage (Local Disks)                │  │
+│  │  • Direct libp2p transfers for chunk data             │  │
+│  │  • Placement coordinated via Raft                     │  │
+│  │  • Erasure-coded stripes                              │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+
+     Metadata ops (via Raft)    │    Chunk transfers (libp2p)
+                                 │
+                                 ▼
+           ┌─────────────────────────────────────┐
+           │    Inter-Node Communication         │
+           │                                     │
+           │  • Raft RPCs (AppendEntries, Vote) │
+           │  • Direct chunk read/write streams  │
+           │  • All over libp2p with encryption  │
+           └─────────────────────────────────────┘
+```
+
+**Key Design Points:**
+
+1. **Two-Tier Storage**: Raft log (redb) for replication, SQLite for materialized state
+2. **Lease-Based Reads**: Leader serves reads directly with valid lease for performance
+3. **Minority Partition Support**: Stale reads available in minority partitions
+4. **Separate Data Plane**: Chunk data transfers bypass Raft for efficiency
+5. **Strong Consistency**: All metadata writes require majority quorum
+
+Since all Storage Nodes participate in the Raft cluster and maintain consistent views of metadata through log replication, any node can handle client requests (though writes are coordinated through the leader). Chunk read and write operations use direct libp2p streams between storage nodes to avoid network traffic amplification - only the chunk metadata operations go through Raft consensus.
 
 Storage nodes will use the reed-solomon-erasure rust create to implement erasure encoding of Stripes of X bytes into k data chunks and m parity chunks. The stripe size, number of data chunks, and number of parity chunks should be configurable. Administrators can configure a global default for these settings as well as a per-directory override of the default. These should appear in the main storage node config file. It is important that these settings match across all storage nodes to ensure you achieve your intended durability goals.
 
@@ -47,15 +106,23 @@ Clients will interact with Storage Nodes via gRPC for filesystem meta-data and S
 
 WormFS takes a simple approach to consistency and concurrency by using basic ReadWriteLock semantics. When a client opens a file for read, it obtains a Read Lock for the file. When a client opens a file for writing, it obtains a Write Lock on the file. These locks expire after 10 seconds if the client does not make a periodic call to 'extend' their ownership of the lock while they have the file open. Concurrent read locks for a single file are allowed but write locks are exclusive of other writes or reads. Read locks can optionally be ignored (client behave as if they succeed) via Storage Node config but write locks can not be disabled. Write locks will ignore read locks if read locks are set to ignore, allowing writers to overwrite files that are being read by others.
 
-**Metadata Consistency:** While "adopted" Meta-data operations are broadcast to all Storage Nodes, only one Storage Node at any given moment is the "master" for meta-data writes. Any Storage Node can "propose" a meta-data write or lock operation to the master but only the master can approve the action. Once approved, leader of that operation can action the operation and broadcast it to all peers. The "Master" is elected via libp2p. All nodes generate heartbeats for visibility to their peers. If the current "Master"'s heartbeat goes stale, a new round of Master election can be proposed by any of the peers once the Master is viewed as offline for more than 10 seconds. The single Master allows us to have a sequence number for all meta-data write operations. This sequence number can then be used by peers to both identify missed messages as well as request copies of those missed messages from their peers as each peer keeps a configurable history of the last N meta-data writes to facilitate these replays. In an extreme case, a node may need to request a full snapshot of the current meta-data database so that it can then begin replay requests to fully catch up.
+**Metadata Consistency:** WormFS uses the Raft consensus protocol (via OpenRaft) to ensure strong consistency for all metadata operations. Raft provides automatic leader election, replicated log management, and guaranteed linearizability for metadata writes. All metadata operations (file creation, chunk location updates, locks, etc.) are proposed to the Raft leader, which replicates them to a majority of nodes before committing. Once committed, operations are applied to each node's local SQLite database, ensuring all nodes have consistent views of metadata.
+
+**Storage Architecture:** WormFS uses a two-tier storage approach for metadata:
+- **Transaction Log (redb):** Stores the Raft log containing all metadata operations. This is the source of truth for replication and recovery.
+- **State Database (SQLite):** Stores the materialized metadata state after log entries are applied. This is optimized for fast queries and filesystem operations.
+
+**Read Optimization:** For performance, WormFS supports lease-based reads where the Raft leader can serve read requests directly without going through consensus, as long as it maintains a valid lease with the majority of nodes. In network partitions, minority partitions can serve stale reads (marked as potentially stale), while only the majority partition can accept writes.
+
+**Snapshot Management:** To prevent unbounded log growth, the system periodically creates snapshots of the SQLite state. Snapshots are triggered either by time (default: 24 hours) or by log size (default: 10MB), both configurable. New nodes joining the cluster receive a snapshot followed by log replay to catch up.
 
 ### Failure Scenarios & Recovery
 
-**Node Failure Detection:** The system must quickly detect when storage nodes become unavailable and initiate appropriate recovery procedures. Nodes broadcast a heartbeat to all peers once a second. A peer is considered offline it has missed 30 consecutive heartbeats. Data of offline nodes is not automatically rebuilt. An administrator must run a command to manually delete offline nodes before peers will attempt to rebuild the missing chunks, placing them on other nodes. Ideally this action can be taken via the web ui but a command line should also be available.
+**Node Failure Detection:** Raft automatically detects node failures through its heartbeat mechanism. The Raft leader sends periodic heartbeats (default: 250ms) to all followers. If a follower doesn't receive a heartbeat within the election timeout window (default: 1-2 seconds), it triggers a new leader election. Data of offline nodes is not automatically rebuilt. An administrator must run a command to manually delete offline nodes before peers will attempt to rebuild the missing chunks, placing them on other nodes. Ideally this action can be taken via the web ui but a command line should also be available.
 
-**Data Scrubbing and Recovery:** The Master Storage Node runs two background anti-entropy tasks that look for damaged files and attempts to repair them. When a new node becomes the master, it will become responsible for running these tasks. The first task is a shallow check that confirms all chunks are accessible for each file stored in the system. This check needs to be cheap because we want to check all chunks quickly so we can detect missing chunks shortly after they are lost and before we lose more chunks for the same file, potentially limiting our ability to rebuild the missing chunk. Storage nodes will implement a "check_chunk" API that will do a cheap file stat to ensure the requested chunk is present. The second task is a deeper check which validates every Stripe stored in the system by first reading each of its chunks and confirming the integrity of each chunk by validating the checksum against the chunk contents. It then reconstructs the Stripe and validates the integrity of the Stripe by asserting the Strip checksum against the Stripe's content. If either of these operations identifies a missing or corrupt chunk, it schedules the corresponding Stripe for a rebuild. This is where a third background task comes into play which attempts to rebuild corrupt Stripes from the available Chunks and then re-writes all Stripe chunks.
+**Data Scrubbing and Recovery:** The Raft Leader runs two background anti-entropy tasks that look for damaged files and attempts to repair them. When a new node becomes the leader, it will become responsible for running these tasks. The first task is a shallow check that confirms all chunks are accessible for each file stored in the system. This check needs to be cheap because we want to check all chunks quickly so we can detect missing chunks shortly after they are lost and before we lose more chunks for the same file, potentially limiting our ability to rebuild the missing chunk. Storage nodes will implement a "check_chunk" API that will do a cheap file stat to ensure the requested chunk is present. The second task is a deeper check which validates every Stripe stored in the system by first reading each of its chunks and confirming the integrity of each chunk by validating the checksum against the chunk contents. It then reconstructs the Stripe and validates the integrity of the Stripe by asserting the Strip checksum against the Stripe's content. If either of these operations identifies a missing or corrupt chunk, it schedules the corresponding Stripe for a rebuild. This is where a third background task comes into play which attempts to rebuild corrupt Stripes from the available Chunks and then re-writes all Stripe chunks.
 
-**Split-Brain Prevention:** Since we have a single master for writes, we do not have any special handling for split-brain other than requiring a majority of nodes be online in order to elect a new master. This ensures only 1 network partition can mutate the storage.
+**Split-Brain Prevention:** Raft's consensus protocol inherently prevents split-brain scenarios. The protocol requires a majority quorum for both leader election and log commitment. This ensures that only one network partition (the one with the majority of nodes) can elect a leader and accept writes. Minority partitions can only serve stale reads and cannot make progress until they rejoin the majority partition.
 
 ### Storage Node - Storage Design
 

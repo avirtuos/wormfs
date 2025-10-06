@@ -31,6 +31,18 @@ prost = "0.12"
 # Database
 rusqlite = { version = "0.30", features = ["bundled"] }
 
+# Raft consensus
+openraft = { version = "0.9.21", features = ["serde"] }
+
+# Raft log storage
+redb = "2.1.1"
+
+# Additional serialization for Raft
+bincode = "1.3"
+
+# Async traits for Raft implementations
+async-trait = "0.1"
+
 # Erasure coding
 reed-solomon-erasure = "6.0"
 

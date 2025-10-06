@@ -9,6 +9,7 @@ pub mod disk_manager;
 pub mod erasure_coding;
 pub mod integrity_checker;
 pub mod metadata_store;
+pub mod raft;
 pub mod storage_layout;
 pub mod storage_node;
 
