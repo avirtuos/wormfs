@@ -140,7 +140,7 @@ jobs:
     - name: Store benchmark result
       uses: benchmark-action/github-action-benchmark@v1
       with:
-        tool: 'criterion'
+        tool: 'cargo'
         output-file-path: target/criterion/**/new/estimates.json
         github-token: ${{ secrets.GITHUB_TOKEN }}
         auto-push: true

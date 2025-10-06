@@ -116,15 +116,15 @@ By breaking this into smaller phases, we achieve:
 
 ---
 
-### **Phase 2B.3: Event Broadcasting Foundation (2-3 days)**
+### **Phase 2B.3: Event Broadcasting Foundation (2-3 days)** COMPLETED
 **Goal:** Implement basic event broadcasting to all connected peers
 
 **Context:** Create the mechanism for distributing metadata events across the cluster. Start with simple fire-and-forget broadcasting before adding reliability.
 
 **Deliverables:**
-- `MetadataBroadcaster` component for event distribution
+- `MetadataReplicator` component for event distribution
 - Broadcast metadata events to all connected peers
-- Event types: FileCreated, FileDeleted, ChunkPlaced, ChunkRemoved
+- Event types: FileCreated, FileDeleted, ChunkCreated, ChunkRemoved, ChunkVerified, ChunkRepaired, ChunkMoved, FileUpdated, StripeCreated, StripeReplaced, StripeDeleted, ChunkDeleted.
 - No ordering guarantees initially (just broadcast)
 - No reliability guarantees initially (fire-and-forget)
 - Basic event filtering (don't echo back to sender)
@@ -149,9 +149,9 @@ By breaking this into smaller phases, we achieve:
 - Scale test: Broadcast to 10+ nodes
 
 **Files Modified:**
-- `src/metadata_broadcaster.rs` - New broadcaster component
+- `src/metadata_replicator.rs` - New broadcaster component
 - `src/storage_node.rs` - Integrate broadcaster
-- `tests/metadata_broadcast_tests.rs` - Broadcasting tests
+- `tests/metadata_replicator_tests.rs` - Broadcasting tests
 - `src/lib.rs` - Export broadcaster types
 
 ---

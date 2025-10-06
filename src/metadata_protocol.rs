@@ -330,7 +330,7 @@ pub fn create_chunk_placed_event(
             timestamp: system_time_to_timestamp(SystemTime::now()),
         }),
         timestamp: system_time_to_timestamp(SystemTime::now()),
-        event: Some(metadata_event::Event::ChunkPlaced(ChunkPlacedEvent {
+        event: Some(metadata_event::Event::ChunkCreated(ChunkCreatedEvent {
             chunk: Some(chunk_metadata.into()),
         })),
     }

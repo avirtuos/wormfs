@@ -6,13 +6,15 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     libfuse-dev \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
 WORKDIR /usr/src/app
 
-# Copy manifests and benchmarks
+# Copy manifests, build script, and benchmarks
 COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./
 COPY benches ./benches
 
 # Create a dummy main.rs and lib.rs to build dependencies
