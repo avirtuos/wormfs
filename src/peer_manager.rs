@@ -263,6 +263,20 @@ impl PeerManager {
             NetworkEvent::Error { message } => {
                 warn!("Network error: {}", message);
             }
+            NetworkEvent::MetadataRequestReceived { peer_id, request } => {
+                debug!(
+                    "Metadata request received from peer {}: {:?}",
+                    peer_id, request
+                );
+                // Metadata handling will be implemented in Phase 2B.3+
+            }
+            NetworkEvent::MetadataResponseReceived { peer_id, response } => {
+                debug!(
+                    "Metadata response received from peer {}: {:?}",
+                    peer_id, response
+                );
+                // Metadata handling will be implemented in Phase 2B.3+
+            }
         }
     }
 

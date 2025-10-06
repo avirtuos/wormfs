@@ -9,6 +9,7 @@ pub mod disk_manager;
 pub mod erasure_coding;
 pub mod integrity_checker;
 pub mod metadata_protocol;
+pub mod metadata_protocol_handler;
 pub mod metadata_store;
 pub mod networking;
 pub mod peer_authorizer;
