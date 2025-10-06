@@ -464,6 +464,22 @@ impl MetadataStore {
                 version INTEGER PRIMARY KEY
             );
 
+            -- Sequence number tracking for metadata replication (Phase 2B.4)
+            CREATE TABLE IF NOT EXISTS sequence_numbers (
+                node_id TEXT PRIMARY KEY,
+                sequence_number INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            -- Peer sequence tracking for gap detection (Phase 2B.4)
+            CREATE TABLE IF NOT EXISTS peer_sequences (
+                node_id TEXT NOT NULL,
+                peer_node_id TEXT NOT NULL,
+                last_seen_sequence INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (node_id, peer_node_id)
+            );
+
             -- Indexes for performance
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             CREATE INDEX IF NOT EXISTS idx_stripes_file_id ON stripes(file_id);
@@ -878,6 +894,97 @@ impl MetadataStore {
         }
 
         Ok(stripes)
+    }
+
+    // ===== Sequence Number Persistence Methods (Phase 2B.4) =====
+
+    /// Save the local node's sequence number
+    pub fn save_sequence_number(&self, node_id: Uuid, sequence: u64) -> MetadataResult<()> {
+        let now = system_time_to_timestamp(SystemTime::now());
+
+        self.conn.execute(
+            r#"
+            INSERT INTO sequence_numbers (node_id, sequence_number, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(node_id) DO UPDATE SET
+                sequence_number = ?2,
+                updated_at = ?3
+            "#,
+            (node_id.to_string(), sequence as i64, now),
+        )?;
+
+        Ok(())
+    }
+
+    /// Load the local node's sequence number
+    pub fn load_sequence_number(&self, node_id: Uuid) -> MetadataResult<Option<u64>> {
+        let result = self
+            .conn
+            .query_row(
+                "SELECT sequence_number FROM sequence_numbers WHERE node_id = ?1",
+                [node_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+
+        Ok(result.map(|seq| seq as u64))
+    }
+
+    /// Save peer sequence numbers (batch update)
+    pub fn save_peer_sequences(
+        &self,
+        node_id: Uuid,
+        peer_sequences: &std::collections::HashMap<Uuid, u64>,
+    ) -> MetadataResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let now = system_time_to_timestamp(SystemTime::now());
+
+        for (peer_node_id, sequence) in peer_sequences {
+            tx.execute(
+                r#"
+                INSERT INTO peer_sequences (node_id, peer_node_id, last_seen_sequence, updated_at)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(node_id, peer_node_id) DO UPDATE SET
+                    last_seen_sequence = ?3,
+                    updated_at = ?4
+                "#,
+                (
+                    node_id.to_string(),
+                    peer_node_id.to_string(),
+                    *sequence as i64,
+                    now,
+                ),
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Load peer sequence numbers
+    pub fn load_peer_sequences(
+        &self,
+        node_id: Uuid,
+    ) -> MetadataResult<std::collections::HashMap<Uuid, u64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT peer_node_id, last_seen_sequence FROM peer_sequences WHERE node_id = ?1",
+        )?;
+
+        let rows = stmt.query_map([node_id.to_string()], |row| {
+            let peer_id_str: String = row.get(0)?;
+            let sequence: i64 = row.get(1)?;
+            Ok((peer_id_str, sequence))
+        })?;
+
+        let mut sequences = std::collections::HashMap::new();
+        for row in rows {
+            let (peer_id_str, sequence) = row?;
+            if let Ok(peer_id) = Uuid::parse_str(&peer_id_str) {
+                sequences.insert(peer_id, sequence as u64);
+            }
+        }
+
+        Ok(sequences)
     }
 
     /// Get database statistics

@@ -15,6 +15,7 @@ pub mod metadata_store;
 pub mod networking;
 pub mod peer_authorizer;
 pub mod peer_manager;
+pub mod sequence_tracker;
 pub mod storage_layout;
 pub mod storage_node;
 
@@ -28,5 +29,6 @@ pub use metadata_store::*;
 pub use networking::*;
 pub use peer_authorizer::*;
 pub use peer_manager::*;
+pub use sequence_tracker::*;
 pub use storage_layout::*;
 pub use storage_node::*;
