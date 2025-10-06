@@ -17,8 +17,9 @@ This project is a work in progress. It is not even remotely usable at this point
 - **Data Shards** - the original chunks of a stripe that contain actual file data.
 - **Parity Shards** - the redundant chunks created through erasure coding that enable recovery of lost data shards.
 - **Storage Policy** - configuration that defines redundancy level (k+m), stripe size, and other storage parameters for files or directories.
-- **Node Consensus** - the process by which storage nodes agree on metadata changes and cluster state.
-- **Gossip Protocol** - peer-to-peer communication method used to propagate metadata updates across all storage nodes.
+- **Raft Consensus** - the distributed consensus protocol (via OpenRaft) that ensures all storage nodes agree on metadata changes and maintain consistent cluster state.
+- **Transaction Log** - durable log of all metadata operations, backed by redb for persistence and crash recovery.
+- **State Machine** - the metadata store that applies committed Raft log entries to maintain consistent state across the cluster.
 
 ## Architecture
 
@@ -47,7 +48,26 @@ Clients will interact with Storage Nodes via gRPC for filesystem meta-data and S
 
 WormFS takes a simple approach to consistency and concurrency by using basic ReadWriteLock semantics. When a client opens a file for read, it obtains a Read Lock for the file. When a client opens a file for writing, it obtains a Write Lock on the file. These locks expire after 10 seconds if the client does not make a periodic call to 'extend' their ownership of the lock while they have the file open. Concurrent read locks for a single file are allowed but write locks are exclusive of other writes or reads. Read locks can optionally be ignored (client behave as if they succeed) via Storage Node config but write locks can not be disabled. Write locks will ignore read locks if read locks are set to ignore, allowing writers to overwrite files that are being read by others.
 
-**Metadata Consistency:** While "adopted" Meta-data operations are broadcast to all Storage Nodes, only one Storage Node at any given moment is the "master" for meta-data writes. Any Storage Node can "propose" a meta-data write or lock operation to the master but only the master can approve the action. Once approved, leader of that operation can action the operation and broadcast it to all peers. The "Master" is elected via libp2p. All nodes generate heartbeats for visibility to their peers. If the current "Master"'s heartbeat goes stale, a new round of Master election can be proposed by any of the peers once the Master is viewed as offline for more than 10 seconds. The single Master allows us to have a sequence number for all meta-data write operations. This sequence number can then be used by peers to both identify missed messages as well as request copies of those missed messages from their peers as each peer keeps a configurable history of the last N meta-data writes to facilitate these replays. In an extreme case, a node may need to request a full snapshot of the current meta-data database so that it can then begin replay requests to fully catch up.
+**Metadata Consistency:** WormFS uses the Raft consensus protocol (via the OpenRaft crate) to ensure all storage nodes maintain a consistent view of metadata. Raft provides:
+
+- **Leader Election:** A single leader (master) is automatically elected from the cluster. All metadata write operations must go through the leader, which assigns them a log index and replicates them to followers.
+- **Log Replication:** Metadata operations are written to a durable transaction log (backed by redb) and replicated to a majority of nodes before being committed. This ensures operations survive crashes and network partitions.
+- **State Machine:** Each storage node maintains a metadata store (SQLite) that acts as the Raft state machine. Committed log entries are applied to the state machine in order, ensuring all nodes reach the same state.
+- **Automatic Failover:** If the leader fails, a new leader is automatically elected within seconds. The new leader resumes processing operations without data loss.
+- **Split-Brain Prevention:** Raft's majority-based quorum ensures only one partition can make progress during a network split, preventing conflicting writes.
+
+**Transaction Log Architecture:** The Raft transaction log uses a trait-based abstraction (`TransactionLog`) backed by redb for persistence. This provides:
+
+- **Durability:** All metadata operations are written to disk before being acknowledged, ensuring crash recovery.
+- **Efficient Storage:** Redb provides zero-copy reads and optimized sequential writes for log entries.
+- **Log Compaction:** Periodic snapshots of the metadata state allow truncating old log entries to bound disk usage.
+- **Abstraction:** The trait allows swapping implementations (in-memory for tests, rocksdb for production alternatives).
+
+**Consistency Guarantees:** With Raft, WormFS provides linearizable consistency for metadata operations. This is stronger than eventual consistency and ensures:
+
+- All metadata reads and writes appear to execute atomically in a single order
+- Once a write is acknowledged, all subsequent reads will see that write
+- No split-brain scenarios where different nodes have conflicting metadata states
 
 ### Failure Scenarios & Recovery
 

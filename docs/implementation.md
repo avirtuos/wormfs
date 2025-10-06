@@ -202,27 +202,28 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ---
 
-#### **Phase 2B: Metadata Gossip Protocol (2-3 weeks)** IN_PROGRESS
-**Goal:** Implement distributed metadata synchronization
+#### **Phase 2B: Metadata Consensus Protocol (1-2 weeks)** IN_PROGRESS
+**Goal:** Implement distributed metadata synchronization using OpenRaft
 
 **Deliverables:**
 - see phase_2b_detailed.md for more details
-- Metadata gossip system with:
-  - Master election using libp2p consensus
-  - Metadata operation proposal and approval workflow
-  - Event broadcasting with sequence numbers
-  - Acknowledgment tracking and replay mechanisms
-  - Conflict resolution for metadata operations
+- Raft-based consensus system with:
+  - OpenRaft integration for leader election and log replication
+  - TransactionLog trait with redb implementation for durable log storage
+  - Metadata operations as Raft log entries
+  - State machine implementation using MetadataStore
+  - Automatic failover and split-brain prevention
 
 **Success Criteria:**
-- Single master elected and maintained across network partitions
-- Metadata operations propagate to all nodes reliably
-- Missed operations detected and replayed correctly
-- Master failover works within 10 seconds
+- Leader automatically elected and maintained via Raft
+- Metadata operations replicated to majority quorum before commit
+- Linearizable consistency for all metadata operations
+- Automatic leader failover works within 5-10 seconds
+- Transaction log survives crashes and recovers state
 - No clippy errors or warnings
 - No rust format errors or warnings.
 
-**Key Files:** `src/gossip_protocol.rs`, `src/master_election.rs`, `src/metadata_sync.rs`
+**Key Files:** `src/raft_node.rs`, `src/transaction_log.rs`, `src/redb_transaction_log.rs`, `src/raft_storage.rs`, `src/raft_network.rs`, `src/raft_state_machine.rs`
 
 ---
 

@@ -198,261 +198,153 @@ By breaking this into smaller phases, we achieve:
 
 ---
 
-### **Phase 2B.5: Simple Master Election (3-4 days)**
-**Goal:** Implement basic leader election for metadata coordination
+### **Phase 2B.5: OpenRaft Integration & Leader Election (4-5 days)**
+**Goal:** Integrate OpenRaft for distributed consensus instead of building custom master election
 
-**Context:** Metadata operations need coordination to prevent conflicts. A master node will coordinate all metadata changes. Start with a simple deterministic election before adding sophistication.
+**Context:** Rather than building custom master election, proposal/approval workflow, acknowledgments, replay, and partition handling from scratch (which essentially describes the Raft consensus algorithm), we leverage the battle-tested OpenRaft crate. This gives us production-ready consensus with linearizable consistency guarantees while reducing implementation complexity by ~70%.
+
+**Architectural Decision:**
+Using OpenRaft provides:
+- Leader election with automatic failover
+- Replicated log with majority-based commits
+- Split-brain prevention via quorum
+- Automatic conflict resolution (linearizable operations)
+- Network partition handling
+- Log compaction and snapshots
 
 **Deliverables:**
-- Simple election algorithm: lowest peer ID becomes master
-- Master announcement broadcasts
-- Master heartbeat to maintain leadership
-- Master failure detection by peers
-- Automatic re-election on master failure
-- Track current master in all nodes
-- Master-only operation enforcement
+
+1. **TransactionLog Trait** (`src/transaction_log.rs`)
+   - Abstraction for Raft log storage
+   - Methods: `append()`, `get()`, `get_range()`, `truncate()`, `compact()`, `flush()`
+   - Async trait compatible with tokio
+
+2. **Redb Implementation** (`src/redb_transaction_log.rs`)
+   - Durable transaction log using redb
+   - Efficient sequential writes and zero-copy reads
+   - Crash recovery support
+   - Atomic operations for consistency
+
+3. **Raft Storage** (`src/raft_storage.rs`)
+   - Implements OpenRaft's `RaftLogStorage` trait
+   - Uses TransactionLog for log entries
+   - Stores Raft hard state (current term, voted_for)
+   - Snapshot support for log compaction
+
+4. **Raft Network** (`src/raft_network.rs`)
+   - Implements OpenRaft's `RaftNetwork` trait
+   - Routes Raft RPCs through libp2p NetworkService
+   - Handles AppendEntries, RequestVote, InstallSnapshot
+
+5. **Raft State Machine** (`src/raft_state_machine.rs`)
+   - Implements OpenRaft's `RaftStateMachine` trait
+   - Applies committed log entries to MetadataStore
+   - Snapshot creation and restoration
+
+6. **Raft Node** (`src/raft_node.rs`)
+   - Main Raft coordination component
+   - Initializes OpenRaft with custom implementations
+   - Handles leader election and membership changes
+   - Exposes API for submitting metadata operations
 
 **Success Criteria:**
-- Consistent master elected across all nodes
-- Master election completes within 10 seconds of startup
-- Master failure detected within 30 seconds
-- Re-election completes within 15 seconds
-- All nodes agree on current master
-- Split-brain prevented (only one master at a time)
+- Leader automatically elected on startup (< 2s)
+- Metadata operations go through Raft log
+- Operations replicated to majority quorum before commit
+- Automatic failover on leader failure (< 10s)
+- Transaction log survives crashes and recovers state
+- Linearizable consistency for all metadata operations
 - No clippy errors or warnings
 - No cargo formatting errors or warnings
 
 **Test Strategy:**
-- Integration test: Start 3 nodes, verify same master elected
-- Integration test: Kill master, verify re-election
-- Integration test: Verify new master elected within timeout
-- Integration test: All nodes agree on master after election
-- Chaos test: Rapidly start/stop nodes, verify stable elections
-- Partition test: Network partition, verify election in majority partition
-- Scale test: Election with 10+ nodes
+- Unit tests for TransactionLog trait implementations
+- Integration test: 3-node cluster leader election
+- Integration test: Metadata operation replication
+- Integration test: Leader failure and re-election
+- Integration test: Network partition (majority continues, minority blocks)
+- Chaos test: Random node failures during operations
+- Performance test: Operation throughput and latency
 
-**Files Modified:**
-- `src/master_election.rs` - New election implementation
-- `src/metadata_coordinator.rs` - New coordinator using master
-- `src/storage_node.rs` - Integrate election
-- `tests/election_tests.rs` - Election tests
-- `config/storage_node.yaml` - Election configuration
+**Files to Create/Modify:**
+- `src/transaction_log.rs` (new)
+- `src/redb_transaction_log.rs` (new)
+- `src/raft_storage.rs` (new)
+- `src/raft_network.rs` (new)
+- `src/raft_state_machine.rs` (new)
+- `src/raft_node.rs` (new)
+- `src/metadata_replicator.rs` (modify to use Raft)
+- `src/storage_node.rs` (integrate Raft node)
+- `src/lib.rs` (export new modules)
+- `Cargo.toml` (add openraft and redb dependencies)
+- `config/storage_node.yaml` (add Raft configuration)
+- `tests/raft_consensus_tests.rs` (new)
 
----
+**Configuration Example:**
+```yaml
+raft:
+  data_dir: "./data/raft"
+  
+  transaction_log:
+    type: "redb"
+    path: "./data/raft/transaction.log"
+    cache_size_mb: 128
+    
+  election:
+    timeout_ms: 1500
+    heartbeat_interval_ms: 500
+    
+  snapshot:
+    enabled: true
+    threshold_entries: 10000
+    path: "./data/raft/snapshots"
+```
 
-### **Phase 2B.6: Metadata Operation Workflow (3-4 days)**
-**Goal:** Implement proposal/approval workflow for metadata operations
+**What This Phase Replaces:**
+This single phase effectively replaces what would have been:
+- Custom master election (old Phase 2B.5)
+- Proposal/approval workflow (old Phase 2B.6)
+- Acknowledgment system (old Phase 2B.7)
+- Event replay mechanism (old Phase 2B.8)
+- Conflict resolution (old Phase 2B.9)
+- Partition handling (old Phase 2B.10)
 
-**Context:** With master election in place, implement the workflow where nodes propose metadata changes to the master, and the master approves and broadcasts them.
-
-**Deliverables:**
-- Proposal submission from any node to master
-- Master validation of proposals
-- Master approval and sequence number assignment
-- Master broadcasts approved operations
-- Response routing back to proposer
-- Operation timeout handling
-- Basic conflict detection at master
-
-**Success Criteria:**
-- Non-master nodes can propose operations
-- Master receives and validates proposals
-- Master assigns sequence numbers to approved operations
-- Approved operations broadcast to all peers
-- Proposer receives confirmation of approval/rejection
-- Rejected operations include reason
-- Operation lifecycle completes within 5 seconds
-- No clippy errors or warnings
-- No cargo formatting errors or warnings
-
-**Test Strategy:**
-- Integration test: Node A proposes, master approves, all receive
-- Integration test: Invalid proposal rejected with reason
-- Integration test: Concurrent proposals handled correctly
-- Integration test: Proposal timeout handling
-- Integration test: Master change during proposal in-flight
-- Performance test: Proposal throughput measurement
-- Stress test: High-frequency proposals from multiple nodes
-
-**Files Modified:**
-- `src/metadata_coordinator.rs` - Proposal workflow
-- `src/metadata_protocol.rs` - Add proposal/response messages
-- `src/storage_node.rs` - Proposal submission API
-- `tests/proposal_tests.rs` - Proposal workflow tests
-- `src/metadata_store.rs` - Apply approved operations
+All of these capabilities are provided automatically by OpenRaft's Raft implementation.
 
 ---
 
-### **Phase 2B.7: Acknowledgment System (2-3 days)**
-**Goal:** Track acknowledgments from peers for broadcast events
+### **Phase 2B.6: Metadata Operation Workflow (3-4 days)** ⚠️ SUPERSEDED BY OPENRAFT
 
-**Context:** To ensure all nodes have received and processed metadata events, implement an acknowledgment system that tracks which nodes have confirmed receipt.
-
-**Deliverables:**
-- Send acknowledgments for received events
-- Track acknowledgments per event at master
-- Configurable acknowledgment timeout
-- Retry logic for missing acknowledgments
-- Event considered committed when quorum acks received
-- Handle nodes that never acknowledge
-- Acknowledgment status API for monitoring
-
-**Success Criteria:**
-- Peers send acknowledgments for received events
-- Master tracks acknowledgments per event
-- Can determine when event is fully acknowledged
-- Timeout for slow/failed peers works correctly
-- Quorum-based commit detection (majority of nodes)
-- Integration test verifies acknowledgment flow
-- No clippy errors or warnings
-- No cargo formatting errors or warnings
-
-**Test Strategy:**
-- Integration test: Broadcast event, verify all nodes acknowledge
-- Integration test: Delay one node's ack, verify timeout handling
-- Integration test: Kill one node, verify quorum still achieved
-- Integration test: Verify event marked committed after quorum
-- Performance test: Acknowledgment overhead measurement
-- Chaos test: Random node failures during acknowledgment
-- Scale test: Acknowledgments with 10+ nodes
-
-**Files Modified:**
-- `src/metadata_protocol.rs` - Add acknowledgment messages
-- `src/metadata_coordinator.rs` - Track acknowledgments
-- `src/ack_tracker.rs` - New acknowledgment tracking module
-- `tests/ack_tests.rs` - Acknowledgment tests
-- `config/storage_node.yaml` - Acknowledgment timeout config
+**Note:** This phase is **automatically handled by OpenRaft** (Phase 2B.5). Raft's log replication provides the proposal/approval workflow through its AppendEntries RPC. Operations are submitted to the leader, replicated to a majority quorum, and then committed. This provides stronger guarantees (linearizability) than a custom implementation would.
 
 ---
 
-### **Phase 2B.8: Event Replay Mechanism (3-4 days)**
-**Goal:** Request and replay missed events to maintain consistency
+### **Phase 2B.7: Acknowledgment System (2-3 days)** ⚠️ SUPERSEDED BY OPENRAFT
 
-**Context:** When nodes detect gaps in sequence numbers or join the cluster, they need to request and replay missed events to catch up with cluster state.
-
-**Deliverables:**
-- Gap detection triggers replay requests
-- Request specific event ranges from peers
-- Batch replay for efficiency
-- Order preservation during replay
-- Replay from multiple peers if needed
-- Catchup for newly joined nodes
-- Replay progress tracking and logging
-
-**Success Criteria:**
-- Detected gaps trigger automatic replay requests
-- Can request and receive event ranges from peers
-- Replayed events applied in correct order
-- Newly joined nodes catch up to current state
-- Replay completes within reasonable time (< 30s for 1000 events)
-- Handle replay failures gracefully (retry with different peer)
-- No clippy errors or warnings
-- No cargo formatting errors or warnings
-
-**Test Strategy:**
-- Integration test: Pause node, generate events, resume, verify catchup
-- Integration test: Start new node, verify it catches up
-- Integration test: Request specific range, verify correct events received
-- Integration test: Replay from multiple peers if one fails
-- Performance test: Catchup time for various event counts
-- Stress test: Catchup under continuous new events
-- Scale test: Large event log replay (10k+ events)
-
-**Files Modified:**
-- `src/metadata_protocol.rs` - Add replay request/response messages
-- `src/event_replay.rs` - New replay mechanism
-- `src/metadata_coordinator.rs` - Integrate replay
-- `src/metadata_store.rs` - Store events for replay
-- `tests/replay_tests.rs` - Replay mechanism tests
+**Note:** This phase is **automatically handled by OpenRaft** (Phase 2B.5). Raft's AppendEntries RPC includes built-in acknowledgments from followers. The leader tracks which followers have replicated each log entry and only commits entries once a majority has acknowledged. This is more robust than a custom acknowledgment system.
 
 ---
 
-### **Phase 2B.9: Conflict Resolution (3-4 days)**
-**Goal:** Handle concurrent operations and resolve conflicts
+### **Phase 2B.8: Event Replay Mechanism (3-4 days)** ⚠️ SUPERSEDED BY OPENRAFT
 
-**Context:** Even with master coordination, conflicts can occur during network partitions or rapid concurrent operations. Implement deterministic conflict resolution.
-
-**Deliverables:**
-- Timestamp-based conflict detection
-- Last-write-wins (LWW) conflict resolution
-- Handle concurrent file creation/deletion
-- Handle concurrent chunk placement operations
-- Conflict resolution during partition healing
-- Maintain consistency guarantees (eventual consistency)
-- Conflict event logging for debugging
-
-**Success Criteria:**
-- Concurrent operations resolved deterministically
-- Same conflict always resolves the same way on all nodes
-- Timestamps provide total ordering of operations
-- No data loss during conflict resolution
-- Conflicts logged clearly for debugging
-- Integration test verifies conflict resolution
-- No clippy errors or warnings
-- No cargo formatting errors or warnings
-
-**Test Strategy:**
-- Integration test: Concurrent file creation from two nodes
-- Integration test: Verify deterministic resolution
-- Integration test: Partition cluster, create conflicts, heal, verify resolution
-- Integration test: Same-timestamp operations handled correctly
-- Unit test: Conflict resolution algorithm correctness
-- Chaos test: High-conflict scenarios
-- Consistency test: All nodes reach same final state
-
-**Files Modified:**
-- `src/conflict_resolver.rs` - New conflict resolution module
-- `src/metadata_coordinator.rs` - Integrate conflict resolution
-- `src/metadata_protocol.rs` - Add conflict resolution fields
-- `tests/conflict_tests.rs` - Conflict resolution tests
-- `src/metadata_store.rs` - Apply conflict resolution logic
+**Note:** This phase is **automatically handled by OpenRaft** (Phase 2B.5). Raft automatically detects when followers fall behind and sends them missing log entries via AppendEntries RPCs. New nodes joining the cluster receive a snapshot (if far behind) followed by log entries to catch up. This is more efficient than custom replay logic.
 
 ---
 
-### **Phase 2B.10: Network Partition Handling (3-4 days)**
-**Goal:** Detect and handle network partitions gracefully
+### **Phase 2B.9: Conflict Resolution (3-4 days)** ⚠️ SUPERSEDED BY OPENRAFT
 
-**Context:** Network partitions are inevitable in distributed systems. Implement detection and handling to prevent data corruption and ensure recovery when the partition heals.
-
-**Deliverables:**
-- Detect network partitions via heartbeat monitoring
-- Prevent split-brain (only majority partition operates)
-- Minority partition becomes read-only
-- Track diverged state during partition
-- Merge metadata after partition healing
-- Prevent operations in minority partition
-- Partition detection logging and alerting
-
-**Success Criteria:**
-- Partitions detected within 30 seconds
-- Only majority partition continues metadata operations
-- Minority partition rejects new operations
-- Partition healing detected and reconciliation starts
-- Metadata converges after partition heals
-- No data corruption or loss during partition
-- No clippy errors or warnings
-- No cargo formatting errors or warnings
-
-**Test Strategy:**
-- Integration test: Create partition (2 nodes vs 1 node)
-- Integration test: Verify majority continues, minority blocks
-- Integration test: Heal partition, verify reconciliation
-- Integration test: Verify all nodes reach consistent state after healing
-- Chaos test: Multiple partitions in sequence
-- Chaos test: Partition during active operations
-- Edge case test: Exactly split cluster (2 vs 2)
-
-**Files Modified:**
-- `src/partition_detector.rs` - New partition detection module
-- `src/metadata_coordinator.rs` - Partition handling logic
-- `src/master_election.rs` - Partition-aware election
-- `tests/partition_tests.rs` - Partition handling tests
-- `config/storage_node.yaml` - Partition detection config
+**Note:** This phase is **automatically handled by OpenRaft** (Phase 2B.5). Raft's linearizable consistency model prevents conflicts entirely - all operations are sequenced by the leader in a single log, eliminating concurrent conflicting operations. This is stronger than eventual consistency with conflict resolution.
 
 ---
 
-### **Phase 2B.11: Integration and Testing (3-4 days)**
-**Goal:** Comprehensive testing of complete metadata gossip system
+### **Phase 2B.10: Network Partition Handling (3-4 days)** ⚠️ SUPERSEDED BY OPENRAFT
+
+**Note:** This phase is **automatically handled by OpenRaft** (Phase 2B.5). Raft's linearizable consistency model prevents conflicts entirely - all operations are sequenced by the leader in a single log, eliminating concurrent conflicting operations. This is stronger than eventual consistency with conflict resolution.
+
+---
+
+### **Phase 2B.11: Raft Integration Testing (3-4 days)**
+**Goal:** Comprehensive testing of OpenRaft-based metadata consensus system
 
 **Context:** Validate the complete distributed metadata synchronization system under realistic conditions with multiple nodes and various failure scenarios.
 
@@ -491,6 +383,167 @@ By breaking this into smaller phases, we achieve:
 - `benches/metadata_bench.rs` - Performance benchmarks
 - `tests/chaos_tests.rs` - Chaos testing for gossip
 - `src/storage_node.rs` - Final integration touches
+
+---
+
+### **Phase 2B.12: Transaction Log Compaction (2-3 days)**
+**Goal:** Implement automatic log compaction to prevent unbounded growth of the Raft transaction log
+
+**Context:** Without log compaction, the Raft transaction log would grow indefinitely, eventually consuming all disk space and increasing startup/recovery times. By implementing automatic snapshotting and log truncation, we can maintain bounded disk usage while preserving the ability to recover from crashes and catch up lagging peers.
+
+**Deliverables:**
+
+1. **Snapshot Manager** (`src/snapshot_manager.rs`)
+   - Create snapshots of current metadata state
+   - Store snapshots separately from transaction log
+   - Versioned snapshot format for future compatibility
+   - Atomic snapshot creation to prevent corruption
+
+2. **Automatic Snapshot Triggers**
+   - Trigger based on log entry count threshold (e.g., 10,000 entries)
+   - Trigger based on log size threshold (e.g., 1GB)
+   - Time-based triggers (e.g., every 6 hours)
+   - Background task to monitor and trigger snapshots
+
+3. **Log Compaction**
+   - Truncate log entries covered by snapshot
+   - Keep configurable buffer of recent entries (e.g., 100)
+   - Atomic compaction operations
+   - Space reclamation via redb compaction
+
+4. **Snapshot-based Catch-up**
+   - Send snapshot to far-behind peers
+   - Follow with log entries after snapshot point
+   - Much faster than replaying entire log history
+   - Progress tracking and resumption on failure
+
+5. **Multi-version Snapshots**
+   - Keep last N snapshots for safety (e.g., 3)
+   - Garbage collect old snapshots
+   - Allow rollback if corruption detected
+
+**Success Criteria:**
+- Snapshots automatically created when thresholds exceeded
+- Transaction log remains bounded in size
+- Log compaction works without data loss
+- Far-behind peers catch up via snapshot + log tail
+- Snapshot creation doesn't block operations
+- Old snapshots garbage collected properly
+- System recovers correctly from snapshot on restart
+- No clippy errors or warnings
+
+**Test Strategy:**
+- Unit test: Snapshot creation and restoration
+- Unit test: Log compaction correctness
+- Integration test: Generate 10k+ operations, verify log compaction
+- Integration test: Stop node, compact, restart, verify state preserved
+- Integration test: New node catches up via snapshot
+- Integration test: Multiple concurrent snapshots handled correctly
+- Performance test: Snapshot creation time for various metadata sizes
+- Stress test: Continuous operations with periodic compaction
+
+**Configuration:**
+```yaml
+raft:
+  transaction_log:
+    max_size_mb: 1024           # Trigger snapshot when log exceeds this
+    max_entries: 10000          # Trigger snapshot after this many entries
+    
+  snapshot:
+    enabled: true
+    interval_hours: 6           # Take snapshot every 6 hours
+    min_entries: 1000           # Don't snapshot if fewer than this
+    keep_count: 3               # Keep last 3 snapshots
+    
+  compaction:
+    enabled: true
+    retention_entries: 100      # Keep this many entries after compaction
+    run_interval_mins: 30       # Check for compaction every 30 minutes
+```
+
+**Files to Create/Modify:**
+- `src/snapshot_manager.rs` (new)
+- `src/log_compactor.rs` (new)
+- `src/redb_transaction_log.rs` (add compaction support)
+- `src/raft_storage.rs` (integrate snapshot creation/restoration)
+- `src/raft_node.rs` (add compaction background task)
+- `tests/log_compaction_tests.rs` (new)
+- `config/storage_node.yaml` (add compaction config)
+
+**Implementation Details:**
+
+1. **Snapshot Creation:**
+   ```rust
+   pub async fn create_snapshot(&self, up_to_index: u64) -> Result<Snapshot> {
+       // 1. Create snapshot of metadata store state
+       let metadata_state = self.metadata_store.export_state()?;
+       
+       // 2. Write snapshot to disk atomically
+       let snapshot_path = self.snapshot_path(up_to_index);
+       write_snapshot_atomic(&snapshot_path, &metadata_state)?;
+       
+       // 3. Return snapshot metadata
+       Ok(Snapshot {
+           index: up_to_index,
+           term: self.current_term,
+           path: snapshot_path,
+           size: metadata_state.len(),
+           checksum: calculate_checksum(&metadata_state),
+       })
+   }
+   ```
+
+2. **Log Compaction:**
+   ```rust
+   pub async fn compact_log(&self, snapshot: &Snapshot) -> Result<()> {
+       // 1. Delete all entries <= snapshot.index
+       self.transaction_log.compact(snapshot.index).await?;
+       
+       // 2. Update first_index in log metadata
+       self.transaction_log.set_first_index(snapshot.index + 1).await?;
+       
+       // 3. Trigger redb compaction to reclaim space
+       self.transaction_log.flush().await?;
+       
+       Ok(())
+   }
+   ```
+
+3. **Snapshot-based Recovery:**
+   ```rust
+   pub async fn recover_from_snapshot(&self) -> Result<u64> {
+       // 1. Find latest valid snapshot
+       let snapshot = self.find_latest_snapshot()?;
+       
+       // 2. Restore metadata store from snapshot
+       self.metadata_store.import_state(&snapshot.data)?;
+       
+       // 3. Replay log entries after snapshot
+       let entries = self.transaction_log
+           .get_range((snapshot.index + 1)..)
+           .await?;
+       for entry in entries {
+           self.apply_to_state_machine(entry)?;
+       }
+       
+       Ok(snapshot.index)
+   }
+   ```
+
+**Benefits:**
+- ✅ Bounded disk usage (log doesn't grow forever)
+- ✅ Faster startup/recovery (load snapshot + small log tail)
+- ✅ Efficient catch-up for lagging peers (snapshot + recent entries)
+- ✅ Configurable trade-offs (frequency vs performance)
+- ✅ Safe operation (atomic operations, multiple snapshot versions)
+
+**Edge Cases Handled:**
+- Snapshot creation during active operations (use copy-on-write)
+- Crash during snapshot creation (atomic writes)
+- Crash during log compaction (transactional operations)
+- Concurrent snapshot requests (serialize with mutex)
+- Snapshot transfer failure (retry with exponential backoff)
+- Corrupt snapshot detection (checksum validation)
 
 ---
 
