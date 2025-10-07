@@ -168,12 +168,19 @@ message InstallSnapshotResponse {
 // Raft Message Wrappers
 // ============================================================================
 
+// Node announcement for peer discovery
+message NodeAnnouncement {
+  uint64 node_id = 1;
+  string version = 2;  // Software version for compatibility
+}
+
 // Wrapper for all Raft RPC requests
 message RaftRequest {
   oneof request {
     AppendEntriesRequest append_entries = 1;
     VoteRequest vote = 2;
     InstallSnapshotRequest install_snapshot = 3;
+    NodeAnnouncement announce = 4;
   }
 }
 

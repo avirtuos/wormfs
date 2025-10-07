@@ -84,7 +84,7 @@ pub fn decode_raft_response(bytes: &[u8]) -> Result<RaftResponse>;
 
 ---
 
-### Chunk 2: Libp2p Swarm Setup (~200 lines)
+### Chunk 2: Libp2p Swarm Setup (~200 lines) - COMPLETED
 
 **File:** `src/transport/libp2p_network.rs` (expand existing)
 
@@ -143,7 +143,7 @@ impl Libp2pNetwork {
 
 ---
 
-### Chunk 3: Connection Management (~200 lines)
+### Chunk 3: Connection Management (~200 lines) - COMPLETED
 
 **File:** `src/transport/libp2p_network.rs` (expand)
 

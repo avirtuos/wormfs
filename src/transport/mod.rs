@@ -59,6 +59,12 @@ pub struct PeerInfo {
 
     /// Network address (e.g., "/ip4/127.0.0.1/tcp/3000")
     pub address: String,
+
+    /// Optional libp2p PeerId (Base58 encoded)
+    /// Required when allow_peer_discovery=false
+    /// Optional when allow_peer_discovery=true
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
 }
 
 impl fmt::Display for PeerInfo {

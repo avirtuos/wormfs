@@ -234,6 +234,7 @@ mod tests {
         PeerInfo {
             node_id,
             address: format!("/ip4/127.0.0.1/tcp/{}", 3000 + node_id),
+            peer_id: None,
         }
     }
 
