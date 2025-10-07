@@ -24,7 +24,7 @@ serde_yaml = "0.9"
 humantime-serde = "1.1"
 
 # Networking
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "mdns", "kad", "request-response", "dns"] }
+libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "gossipsub", "mdns", "kad", "request-response", "dns", "tokio", "macros"] }
 tonic = "0.10"
 tonic-build = "0.10"
 prost = "0.12"

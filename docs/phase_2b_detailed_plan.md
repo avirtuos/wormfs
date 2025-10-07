@@ -27,7 +27,7 @@ src/transport/
 
 ## Implementation Chunks
 
-### Chunk 1: Protocol Definition & Codec (~150 lines)
+### Chunk 1: Protocol Definition & Codec - COMPLETED
 
 **Files:** 
 - `src/transport/protocol.rs` (NEW)

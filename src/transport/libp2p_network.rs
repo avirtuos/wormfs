@@ -6,9 +6,20 @@
 //! - Static peer configuration
 //! - Connection management and automatic reconnection
 
+use super::protocol::{RaftCodec, RaftProtocol};
 use super::{PeerInfo, Result, TransportError};
+use crate::raft::proto_types::proto::{RaftRequest, RaftResponse};
+use libp2p::{
+    core::upgrade,
+    identity::Keypair,
+    noise,
+    request_response::{self, ProtocolSupport, ResponseChannel},
+    swarm::{NetworkBehaviour, Swarm},
+    tcp, yamux, Multiaddr, PeerId, Transport,
+};
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 /// Network configuration for libp2p transport
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -88,22 +99,77 @@ impl NetworkConfig {
     }
 }
 
+/// Network behaviour for Raft consensus
+#[derive(NetworkBehaviour)]
+struct RaftBehaviour {
+    request_response: request_response::Behaviour<RaftCodec>,
+}
+
+/// Network events for external communication
+#[derive(Debug)]
+pub enum NetworkEvent {
+    /// Peer connected
+    PeerConnected { peer_id: PeerId, node_id: u64 },
+    /// Peer disconnected
+    PeerDisconnected { peer_id: PeerId, node_id: u64 },
+    /// Incoming request received
+    IncomingRequest {
+        peer_id: PeerId,
+        request: RaftRequest,
+        channel: ResponseChannel<RaftResponse>,
+    },
+}
+
+/// Commands to control the network
+#[derive(Debug)]
+pub enum NetworkCommand {
+    /// Dial a peer
+    Dial { node_id: u64, address: Multiaddr },
+    /// Send a request
+    SendRequest {
+        peer_id: PeerId,
+        request: RaftRequest,
+        response_tx: tokio::sync::oneshot::Sender<Result<RaftResponse>>,
+    },
+    /// Send a response
+    SendResponse {
+        channel: ResponseChannel<RaftResponse>,
+        response: RaftResponse,
+    },
+}
+
 /// libp2p network transport implementation
-///
-/// This will be implemented in subsequent iterations to provide:
-/// - Raft RPC handling (AppendEntries, Vote, InstallSnapshot)
-/// - Connection pooling and management
-/// - Automatic peer discovery from static configuration
-/// - Health monitoring and reconnection
 pub struct Libp2pNetwork {
+    swarm: Swarm<RaftBehaviour>,
+    local_peer_id: PeerId,
     config: NetworkConfig,
-    _peer_addresses: HashMap<u64, String>,
+    peer_addresses: HashMap<u64, String>,
+    peer_id_to_node_id: HashMap<PeerId, u64>,
+    node_id_to_peer_id: HashMap<u64, PeerId>,
+    event_tx: mpsc::UnboundedSender<NetworkEvent>,
+    command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
 }
 
 impl Libp2pNetwork {
     /// Create a new libp2p network instance
-    pub fn new(config: NetworkConfig) -> Result<Self> {
+    pub fn new(
+        config: NetworkConfig,
+    ) -> Result<(
+        Self,
+        mpsc::UnboundedReceiver<NetworkEvent>,
+        mpsc::UnboundedSender<NetworkCommand>,
+    )> {
         config.validate()?;
+
+        // Generate identity keypair
+        let local_key = Keypair::generate_ed25519();
+        let local_peer_id = PeerId::from(local_key.public());
+
+        tracing::info!(
+            "Node {} initialized with PeerId: {}",
+            config.node_id,
+            local_peer_id
+        );
 
         // Build peer address map
         let peer_addresses: HashMap<u64, String> = config
@@ -112,31 +178,104 @@ impl Libp2pNetwork {
             .map(|p| (p.node_id, p.address.clone()))
             .collect();
 
-        Ok(Self {
+        // Create TCP transport with noise encryption and yamux multiplexing
+        let tcp_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
+
+        let transport = tcp_transport
+            .upgrade(upgrade::Version::V1)
+            .authenticate(noise::Config::new(&local_key).expect("Failed to create noise config"))
+            .multiplex(yamux::Config::default())
+            .boxed();
+
+        // Configure request-response behavior
+        let request_response = request_response::Behaviour::new(
+            [(RaftProtocol, ProtocolSupport::Full)],
+            request_response::Config::default().with_request_timeout(config.request_timeout()),
+        );
+
+        // Create network behaviour
+        let behaviour = RaftBehaviour { request_response };
+
+        // Build swarm
+        let swarm_config = libp2p::swarm::Config::with_tokio_executor()
+            .with_idle_connection_timeout(Duration::from_secs(60));
+
+        let swarm = Swarm::new(transport, behaviour, local_peer_id, swarm_config);
+
+        // Create event and command channels
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+
+        let network = Self {
+            swarm,
+            local_peer_id,
             config,
-            _peer_addresses: peer_addresses,
-        })
+            peer_addresses,
+            peer_id_to_node_id: HashMap::new(),
+            node_id_to_peer_id: HashMap::new(),
+            event_tx,
+            command_rx,
+        };
+
+        Ok((network, event_rx, command_tx))
     }
 
-    /// Start the network transport
-    pub async fn start(&mut self) -> Result<()> {
-        // TODO: Initialize libp2p transport
-        // TODO: Set up request-response protocol
-        // TODO: Start listening on configured address
-        // TODO: Connect to configured peers
+    /// Start listening on the configured address
+    pub fn start_listening(&mut self) -> Result<()> {
+        let addr: Multiaddr = self
+            .config
+            .listen_address
+            .parse()
+            .map_err(|e| TransportError::Config(format!("Invalid listen address: {}", e)))?;
+
+        self.swarm
+            .listen_on(addr.clone())
+            .map_err(|e| TransportError::Network(format!("Failed to listen: {}", e)))?;
+
         tracing::info!(
-            "Starting libp2p network on {} for node {}",
+            "Node {} listening on {} (PeerId: {})",
+            self.config.node_id,
             self.config.listen_address,
-            self.config.node_id
+            self.local_peer_id
         );
 
         Ok(())
     }
 
-    /// Stop the network transport
-    pub async fn stop(&mut self) -> Result<()> {
-        tracing::info!("Stopping libp2p network for node {}", self.config.node_id);
-        Ok(())
+    /// Get the local peer ID
+    pub fn local_peer_id(&self) -> PeerId {
+        self.local_peer_id
+    }
+
+    /// Get the local node ID
+    pub fn local_node_id(&self) -> u64 {
+        self.config.node_id
+    }
+
+    /// Map NodeID to PeerID
+    fn node_id_to_peer_id(&self, node_id: u64) -> Result<PeerId> {
+        self.node_id_to_peer_id
+            .get(&node_id)
+            .copied()
+            .ok_or_else(|| {
+                TransportError::Network(format!("No PeerId mapping for node {}", node_id))
+            })
+    }
+
+    /// Map PeerID to NodeID
+    fn peer_id_to_node_id(&self, peer_id: &PeerId) -> Option<u64> {
+        self.peer_id_to_node_id.get(peer_id).copied()
+    }
+
+    /// Register a peer ID mapping
+    fn register_peer(&mut self, peer_id: PeerId, node_id: u64) {
+        self.peer_id_to_node_id.insert(peer_id, node_id);
+        self.node_id_to_peer_id.insert(node_id, peer_id);
+        tracing::debug!(
+            "Registered mapping: Node {} <-> PeerId {}",
+            node_id,
+            peer_id
+        );
     }
 
     /// Get the network configuration
