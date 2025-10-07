@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Result as SqliteResult, Row};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
@@ -18,7 +19,71 @@ use uuid::Uuid;
 use crate::erasure_coding::ErasureCodingConfig;
 
 /// Current database schema version
-const CURRENT_SCHEMA_VERSION: u32 = 2; // Increment for compound ID schema
+const CURRENT_SCHEMA_VERSION: u32 = 3; // Increment for lock management
+
+/// Lock types for file locking
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LockType {
+    /// Read lock - multiple readers allowed
+    Read,
+    /// Write lock - exclusive access
+    Write,
+}
+
+impl fmt::Display for LockType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LockType::Read => write!(f, "Read"),
+            LockType::Write => write!(f, "Write"),
+        }
+    }
+}
+
+impl FromStr for LockType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Read" => Ok(LockType::Read),
+            "Write" => Ok(LockType::Write),
+            _ => Err(format!("Invalid lock type: {}", s)),
+        }
+    }
+}
+
+/// File lock information
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileLock {
+    pub file_id: Uuid,
+    pub lock_type: LockType,
+    pub client_id: String,
+    pub acquired_at: SystemTime,
+    pub expires_at: SystemTime,
+}
+
+impl FileLock {
+    /// Create a new file lock
+    pub fn new(
+        file_id: Uuid,
+        lock_type: LockType,
+        client_id: String,
+        timeout_seconds: u64,
+    ) -> Self {
+        let now = SystemTime::now();
+        Self {
+            file_id,
+            lock_type,
+            client_id,
+            acquired_at: now,
+            expires_at: now + std::time::Duration::from_secs(timeout_seconds),
+        }
+    }
+
+    /// Check if lock has expired
+    pub fn is_expired(&self) -> bool {
+        SystemTime::now() > self.expires_at
+    }
+}
 
 /// Compound identifier for stripes within a file
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -40,6 +105,28 @@ impl StripeId {
 impl fmt::Display for StripeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.file_id, self.stripe_index)
+    }
+}
+
+impl FromStr for StripeId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "Invalid StripeId format: expected 'uuid:index', got '{}'",
+                s
+            ));
+        }
+
+        let file_id =
+            Uuid::parse_str(parts[0]).map_err(|e| format!("Invalid UUID in StripeId: {}", e))?;
+        let stripe_index = parts[1]
+            .parse::<u64>()
+            .map_err(|e| format!("Invalid stripe_index in StripeId: {}", e))?;
+
+        Ok(StripeId::new(file_id, stripe_index))
     }
 }
 
@@ -86,6 +173,31 @@ impl fmt::Display for ChunkId {
             "{}:{}:{}",
             self.file_id, self.stripe_index, self.chunk_index
         )
+    }
+}
+
+impl FromStr for ChunkId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 3 {
+            return Err(format!(
+                "Invalid ChunkId format: expected 'uuid:stripe_index:chunk_index', got '{}'",
+                s
+            ));
+        }
+
+        let file_id =
+            Uuid::parse_str(parts[0]).map_err(|e| format!("Invalid UUID in ChunkId: {}", e))?;
+        let stripe_index = parts[1]
+            .parse::<u64>()
+            .map_err(|e| format!("Invalid stripe_index in ChunkId: {}", e))?;
+        let chunk_index = parts[2]
+            .parse::<u8>()
+            .map_err(|e| format!("Invalid chunk_index in ChunkId: {}", e))?;
+
+        Ok(ChunkId::new(file_id, stripe_index, chunk_index))
     }
 }
 
@@ -295,6 +407,12 @@ pub enum MetadataError {
 
     #[error("Transaction error: {reason}")]
     Transaction { reason: String },
+
+    #[error("Lock conflict on file {file_id}: {reason}")]
+    LockConflict { file_id: Uuid, reason: String },
+
+    #[error("Lock not found for file {file_id}, client {client_id}")]
+    LockNotFound { file_id: Uuid, client_id: String },
 }
 
 /// Result type for metadata operations
@@ -464,10 +582,23 @@ impl MetadataStore {
                 version INTEGER PRIMARY KEY
             );
 
+            -- File locks table
+            CREATE TABLE IF NOT EXISTS file_locks (
+                file_id TEXT NOT NULL,
+                lock_type TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                acquired_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (file_id, client_id),
+                FOREIGN KEY (file_id) REFERENCES files(file_id) ON DELETE CASCADE
+            );
+
             -- Indexes for performance
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             CREATE INDEX IF NOT EXISTS idx_stripes_file_id ON stripes(file_id);
             CREATE INDEX IF NOT EXISTS idx_chunks_file_stripe ON chunks(file_id, stripe_index);
+            CREATE INDEX IF NOT EXISTS idx_locks_file_id ON file_locks(file_id);
+            CREATE INDEX IF NOT EXISTS idx_locks_expires_at ON file_locks(expires_at);
             "#,
         )?;
 
@@ -730,6 +861,24 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Delete a chunk
+    pub fn delete_chunk(&self, chunk_id: ChunkId) -> MetadataResult<()> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM chunks WHERE file_id = ?1 AND stripe_index = ?2 AND chunk_index = ?3",
+            (
+                chunk_id.file_id.to_string(),
+                chunk_id.stripe_index as i64,
+                chunk_id.chunk_index as i64,
+            ),
+        )?;
+
+        if rows_affected == 0 {
+            return Err(MetadataError::ChunkNotFound { chunk_id });
+        }
+
+        Ok(())
+    }
+
     /// Get all chunks for a stripe
     pub fn get_chunks_for_stripe(&self, stripe_id: StripeId) -> MetadataResult<Vec<ChunkMetadata>> {
         let mut stmt = self.conn.prepare(
@@ -880,6 +1029,214 @@ impl MetadataStore {
         Ok(stripes)
     }
 
+    /// Clean expired locks from the database
+    pub fn clean_expired_locks(&self) -> MetadataResult<u64> {
+        let now = system_time_to_timestamp(SystemTime::now());
+        let rows_affected =
+            self.conn
+                .execute("DELETE FROM file_locks WHERE expires_at < ?1", [now])? as u64;
+        Ok(rows_affected)
+    }
+
+    /// Get all active locks for a file
+    fn get_active_locks(&self, file_id: Uuid) -> MetadataResult<Vec<FileLock>> {
+        let now = system_time_to_timestamp(SystemTime::now());
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT file_id, lock_type, client_id, acquired_at, expires_at
+            FROM file_locks 
+            WHERE file_id = ?1 AND expires_at > ?2
+            "#,
+        )?;
+
+        let lock_iter = stmt.query_map([file_id.to_string(), now.to_string()], |row| {
+            let lock_type_str: String = row.get("lock_type")?;
+            let lock_type = LockType::from_str(&lock_type_str).map_err(|e| {
+                rusqlite::Error::InvalidColumnType(
+                    1,
+                    format!("lock_type: {}", e),
+                    rusqlite::types::Type::Text,
+                )
+            })?;
+
+            Ok(FileLock {
+                file_id: Uuid::parse_str(&row.get::<_, String>("file_id")?).map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "file_id".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?,
+                lock_type,
+                client_id: row.get("client_id")?,
+                acquired_at: timestamp_to_system_time(row.get("acquired_at")?),
+                expires_at: timestamp_to_system_time(row.get("expires_at")?),
+            })
+        })?;
+
+        let mut locks = Vec::new();
+        for lock in lock_iter {
+            locks.push(lock?);
+        }
+
+        Ok(locks)
+    }
+
+    /// Acquire a lock on a file
+    pub fn acquire_lock(
+        &self,
+        file_id: Uuid,
+        lock_type: LockType,
+        client_id: String,
+        timeout_seconds: u64,
+    ) -> MetadataResult<()> {
+        // First, clean expired locks
+        self.clean_expired_locks()?;
+
+        // Verify file exists
+        self.get_file(file_id)?;
+
+        // Check existing locks on this file
+        let existing_locks = self.get_active_locks(file_id)?;
+
+        // Enforce exclusivity rules
+        for lock in existing_locks {
+            // Skip if this is the same client (they can renew their lock)
+            if lock.client_id == client_id {
+                continue;
+            }
+
+            match (lock.lock_type, lock_type) {
+                // Write locks are exclusive - block everything
+                (LockType::Write, _) => {
+                    return Err(MetadataError::LockConflict {
+                        file_id,
+                        reason: format!(
+                            "File has existing write lock held by client '{}'",
+                            lock.client_id
+                        ),
+                    });
+                }
+                // Read locks block write requests
+                (LockType::Read, LockType::Write) => {
+                    return Err(MetadataError::LockConflict {
+                        file_id,
+                        reason: "File has existing read lock(s), cannot acquire write lock"
+                            .to_string(),
+                    });
+                }
+                // Multiple read locks are allowed
+                (LockType::Read, LockType::Read) => {
+                    // Continue checking other locks
+                }
+            }
+        }
+
+        // If we get here, lock can be acquired
+        let file_lock = FileLock::new(file_id, lock_type, client_id.clone(), timeout_seconds);
+
+        // Use INSERT OR REPLACE to handle lock renewal
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO file_locks (
+                file_id, lock_type, client_id, acquired_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            (
+                file_id.to_string(),
+                lock_type.to_string(),
+                client_id,
+                system_time_to_timestamp(file_lock.acquired_at),
+                system_time_to_timestamp(file_lock.expires_at),
+            ),
+        )?;
+
+        Ok(())
+    }
+
+    /// Release a lock on a file
+    pub fn release_lock(&self, file_id: Uuid, client_id: String) -> MetadataResult<()> {
+        let rows_affected = self.conn.execute(
+            "DELETE FROM file_locks WHERE file_id = ?1 AND client_id = ?2",
+            (file_id.to_string(), client_id.clone()),
+        )?;
+
+        if rows_affected == 0 {
+            return Err(MetadataError::LockNotFound { file_id, client_id });
+        }
+
+        Ok(())
+    }
+
+    /// Extend the expiration time of an existing lock
+    pub fn extend_lock(
+        &self,
+        file_id: Uuid,
+        client_id: String,
+        timeout_seconds: u64,
+    ) -> MetadataResult<()> {
+        // Clean expired locks first
+        self.clean_expired_locks()?;
+
+        let new_expires_at = system_time_to_timestamp(
+            SystemTime::now() + std::time::Duration::from_secs(timeout_seconds),
+        );
+
+        let rows_affected = self.conn.execute(
+            "UPDATE file_locks SET expires_at = ?3 WHERE file_id = ?1 AND client_id = ?2",
+            (file_id.to_string(), client_id.clone(), new_expires_at),
+        )?;
+
+        if rows_affected == 0 {
+            return Err(MetadataError::LockNotFound { file_id, client_id });
+        }
+
+        Ok(())
+    }
+
+    /// Get all locks for a file (including expired ones for debugging)
+    pub fn get_locks(&self, file_id: Uuid) -> MetadataResult<Vec<FileLock>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT file_id, lock_type, client_id, acquired_at, expires_at
+            FROM file_locks WHERE file_id = ?1
+            "#,
+        )?;
+
+        let lock_iter = stmt.query_map([file_id.to_string()], |row| {
+            let lock_type_str: String = row.get("lock_type")?;
+            let lock_type = LockType::from_str(&lock_type_str).map_err(|e| {
+                rusqlite::Error::InvalidColumnType(
+                    1,
+                    format!("lock_type: {}", e),
+                    rusqlite::types::Type::Text,
+                )
+            })?;
+
+            Ok(FileLock {
+                file_id: Uuid::parse_str(&row.get::<_, String>("file_id")?).map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "file_id".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?,
+                lock_type,
+                client_id: row.get("client_id")?,
+                acquired_at: timestamp_to_system_time(row.get("acquired_at")?),
+                expires_at: timestamp_to_system_time(row.get("expires_at")?),
+            })
+        })?;
+
+        let mut locks = Vec::new();
+        for lock in lock_iter {
+            locks.push(lock?);
+        }
+
+        Ok(locks)
+    }
+
     /// Get database statistics
     pub fn get_stats(&self) -> MetadataResult<MetadataStats> {
         let file_count: u64 = self
@@ -911,6 +1268,129 @@ impl MetadataStore {
             stripe_count,
             total_size,
         })
+    }
+
+    /// Export the entire database to compressed bytes using SQLite backup API
+    /// Uses streaming compression to avoid loading entire database into memory
+    pub fn export_snapshot(&self) -> MetadataResult<Vec<u8>> {
+        use std::fs::File;
+        use std::io::BufReader;
+        use tempfile::NamedTempFile;
+
+        // Create temporary file for backup
+        let temp_file = NamedTempFile::new().map_err(|e| MetadataError::InvalidMetadata {
+            reason: format!("Failed to create temp file: {}", e),
+        })?;
+        let temp_path = temp_file.path().to_path_buf();
+
+        // Backup database to temporary file using SQLite's backup API
+        // Backup::new(from, to) - we copy FROM self.conn TO backup_conn
+        {
+            let mut backup_conn = Connection::open(&temp_path)?;
+            let backup = rusqlite::backup::Backup::new(&self.conn, &mut backup_conn)?;
+            backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+            // backup_conn and backup are dropped here
+        }
+
+        // Stream compress from temp file (avoids loading entire DB into memory)
+        let file = File::open(&temp_path).map_err(|e| MetadataError::InvalidMetadata {
+            reason: format!("Failed to open temp file: {}", e),
+        })?;
+        let mut reader = BufReader::new(file);
+
+        // Use streaming compression with zstd
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).map_err(|e| {
+            MetadataError::InvalidMetadata {
+                reason: format!("Failed to create compressor: {}", e),
+            }
+        })?;
+
+        std::io::copy(&mut reader, &mut encoder).map_err(|e| MetadataError::InvalidMetadata {
+            reason: format!("Failed to compress: {}", e),
+        })?;
+
+        let compressed = encoder
+            .finish()
+            .map_err(|e| MetadataError::InvalidMetadata {
+                reason: format!("Failed to finish compression: {}", e),
+            })?;
+
+        tracing::debug!(
+            "Exported snapshot: {} bytes compressed (using streaming)",
+            compressed.len()
+        );
+
+        Ok(compressed)
+    }
+
+    /// Restore the database from compressed snapshot bytes
+    /// Uses streaming decompression to avoid loading entire database into memory
+    pub fn restore_snapshot(&mut self, compressed_data: &[u8]) -> MetadataResult<()> {
+        use std::fs::File;
+        use std::io::Cursor;
+        use tempfile::NamedTempFile;
+
+        // Create temporary file for decompressed database
+        let temp_file = NamedTempFile::new().map_err(|e| MetadataError::InvalidMetadata {
+            reason: format!("Failed to create temp file: {}", e),
+        })?;
+        let temp_path = temp_file.path();
+
+        // Stream decompress to temp file
+        {
+            let mut decoder =
+                zstd::stream::Decoder::new(Cursor::new(compressed_data)).map_err(|e| {
+                    MetadataError::InvalidMetadata {
+                        reason: format!("Failed to create decompressor: {}", e),
+                    }
+                })?;
+            let mut temp_file_handle =
+                File::create(temp_path).map_err(|e| MetadataError::InvalidMetadata {
+                    reason: format!("Failed to create temp file: {}", e),
+                })?;
+            std::io::copy(&mut decoder, &mut temp_file_handle).map_err(|e| {
+                MetadataError::InvalidMetadata {
+                    reason: format!("Failed to decompress: {}", e),
+                }
+            })?;
+        }
+
+        // Restore from temp file using SQLite backup API
+        // Backup::new(from, to) - we copy FROM temp_conn TO self.conn
+        // Note: self.conn needs to be mutable, so we need to use a different approach
+        // We'll clear the existing data and restore using backup in the opposite direction
+        {
+            // First, clear all data from current connection
+            let tx = self.conn.unchecked_transaction()?;
+            let mut stmt = tx.prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )?;
+            let tables: Vec<String> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            for table in tables {
+                tx.execute(&format!("DROP TABLE IF EXISTS {}", table), [])?;
+            }
+            tx.commit()?;
+
+            // Now backup from temp file to self.conn
+            // Backup::new(from, to) - we copy FROM temp_conn TO self.conn
+            let temp_conn = Connection::open(temp_path)?;
+            let backup = rusqlite::backup::Backup::new(&temp_conn, &mut self.conn)?;
+            backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+        }
+
+        // Reinitialize schema to ensure proper setup after restore
+        self.initialize_schema()?;
+
+        tracing::debug!(
+            "Restored snapshot: {} bytes compressed (using streaming)",
+            compressed_data.len()
+        );
+
+        Ok(())
     }
 }
 

@@ -21,6 +21,7 @@ tokio-util = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+humantime-serde = "1.1"
 
 # Networking
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "mdns", "kad"] }
@@ -29,10 +30,13 @@ tonic-build = "0.10"
 prost = "0.12"
 
 # Database
-rusqlite = { version = "0.30", features = ["bundled"] }
+rusqlite = { version = "0.30", features = ["bundled", "backup"] }
+
+# Compression
+zstd = "0.13"
 
 # Raft consensus
-openraft = { version = "0.9.21", features = ["serde"] }
+openraft = { version = "0.9.21", features = ["serde", "storage-v2"] }
 
 # Raft log storage
 redb = "2.1.1"
@@ -70,6 +74,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 bytes = "1.0"
 futures = "0.3"
 once_cell = "1.19"
+tempfile = "3.8"
 
 # System calls (for disk space checking)
 libc = "0.2"
@@ -84,7 +89,6 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 
 [dev-dependencies]
-tempfile = "3.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
 

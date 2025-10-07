@@ -35,22 +35,21 @@ pub enum LockType {
 pub enum MetadataOp {
     // File operations
     /// Create a new file with the given metadata
-    CreateFile {
-        path: String,
-        metadata: FileMetadata,
-    },
-    
+    /// Note: FUSE layer is responsible for path-to-UUID mapping
+    /// The path should be stored within FileMetadata if needed
+    CreateFile { metadata: FileMetadata },
+
     /// Update existing file metadata
+    /// Note: FUSE layer is responsible for path-to-UUID mapping
     UpdateFile {
-        path: String,
+        file_id: FileId,
         metadata: FileMetadata,
     },
-    
+
     /// Delete a file and its metadata
-    DeleteFile {
-        path: String,
-    },
-    
+    /// Note: FUSE layer is responsible for path-to-UUID mapping
+    DeleteFile { file_id: FileId },
+
     // Chunk operations
     /// Register a new chunk location
     RegisterChunk {
@@ -59,49 +58,39 @@ pub enum MetadataOp {
         stripe_id: StripeId,
         file_id: FileId,
     },
-    
+
     /// Update the location of a chunk (for rebalancing/recovery)
     UpdateChunkLocation {
         chunk_id: ChunkId,
         new_node_id: NodeId,
     },
-    
+
     /// Remove a chunk from the metadata store
-    RemoveChunk {
-        chunk_id: ChunkId,
-    },
-    
+    RemoveChunk { chunk_id: ChunkId },
+
     // Lock operations
     /// Acquire a lock on a file
+    /// Note: FUSE layer is responsible for path-to-UUID mapping
     AcquireLock {
-        path: String,
+        file_id: FileId,
         lock_type: LockType,
         client_id: String,
     },
-    
+
     /// Release a lock on a file
-    ReleaseLock {
-        path: String,
-        client_id: String,
-    },
-    
+    /// Note: FUSE layer is responsible for path-to-UUID mapping
+    ReleaseLock { file_id: FileId, client_id: String },
+
     /// Extend the expiration time of an existing lock
-    ExtendLock {
-        path: String,
-        client_id: String,
-    },
-    
+    /// Note: FUSE layer is responsible for path-to-UUID mapping
+    ExtendLock { file_id: FileId, client_id: String },
+
     // Node membership operations
     /// Add a new node to the cluster
-    AddNode {
-        node_id: NodeId,
-        address: String,
-    },
-    
+    AddNode { node_id: NodeId, address: String },
+
     /// Remove a node from the cluster
-    RemoveNode {
-        node_id: NodeId,
-    },
+    RemoveNode { node_id: NodeId },
 }
 
 /// File metadata stored in the system
@@ -132,12 +121,12 @@ pub enum ReadMode {
     /// Linearizable read - goes through Raft consensus, requires majority
     /// Guarantees the most recent committed value
     Linearizable,
-    
+
     /// Lease-based read - leader serves directly using lease mechanism
     /// Requires leader to have a valid lease with the majority
     /// Provides linearizability with better performance
     LeaseRead,
-    
+
     /// Stale read - reads from local state without consensus
     /// Works in minority partitions, may return stale data
     /// Response includes staleness indicator
@@ -160,7 +149,7 @@ impl<T> QueryResponse<T> {
             is_stale: false,
         }
     }
-    
+
     pub fn stale(data: T, index: u64) -> Self {
         Self {
             data,
@@ -168,4 +157,44 @@ impl<T> QueryResponse<T> {
             is_stale: true,
         }
     }
+}
+
+/// Type configuration for WormFS Raft using declare_raft_types macro
+use std::io::Cursor;
+
+pub type SnapshotData = Cursor<Vec<u8>>;
+
+// Declare Raft types using the macro for proper API compatibility
+openraft::declare_raft_types!(
+    pub WormFSTypeConfig:
+        D = MetadataOp,
+        R = MetadataOpResponse,
+        Node = (),
+);
+
+/// Helper type aliases for cleaner code
+pub mod typ {
+    use super::*;
+    use openraft::error::Infallible;
+
+    pub type Entry = openraft::Entry<WormFSTypeConfig>;
+
+    pub type RaftError<E = Infallible> = openraft::error::RaftError<u64, E>;
+    pub type RPCError<E = Infallible> = openraft::error::RPCError<u64, (), RaftError<E>>;
+
+    pub type ClientWriteError = openraft::error::ClientWriteError<u64, ()>;
+    pub type CheckIsLeaderError = openraft::error::CheckIsLeaderError<u64, ()>;
+    pub type ForwardToLeader = openraft::error::ForwardToLeader<u64, ()>;
+    pub type InitializeError = openraft::error::InitializeError<u64, ()>;
+
+    pub type ClientWriteResponse = openraft::raft::ClientWriteResponse<WormFSTypeConfig>;
+}
+
+/// Response type for metadata operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MetadataOpResponse {
+    /// Operation succeeded
+    Success,
+    /// Operation failed with an error message
+    Error(String),
 }

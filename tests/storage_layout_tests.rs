@@ -8,10 +8,11 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 use uuid::Uuid;
-use wormfs::{
-    ChunkId, ChunkIndexEntry, ChunkIndexFile, StorageLayout, StorageLayoutConfig, StripeId,
-    FOLDER_HASH_LENGTH,
+use wormfs::storage::{
+    storage_layout::{ChunkIndexEntry, ChunkIndexFile, StorageLayoutConfig, FOLDER_HASH_LENGTH},
+    StorageLayout,
 };
+use wormfs::{ChunkId, StripeId}; // From metadata_store via lib.rs re-exports
 
 fn create_test_layout() -> (StorageLayout, TempDir) {
     let temp_dir = TempDir::new().unwrap();

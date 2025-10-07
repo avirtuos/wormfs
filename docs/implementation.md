@@ -178,31 +178,56 @@ This implementation plan breaks down WormFS development into small, manageable p
 
 ### Networking Phases (2A-2D): Distributed Communications with Raft
 
-#### **Phase 2A: OpenRaft Local Implementation (2 weeks)**
-**Goal:** Implement basic Raft consensus using local channels (no network)
+You can find examples of how to use openraft v0.9+ APIs in the crate's github repository at https://github.com/databendlabs/openraft/tree/release-0.9/examples/raft-kv-rocksdb
+
+#### **Phase 2A: Raft Storage Components & Unit Testing (1 week)** COMPLETED
+**Goal:** Implement and test Raft storage components independently, defer cluster testing to Phase 2B
+
+**Background & Rationale:**
+After reviewing OpenRaft v0.9 examples and API patterns, we determined that implementing a channel-based local network for testing is overly complex due to OpenRaft's specific error type requirements. The API uses nested generic error types with Node type parameters that make mocked network implementations difficult to maintain. Instead, Phase 2A focuses on validating storage correctness through unit tests, while cluster integration testing is deferred to Phase 2B when we implement actual network transport.
+
+**Key Learnings from OpenRaft v0.9:**
+- Use `openraft::declare_raft_types!` macro instead of manual RaftTypeConfig impl
+- Error types use nested generics: `RaftError<NID, E>` and `RPCError<NID, Node, RaftError<E>>`
+- Clear separation between RaftLogStorage (redb) and RaftStateMachine (SQLite) traits
+- Real network transports are simpler than channel-based mocking
+- Unit tests provide more value than complex integration mocks
 
 **Deliverables:**
 - `raft/` module structure with:
-  - `types.rs`: Simple metadata operation enums and Raft type definitions
-  - `storage.rs`: RaftLogStorage implementation using redb for transaction log
-  - `state_machine.rs`: State machine that applies committed operations to SQLite
-  - `local_network.rs`: In-memory channel-based network for testing
-  - `config.rs`: Raft configuration structs
-- Basic metadata operations: CreateFile, UpdateFile, DeleteFile, RegisterChunk, Lock operations
-- Unit tests with 3-5 node local clusters
-- Leader election and log replication working end-to-end
+  - `types.rs`: Metadata operations and Raft type declarations using `declare_raft_types!` macro ✅
+  - `log_store.rs`: RaftLogStorage implementation using redb ✅
+  - `state_machine.rs`: RaftStateMachine integrated with MetadataStore
+  - `config.rs`: Raft configuration structs ✅
+  - `storage.rs`: Re-exports for storage components ✅
+  - `mod.rs`: Module organization ✅
+- MetadataStore integration in StateMachine with:
+  - Actual database operations for all metadata ops
+  - Snapshot creation from SQLite state
+  - Proper error handling and transactions
+- Comprehensive unit test suite (`tests/raft_unit_tests.rs`):
+  - LogStore operations (append, truncate, purge, vote persistence)
+  - StateMachine apply operations
+  - Snapshot creation and restoration
+  - Configuration validation
+- Deferred to Phase 2B:
+  - Network transport implementation (libp2p or TCP)
+  - Node manager with cluster coordination
+  - Multi-node integration tests
+  - Leader election testing
+  - Log replication across nodes
 
 **Success Criteria:**
-- Can start 3-node Raft cluster with local channels
-- Leader election completes within 2 seconds
-- Metadata operations replicate to majority before commit
-- SQLite state reflects committed log entries
-- Snapshot creation from SQLite state works
-- All unit tests pass
+- LogStore passes all unit tests independently
+- StateMachine correctly applies operations to MetadataStore
+- Snapshot creation serializes SQLite state properly
+- Snapshot restoration rebuilds state correctly
+- All configuration validates properly
+- 90%+ test coverage on Raft components
 - No clippy errors or warnings
 - No rust format errors or warnings
 
-**Key Files:** `src/raft/mod.rs`, `src/raft/types.rs`, `src/raft/storage.rs`, `src/raft/state_machine.rs`, `src/raft/local_network.rs`, `src/raft/config.rs`, `tests/raft_local_tests.rs`
+**Key Files:** `src/raft/mod.rs`, `src/raft/types.rs`, `src/raft/log_store.rs`, `src/raft/state_machine.rs`, `src/raft/config.rs`, `src/raft/storage.rs`, `tests/raft_unit_tests.rs`
 
 **Raft Configuration (in storage_node.yaml):**
 ```yaml
@@ -221,32 +246,48 @@ raft:
 
 ---
 
-#### **Phase 2B: libp2p Transport for Raft (2-3 weeks)**
-**Goal:** Replace local channels with libp2p for Raft communication
+#### **Phase 2B: Network Transport & Cluster Testing (2-3 weeks)** *(Expanded)*
+**Goal:** Implement network transport for Raft and validate cluster operations
 
 **Deliverables:**
-- `raft/libp2p_network.rs` module with:
-  - Custom RaftNetwork trait implementation over libp2p
-  - Request-response protocol for Raft RPCs (AppendEntries, Vote, InstallSnapshot)
-  - Peer discovery and connection management using configured peer list
-  - Transport encryption using libp2p's noise protocol
-  - Connection pooling and automatic reconnection
+- `raft/node.rs` - Node manager with cluster coordination:
+  - Raft instance initialization and lifecycle management
+  - Message routing and handling
+  - Leader discovery and client routing
+  - Cluster membership management
+- Network transport implementation (choose one):
+  - **Option A:** `raft/libp2p_network.rs` - Full libp2p implementation:
+    - Custom RaftNetwork trait implementation over libp2p
+    - Request-response protocol for Raft RPCs
+    - Peer discovery and connection management
+    - Transport encryption using noise protocol
+    - Connection pooling and automatic reconnection
+  - **Option B:** `raft/tcp_network.rs` - Simpler TCP-based implementation:
+    - Direct TCP connections for Raft RPCs
+    - Serialization using serde/bincode
+    - Basic peer management
+    - TLS for encryption
 - `raft/peer_manager.rs` for health monitoring and failover
-- Protobuf message definitions for Raft RPCs in `proto/wormfs.proto`
-- Integration tests with actual network transport
-- Network partition simulation tests
+- Integration tests with actual network transport (`tests/raft_integration_tests.rs`):
+  - 3-node cluster formation
+  - Leader election within 2 seconds
+  - Log replication across nodes
+  - Metadata operations end-to-end
+  - Network partition scenarios
+  - Node failure and recovery
 
 **Success Criteria:**
-- Can establish Raft cluster over libp2p with 3+ nodes
-- Raft RPCs work reliably over libp2p streams
-- Leader election survives network interruptions
-- Automatic reconnection on connection failure
+- Can establish Raft cluster with 3+ nodes over real network
+- Leader election completes within 2 seconds
+- Metadata operations replicate to majority before commit
+- Log replication works reliably across nodes
 - Network partitions handled correctly (majority progresses, minority stalls)
-- Performance comparable to local channel implementation
+- Automatic reconnection on connection failure
+- All integration tests pass
 - No clippy errors or warnings
 - No rust format errors or warnings
 
-**Key Files:** `src/raft/libp2p_network.rs`, `src/raft/peer_manager.rs`, `proto/wormfs.proto`, `tests/raft_network_tests.rs`
+**Key Files:** `src/raft/node.rs`, `src/raft/libp2p_network.rs` (or `tcp_network.rs`), `src/raft/peer_manager.rs`, `proto/wormfs.proto`, `tests/raft_integration_tests.rs`
 
 **Protobuf Additions:**
 ```protobuf

@@ -3,21 +3,12 @@
 //! This library provides the core functionality for WormFS, including chunk management,
 //! erasure coding, and distributed storage operations.
 
-pub mod chunk_format;
-pub mod chunk_placement;
-pub mod disk_manager;
-pub mod erasure_coding;
-pub mod integrity_checker;
-pub mod metadata_store;
+pub mod metadata;
+pub mod node;
 pub mod raft;
-pub mod storage_layout;
-pub mod storage_node;
+pub mod storage;
 
-pub use chunk_format::*;
-pub use chunk_placement::*;
-pub use disk_manager::*;
-pub use erasure_coding::*;
-pub use integrity_checker::*;
-pub use metadata_store::*;
-pub use storage_layout::*;
-pub use storage_node::*;
+// Re-export commonly used types
+pub use metadata::*;
+pub use node::*;
+pub use storage::*;
