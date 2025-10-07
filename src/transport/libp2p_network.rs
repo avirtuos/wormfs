@@ -8,20 +8,23 @@
 
 use super::protocol::{RaftCodec, RaftProtocol};
 use super::{PeerHealth, PeerInfo, PeerManager, PeerStatus, Result, TransportError};
-use crate::raft::proto_types::proto::{NodeAnnouncement, RaftRequest, RaftResponse};
+use crate::raft::proto_types::proto::{
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
+    NodeAnnouncement, RaftRequest, RaftResponse, VoteRequest, VoteResponse,
+};
 use futures::StreamExt;
 use libp2p::{
     core::upgrade,
     identity::Keypair,
     noise,
-    request_response::{self, ProtocolSupport, ResponseChannel},
+    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
     swarm::{NetworkBehaviour, Swarm},
     tcp, yamux, Multiaddr, PeerId, Transport,
 };
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Network configuration for libp2p transport
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -162,6 +165,7 @@ pub struct Libp2pNetwork {
     node_id_to_peer_id: HashMap<u64, PeerId>,
     pending_peers: HashMap<PeerId, Multiaddr>,
     announced_to: HashSet<PeerId>,
+    pending_requests: HashMap<OutboundRequestId, oneshot::Sender<Result<RaftResponse>>>,
     event_tx: mpsc::UnboundedSender<NetworkEvent>,
     command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
 }
@@ -239,6 +243,7 @@ impl Libp2pNetwork {
             node_id_to_peer_id: HashMap::new(),
             pending_peers: HashMap::new(),
             announced_to: HashSet::new(),
+            pending_requests: HashMap::new(),
             event_tx,
             command_rx,
         };
@@ -592,6 +597,125 @@ impl Libp2pNetwork {
         Ok(())
     }
 
+    /// Send AppendEntries RPC to target node
+    pub async fn send_append_entries(
+        &mut self,
+        target: u64,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse> {
+        let peer_id = self.node_id_to_peer_id(target)?;
+
+        let raft_request = RaftRequest {
+            request: Some(
+                crate::raft::proto_types::proto::raft_request::Request::AppendEntries(request),
+            ),
+        };
+
+        let response = self.send_request(peer_id, raft_request).await?;
+
+        match response.response {
+            Some(crate::raft::proto_types::proto::raft_response::Response::AppendEntries(resp)) => {
+                Ok(resp)
+            }
+            _ => Err(TransportError::Network(
+                "Unexpected response type for AppendEntries".into(),
+            )),
+        }
+    }
+
+    /// Send Vote RPC to target node
+    pub async fn send_vote(&mut self, target: u64, request: VoteRequest) -> Result<VoteResponse> {
+        let peer_id = self.node_id_to_peer_id(target)?;
+
+        let raft_request = RaftRequest {
+            request: Some(crate::raft::proto_types::proto::raft_request::Request::Vote(request)),
+        };
+
+        let response = self.send_request(peer_id, raft_request).await?;
+
+        match response.response {
+            Some(crate::raft::proto_types::proto::raft_response::Response::Vote(resp)) => Ok(resp),
+            _ => Err(TransportError::Network(
+                "Unexpected response type for Vote".into(),
+            )),
+        }
+    }
+
+    /// Send InstallSnapshot RPC to target node
+    pub async fn send_install_snapshot(
+        &mut self,
+        target: u64,
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse> {
+        let peer_id = self.node_id_to_peer_id(target)?;
+
+        let raft_request = RaftRequest {
+            request: Some(
+                crate::raft::proto_types::proto::raft_request::Request::InstallSnapshot(request),
+            ),
+        };
+
+        let response = self.send_request(peer_id, raft_request).await?;
+
+        match response.response {
+            Some(crate::raft::proto_types::proto::raft_response::Response::InstallSnapshot(
+                resp,
+            )) => Ok(resp),
+            _ => Err(TransportError::Network(
+                "Unexpected response type for InstallSnapshot".into(),
+            )),
+        }
+    }
+
+    /// Generic request sender with timeout
+    async fn send_request(
+        &mut self,
+        peer_id: PeerId,
+        request: RaftRequest,
+    ) -> Result<RaftResponse> {
+        // Create oneshot channel for response
+        let (response_tx, response_rx) = oneshot::channel::<Result<RaftResponse>>();
+
+        let request_id = self
+            .swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&peer_id, request);
+
+        // Track the request
+        self.pending_requests.insert(request_id, response_tx);
+
+        tracing::debug!("Sent request {:?} to peer {}", request_id, peer_id);
+
+        // Apply timeout
+        let timeout = self.config.request_timeout();
+        match tokio::time::timeout(timeout, response_rx).await {
+            Ok(Ok(response)) => {
+                // Update peer manager on success
+                if let Some(node_id) = self.peer_id_to_node_id(&peer_id) {
+                    self.peer_manager.record_success(node_id, None);
+                }
+                response
+            }
+            Ok(Err(_)) => {
+                // Channel closed
+                if let Some(node_id) = self.peer_id_to_node_id(&peer_id) {
+                    self.peer_manager.record_failure(node_id);
+                }
+                Err(TransportError::Network("Response channel closed".into()))
+            }
+            Err(_) => {
+                // Timeout
+                if let Some(node_id) = self.peer_id_to_node_id(&peer_id) {
+                    self.peer_manager.record_failure(node_id);
+                }
+                self.pending_requests.remove(&request_id);
+                tracing::warn!("Request to peer {} timed out after {:?}", peer_id, timeout);
+                Err(TransportError::Timeout)
+            }
+        }
+    }
+
     /// Run the network event loop
     pub async fn run(&mut self) -> Result<()> {
         use libp2p::swarm::SwarmEvent;
@@ -634,8 +758,13 @@ impl Libp2pNetwork {
                                                 }
                                             }
                                         }
-                                        Message::Response { .. } => {
-                                            // Responses are handled by the request sender
+                                        Message::Response { request_id, response } => {
+                                            // Find the pending request and send the response
+                                            if let Some(response_tx) = self.pending_requests.remove(&request_id) {
+                                                let _ = response_tx.send(Ok(response));
+                                            } else {
+                                                tracing::warn!("Received response for unknown request {:?}", request_id);
+                                            }
                                         }
                                     }
                                 }
