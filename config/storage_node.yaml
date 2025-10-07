@@ -1,11 +1,64 @@
 # WormFS Storage Node Configuration
 # This file contains the configuration settings for a WormFS storage node
 
-# Unique identifier for this storage node
+# Unique identifier for this storage node (UUID)
 node_id: "550e8400-e29b-41d4-a716-446655440000"
 
 # Path to the SQLite metadata database
 metadata_db_path: "data/metadata.db"
+
+# Raft consensus configuration
+raft:
+  # Numeric node ID for Raft (must be unique across cluster)
+  node_id: 1
+  # Heartbeat interval (how often leader sends heartbeats)
+  heartbeat_interval: 250ms
+  # Minimum election timeout
+  election_timeout_min: 1000ms
+  # Maximum election timeout
+  election_timeout_max: 2000ms
+  # Snapshot interval (hours)
+  snapshot_interval_hours: 24
+  # Snapshot log size threshold (MB)
+  snapshot_log_size_mb: 10
+  # Use lease-based reads for performance
+  use_lease_reads: true
+  # Lease duration for read optimization
+  lease_duration: 5s
+  # Path to Raft log storage
+  log_path: "data/raft_log"
+  # Path to state machine (metadata) storage
+  state_path: "data/metadata"
+
+# Network configuration for Raft cluster communication
+network:
+  # Listen address for this node (libp2p multiaddr format)
+  listen_address: "/ip4/0.0.0.0/tcp/3000"
+  # Request timeout in milliseconds
+  request_timeout_ms: 5000
+  # Connection timeout in milliseconds
+  connection_timeout_ms: 10000
+  # Maximum connection retry attempts
+  max_retries: 3
+  # Peer health check timeout
+  health_timeout_ms: 10000
+  # Maximum failures before marking peer as failed
+  max_peer_failures: 3
+  
+  # Static peer configuration (other nodes in the Raft cluster)
+  # For a 3-node cluster, list the other 2 nodes here
+  peers:
+    - node_id: 2
+      address: "/ip4/127.0.0.1/tcp/3001"
+    - node_id: 3
+      address: "/ip4/127.0.0.1/tcp/3002"
+  
+  # Example for production multi-host cluster:
+  # peers:
+  #   - node_id: 2
+  #     address: "/ip4/192.168.1.101/tcp/3000"
+  #   - node_id: 3
+  #     address: "/ip4/192.168.1.102/tcp/3000"
 
 # Storage configuration
 storage_config:
