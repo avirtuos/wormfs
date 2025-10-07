@@ -197,7 +197,7 @@ impl Libp2pNetwork {
 
 ---
 
-### Chunk 4: Message Sending (~150 lines)
+### Chunk 4: Message Sending (~150 lines) - COMPLETED
 
 **File:** `src/transport/libp2p_network.rs` (expand)
 
@@ -439,6 +439,375 @@ async fn test_multiple_peers() {
 **Why this last:** Validates all components work together
 
 **Estimated Time:** 1-2 hours
+
+---
+
+### Chunk 7: Efficient Snapshot Transfer (~300 lines)
+
+**Files:**
+- `proto/wormfs.proto` (modify)
+- `src/transport/snapshot_transfer.rs` (NEW)
+- `src/transport/libp2p_network.rs` (modify)
+
+**Purpose:** Implement efficient out-of-band snapshot transfer to avoid pushing large snapshot data through Raft consensus
+
+**Background:** Currently, `InstallSnapshotRequest` embeds snapshot data directly in the Raft message. This works for small metadata snapshots (<1MB) but becomes inefficient for larger snapshots. This chunk implements a two-phase approach: signaling through Raft, bulk transfer through HTTP/gRPC.
+
+**What to implement:**
+
+#### Phase 1: Modify Protobuf Definitions
+
+```protobuf
+// Modified InstallSnapshotRequest for signaling only:
+message InstallSnapshotRequest {
+  uint64 term = 1;
+  uint64 leader_id = 2;
+  uint64 last_included_index = 3;
+  uint64 last_included_term = 4;
+  
+  // Removed: bytes data = 6;
+  // Removed: uint64 offset = 5;
+  // Removed: bool done = 7;
+  
+  // New: Provide access information instead
+  string snapshot_url = 5;     // Where to download (e.g., "http://leader:8081/snapshots/abc123")
+  string snapshot_id = 6;       // Unique snapshot identifier
+  uint64 snapshot_size = 7;     // Total size in bytes for validation
+  bytes snapshot_hash = 8;      // SHA256 hash for integrity verification
+}
+
+message InstallSnapshotResponse {
+  uint64 term = 1;
+  bool accepted = 2;    // Follower acknowledges and will download
+  bool installed = 3;   // Follower has completed download and installation
+}
+```
+
+#### Phase 2: HTTP Snapshot Transfer Server
+
+```rust
+// src/transport/snapshot_transfer.rs
+
+use axum::{
+    Router,
+    extract::{Path, State},
+    response::IntoResponse,
+    http::StatusCode,
+};
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
+
+pub struct SnapshotTransferServer {
+    snapshot_store: Arc<SnapshotStore>,
+    listen_addr: SocketAddr,
+}
+
+impl SnapshotTransferServer {
+    pub fn new(snapshot_store: Arc<SnapshotStore>, port: u16) -> Self {
+        Self {
+            snapshot_store,
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], port)),
+        }
+    }
+    
+    /// Start the HTTP server for snapshot transfers
+    pub async fn run(self) -> Result<()> {
+        let app = Router::new()
+            .route("/snapshots/:snapshot_id", axum::routing::get(serve_snapshot))
+            .with_state(self.snapshot_store);
+        
+        tracing::info!("Snapshot transfer server listening on {}", self.listen_addr);
+        
+        axum::Server::bind(&self.listen_addr)
+            .serve(app.into_make_service())
+            .await?;
+        
+        Ok(())
+    }
+}
+
+/// Serve a snapshot file for download
+async fn serve_snapshot(
+    Path(snapshot_id): Path<String>,
+    State(snapshot_store): State<Arc<SnapshotStore>>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Get snapshot path
+    let snapshot_path = snapshot_store
+        .get_snapshot_path(&snapshot_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    
+    // Open file for streaming
+    let file = File::open(&snapshot_path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    // Create streaming response
+    let stream = ReaderStream::new(file);
+    let body = axum::body::StreamBody::new(stream);
+    
+    Ok(body)
+}
+```
+
+#### Phase 3: Snapshot Download Client
+
+```rust
+// src/transport/snapshot_transfer.rs
+
+use reqwest;
+use sha2::{Sha256, Digest};
+use tokio::io::AsyncWriteExt;
+
+pub struct SnapshotClient {
+    http_client: reqwest::Client,
+    snapshot_store: Arc<SnapshotStore>,
+}
+
+impl SnapshotClient {
+    pub fn new(snapshot_store: Arc<SnapshotStore>) -> Self {
+        Self {
+            http_client: reqwest::Client::new(),
+            snapshot_store,
+        }
+    }
+    
+    /// Download and install a snapshot from a peer
+    pub async fn download_snapshot(
+        &self,
+        url: &str,
+        snapshot_id: &str,
+        expected_size: u64,
+        expected_hash: &[u8],
+    ) -> Result<()> {
+        tracing::info!("Downloading snapshot {} from {}", snapshot_id, url);
+        
+        // Create temporary file
+        let temp_path = self.snapshot_store.get_temp_path(snapshot_id);
+        let mut file = tokio::fs::File::create(&temp_path).await?;
+        
+        // Download with streaming and hashing
+        let mut response = self.http_client.get(url).send().await?;
+        let mut hasher = Sha256::new();
+        let mut downloaded = 0u64;
+        
+        while let Some(chunk) = response.chunk().await? {
+            hasher.update(&chunk);
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+            
+            // Progress logging
+            if downloaded % (10 * 1024 * 1024) == 0 {  // Every 10MB
+                tracing::info!(
+                    "Snapshot download progress: {}/{}MB",
+                    downloaded / 1024 / 1024,
+                    expected_size / 1024 / 1024
+                );
+            }
+        }
+        
+        file.flush().await?;
+        drop(file);
+        
+        // Verify size
+        if downloaded != expected_size {
+            return Err(SnapshotError::SizeMismatch {
+                expected: expected_size,
+                actual: downloaded,
+            });
+        }
+        
+        // Verify hash
+        let actual_hash = hasher.finalize();
+        if actual_hash.as_slice() != expected_hash {
+            return Err(SnapshotError::HashMismatch);
+        }
+        
+        tracing::info!("Snapshot download verified, installing...");
+        
+        // Install snapshot (atomic move)
+        self.snapshot_store.install_snapshot(snapshot_id, temp_path).await?;
+        
+        Ok(())
+    }
+}
+```
+
+#### Phase 4: Integration with Libp2pNetwork
+
+```rust
+// src/transport/libp2p_network.rs
+
+impl Libp2pNetwork {
+    /// Modified send_install_snapshot to use HTTP transfer
+    pub async fn send_install_snapshot(
+        &mut self,
+        target: u64,
+        snapshot_id: String,
+        last_included_index: u64,
+        last_included_term: u64,
+    ) -> Result<InstallSnapshotResponse> {
+        let peer_id = self.node_id_to_peer_id(target)?;
+        
+        // Get snapshot metadata
+        let snapshot_info = self.snapshot_store.get_info(&snapshot_id)?;
+        
+        // Build URL for HTTP transfer
+        let snapshot_url = format!(
+            "http://{}:{}/snapshots/{}",
+            self.config.listen_address,
+            self.config.snapshot_transfer_port,
+            snapshot_id
+        );
+        
+        // Send notification via Raft (lightweight)
+        let raft_request = RaftRequest {
+            request: Some(
+                crate::raft::proto_types::proto::raft_request::Request::InstallSnapshot(
+                    InstallSnapshotRequest {
+                        term: self.current_term,
+                        leader_id: self.config.node_id,
+                        last_included_index,
+                        last_included_term,
+                        snapshot_url,
+                        snapshot_id,
+                        snapshot_size: snapshot_info.size,
+                        snapshot_hash: snapshot_info.hash.to_vec(),
+                    }
+                )
+            ),
+        };
+        
+        let response = self.send_request(peer_id, raft_request).await?;
+        
+        match response.response {
+            Some(crate::raft::proto_types::proto::raft_response::Response::InstallSnapshot(resp)) => {
+                Ok(resp)
+            }
+            _ => Err(TransportError::Network(
+                "Unexpected response type for InstallSnapshot".into(),
+            )),
+        }
+    }
+}
+```
+
+#### Phase 5: Follower Snapshot Installation
+
+```rust
+// In Raft node message handler
+
+async fn handle_install_snapshot_request(
+    &mut self,
+    request: InstallSnapshotRequest,
+) -> InstallSnapshotResponse {
+    // Check term
+    if request.term < self.current_term {
+        return InstallSnapshotResponse {
+            term: self.current_term,
+            accepted: false,
+            installed: false,
+        };
+    }
+    
+    // Accept the snapshot offer
+    let snapshot_id = request.snapshot_id.clone();
+    let response = InstallSnapshotResponse {
+        term: self.current_term,
+        accepted: true,
+        installed: false,  // Will download in background
+    };
+    
+    // Spawn background task to download
+    let snapshot_client = self.snapshot_client.clone();
+    let url = request.snapshot_url;
+    let size = request.snapshot_size;
+    let hash = request.snapshot_hash;
+    
+    tokio::spawn(async move {
+        match snapshot_client.download_snapshot(&url, &snapshot_id, size, &hash).await {
+            Ok(()) => {
+                tracing::info!("Snapshot {} installed successfully", snapshot_id);
+                // Send confirmation back to leader (optional)
+            }
+            Err(e) => {
+                tracing::error!("Failed to download snapshot {}: {}", snapshot_id, e);
+            }
+        }
+    });
+    
+    response
+}
+```
+
+**Features:**
+- HTTP-based snapshot transfer (port 8081)
+- Streaming download with progress tracking
+- SHA256 hash verification for integrity
+- Atomic snapshot installation
+- Background download (non-blocking)
+- Resume capability (future enhancement)
+- Compression support (future enhancement)
+
+**Why this enhancement:**
+- Prevents large snapshot data from congesting Raft protocol
+- Enables efficient bulk transfer
+- Supports standard HTTP infrastructure (CDN, caching)
+- Better monitoring and debugging
+- Scalable to large snapshots (GBs)
+
+**Implementation Stages:**
+
+1. **Stage 1 (Current - MVP)**: Keep embedded data approach
+   - Works fine for small metadata snapshots (<1MB)
+   - Good enough for initial testing
+   
+2. **Stage 2 (This Chunk)**: Add HTTP transfer server and client
+   - Implement SnapshotTransferServer with axum
+   - Implement SnapshotClient for downloads
+   - Modify InstallSnapshot to use URLs
+   
+3. **Stage 3 (Future)**: Production optimizations
+   - Add compression (zstd)
+   - Implement resume capability (HTTP Range requests)
+   - Support incremental snapshots
+   - Enable P2P transfers between any nodes
+
+**Dependencies:**
+- Add to Cargo.toml:
+  ```toml
+  axum = "0.6"
+  tokio-util = { version = "0.7", features = ["io"] }
+  reqwest = { version = "0.11", features = ["stream"] }
+  sha2 = "0.10"
+  ```
+
+**Testing:**
+```rust
+#[tokio::test]
+async fn test_snapshot_http_transfer() {
+    // Start snapshot server on node1
+    let server = SnapshotTransferServer::new(snapshot_store.clone(), 8081);
+    tokio::spawn(server.run());
+    
+    // Create test snapshot
+    let snapshot_id = "test-snapshot-123";
+    create_test_snapshot(snapshot_store.clone(), snapshot_id).await;
+    
+    // Download from node2
+    let client = SnapshotClient::new(snapshot_store2.clone());
+    client.download_snapshot(
+        "http://localhost:8081/snapshots/test-snapshot-123",
+        snapshot_id,
+        expected_size,
+        &expected_hash,
+    ).await.unwrap();
+    
+    // Verify integrity
+    assert_snapshot_installed(snapshot_store2, snapshot_id);
+}
+```
+
+**Estimated Time:** 3-4 hours
 
 ---
 
