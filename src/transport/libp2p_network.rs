@@ -23,8 +23,13 @@ use libp2p::{
 };
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+
+/// Handler for incoming Raft requests
+/// Takes the request and peer_id, returns a response
+pub type IncomingRequestHandler = Arc<dyn Fn(RaftRequest, PeerId) -> RaftResponse + Send + Sync>;
 
 /// Network configuration for libp2p transport
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -154,8 +159,8 @@ pub enum NetworkCommand {
     },
 }
 
-/// libp2p network transport implementation
-pub struct Libp2pNetwork {
+/// Storage network transport implementation using libp2p
+pub struct StorageNetwork {
     swarm: Swarm<RaftBehaviour>,
     local_peer_id: PeerId,
     config: NetworkConfig,
@@ -168,9 +173,10 @@ pub struct Libp2pNetwork {
     pending_requests: HashMap<OutboundRequestId, oneshot::Sender<Result<RaftResponse>>>,
     event_tx: mpsc::UnboundedSender<NetworkEvent>,
     command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
+    request_handler: Option<IncomingRequestHandler>,
 }
 
-impl Libp2pNetwork {
+impl StorageNetwork {
     /// Create a new libp2p network instance
     pub fn new(
         config: NetworkConfig,
@@ -246,6 +252,7 @@ impl Libp2pNetwork {
             pending_requests: HashMap::new(),
             event_tx,
             command_rx,
+            request_handler: None,
         };
 
         Ok((network, event_rx, command_tx))
@@ -721,8 +728,19 @@ impl Libp2pNetwork {
         use libp2p::swarm::SwarmEvent;
         use request_response::{Event as RequestResponseEvent, Message};
 
+        // Set up periodic maintenance timer (every 5 seconds)
+        let mut maintenance_interval = tokio::time::interval(Duration::from_secs(5));
+        maintenance_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
+                // Periodic maintenance
+                _ = maintenance_interval.tick() => {
+                    if let Err(e) = self.maintenance().await {
+                        tracing::warn!("Maintenance task failed: {}", e);
+                    }
+                }
+
                 // Process swarm events
                 Some(event) = self.swarm.next() => {
                     match event {
@@ -748,12 +766,23 @@ impl Libp2pNetwork {
                                                             .send_response(channel, RaftResponse { response: None });
                                                     }
                                                     _ => {
-                                                        // Forward other requests to the event channel
-                                                        let _ = self.event_tx.send(NetworkEvent::IncomingRequest {
-                                                            peer_id: peer,
-                                                            request,
-                                                            channel,
-                                                        });
+                                                        // Check if we have a registered handler
+                                                        if let Some(ref handler) = self.request_handler {
+                                                            // Call the handler synchronously
+                                                            let response = handler(request.clone(), peer);
+
+                                                            // Send the response back
+                                                            let _ = self.swarm.behaviour_mut()
+                                                                .request_response
+                                                                .send_response(channel, response);
+                                                        } else {
+                                                            // No handler registered, forward to event channel
+                                                            let _ = self.event_tx.send(NetworkEvent::IncomingRequest {
+                                                                peer_id: peer,
+                                                                request,
+                                                                channel,
+                                                            });
+                                                        }
                                                     }
                                                 }
                                             }
@@ -845,6 +874,26 @@ impl Libp2pNetwork {
     /// Get peer health information
     pub fn get_peer_health(&self, node_id: u64) -> Option<&PeerHealth> {
         self.peer_manager.get_peer(node_id)
+    }
+
+    /// Set handler for incoming Raft requests
+    /// This allows the Raft layer to register a callback for processing incoming RPCs
+    pub fn set_request_handler(&mut self, handler: IncomingRequestHandler) {
+        self.request_handler = Some(handler);
+        tracing::debug!("Registered incoming request handler");
+    }
+
+    /// Periodic maintenance tasks
+    async fn maintenance(&mut self) -> Result<()> {
+        // Reconnect to failed peers with exponential backoff
+        self.reconnect_failed_peers().await?;
+
+        // Could add other maintenance tasks here in the future:
+        // - Clean up old state
+        // - Update peer health metrics
+        // - Garbage collect request tracking
+
+        Ok(())
     }
 }
 

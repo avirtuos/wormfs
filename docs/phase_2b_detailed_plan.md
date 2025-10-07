@@ -265,7 +265,7 @@ impl Libp2pNetwork {
 
 ---
 
-### Chunk 5: Message Receiving & Event Loop (~200 lines)
+### Chunk 5: Message Receiving & Event Loop (~200 lines) - COMPLETED
 
 **File:** `src/transport/libp2p_network.rs` (expand)
 
