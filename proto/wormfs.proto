@@ -1,25 +1,267 @@
 syntax = "proto3";
 package wormfs;
 
-// Placeholder for future WormFS gRPC API
-// This will be expanded in Phase 3A: gRPC API Foundation
-// 
-// Planned services based on implementation.md:
-// - Client-storage communication protocol
-// - Chunk read/write operations
-// - File metadata operations
-// - Health check endpoints
+// ============================================================================
+// Core Metadata Types
+// ============================================================================
+
+message FileMetadata {
+  bytes file_id = 1;        // UUID as 16 bytes
+  uint64 size = 2;
+  uint32 permissions = 3;
+  uint32 uid = 4;
+  uint32 gid = 5;
+  int64 created_at = 6;
+  int64 modified_at = 7;
+  int64 accessed_at = 8;
+  uint64 stripe_size = 9;
+  uint32 data_shards = 10;
+  uint32 parity_shards = 11;
+}
+
+enum LockType {
+  LOCK_TYPE_UNSPECIFIED = 0;
+  LOCK_TYPE_READ = 1;
+  LOCK_TYPE_WRITE = 2;
+}
+
+// ============================================================================
+// Metadata Operations (Raft Log Entries)
+// ============================================================================
+
+message MetadataOp {
+  oneof operation {
+    CreateFile create_file = 1;
+    UpdateFile update_file = 2;
+    DeleteFile delete_file = 3;
+    RegisterChunk register_chunk = 4;
+    UpdateChunkLocation update_chunk_location = 5;
+    RemoveChunk remove_chunk = 6;
+    AcquireLock acquire_lock = 7;
+    ReleaseLock release_lock = 8;
+    ExtendLock extend_lock = 9;
+    AddNode add_node = 10;
+    RemoveNode remove_node = 11;
+  }
+  
+  message CreateFile {
+    FileMetadata metadata = 1;
+  }
+  
+  message UpdateFile {
+    bytes file_id = 1;
+    FileMetadata metadata = 2;
+  }
+  
+  message DeleteFile {
+    bytes file_id = 1;
+  }
+  
+  message RegisterChunk {
+    bytes chunk_id = 1;
+    uint64 node_id = 2;
+    bytes stripe_id = 3;
+    bytes file_id = 4;
+  }
+  
+  message UpdateChunkLocation {
+    bytes chunk_id = 1;
+    uint64 new_node_id = 2;
+  }
+  
+  message RemoveChunk {
+    bytes chunk_id = 1;
+  }
+  
+  message AcquireLock {
+    bytes file_id = 1;
+    LockType lock_type = 2;
+    string client_id = 3;
+  }
+  
+  message ReleaseLock {
+    bytes file_id = 1;
+    string client_id = 2;
+  }
+  
+  message ExtendLock {
+    bytes file_id = 1;
+    string client_id = 2;
+  }
+  
+  message AddNode {
+    uint64 node_id = 1;
+    string address = 2;
+  }
+  
+  message RemoveNode {
+    uint64 node_id = 1;
+  }
+}
+
+message MetadataOpResponse {
+  bool success = 1;
+  string error_message = 2;  // Only set if success = false
+}
+
+// ============================================================================
+// Raft Network Messages
+// ============================================================================
+
+message LogEntry {
+  uint64 index = 1;
+  uint64 term = 2;
+  bytes payload = 3;  // Serialized MetadataOp
+}
+
+message LogId {
+  uint64 leader_id = 1;
+  uint64 index = 2;
+}
+
+message AppendEntriesRequest {
+  uint64 term = 1;
+  uint64 leader_id = 2;
+  uint64 prev_log_index = 3;
+  uint64 prev_log_term = 4;
+  repeated LogEntry entries = 5;
+  uint64 leader_commit = 6;
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1;
+  bool success = 2;
+  oneof conflict {
+    uint64 conflict_index = 3;
+  }
+}
+
+message VoteRequest {
+  uint64 term = 1;
+  uint64 candidate_id = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+}
+
+message VoteResponse {
+  uint64 term = 1;
+  bool vote_granted = 2;
+  uint64 last_log_index = 3;
+}
+
+message InstallSnapshotRequest {
+  uint64 term = 1;
+  uint64 leader_id = 2;
+  uint64 last_included_index = 3;
+  uint64 last_included_term = 4;
+  uint64 offset = 5;
+  bytes data = 6;
+  bool done = 7;  // Is this the last chunk?
+}
+
+message InstallSnapshotResponse {
+  uint64 term = 1;
+  bool success = 2;
+}
+
+// ============================================================================
+// Raft Message Wrappers
+// ============================================================================
+
+// Wrapper for all Raft RPC requests
+message RaftRequest {
+  oneof request {
+    AppendEntriesRequest append_entries = 1;
+    VoteRequest vote = 2;
+    InstallSnapshotRequest install_snapshot = 3;
+  }
+}
+
+// Wrapper for all Raft RPC responses
+message RaftResponse {
+  oneof response {
+    AppendEntriesResponse append_entries = 1;
+    VoteResponse vote = 2;
+    InstallSnapshotResponse install_snapshot = 3;
+  }
+}
+
+// ============================================================================
+// Cluster Management
+// ============================================================================
+
+message NodeInfo {
+  uint64 node_id = 1;
+  string address = 2;
+  string peer_id = 3;  // libp2p PeerId
+  bool is_leader = 4;
+  uint64 last_heartbeat = 5;
+  NodeState state = 6;
+}
+
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  NODE_STATE_LEADER = 1;
+  NODE_STATE_FOLLOWER = 2;
+  NODE_STATE_CANDIDATE = 3;
+}
+
+message ClusterStatus {
+  repeated NodeInfo nodes = 1;
+  uint64 current_term = 2;
+  uint64 leader_id = 3;
+  uint64 commit_index = 4;
+  uint64 last_applied = 5;
+}
+
+// ============================================================================
+// Client API Messages (for future use)
+// ============================================================================
+
+message ClientWriteRequest {
+  MetadataOp operation = 1;
+}
+
+message ClientWriteResponse {
+  bool success = 1;
+  string error_message = 2;
+  LogId log_id = 3;  // Log position of the operation
+}
+
+message ClientReadRequest {
+  bytes file_id = 1;
+  ReadMode mode = 2;
+}
+
+enum ReadMode {
+  READ_MODE_UNSPECIFIED = 0;
+  READ_MODE_LINEARIZABLE = 1;
+  READ_MODE_LEASE = 2;
+  READ_MODE_STALE = 3;
+}
+
+message ClientReadResponse {
+  bool success = 1;
+  string error_message = 2;
+  FileMetadata metadata = 3;
+  uint64 last_applied_index = 4;
+  bool is_stale = 5;
+}
+
+// ============================================================================
+// Future WormFS Client-Storage gRPC API (Phase 3A)
+// ============================================================================
 
 service WormFSService {
-  // TODO: Add actual service methods in Phase 3A
-  // Examples of planned methods:
-  // - rpc StoreFile(StoreFileRequest) returns (StoreFileResponse);
-  // - rpc RetrieveFile(RetrieveFileRequest) returns (RetrieveFileResponse);
-  // - rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
-  // - rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  // File operations - to be implemented in Phase 3A
+  // rpc StoreFile(StoreFileRequest) returns (StoreFileResponse);
+  // rpc RetrieveFile(RetrieveFileRequest) returns (RetrieveFileResponse);
+  // rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  // rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  
+  // Health check
+  // rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 }
 
-// Placeholder message types
-message Empty {
-  // Placeholder empty message
-}
+// Placeholder for future expansion
+message Empty {}

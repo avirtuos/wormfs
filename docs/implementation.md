@@ -255,18 +255,13 @@ raft:
   - Message routing and handling
   - Leader discovery and client routing
   - Cluster membership management
-- Network transport implementation (choose one):
-  - **Option A:** `raft/libp2p_network.rs` - Full libp2p implementation:
+- Network transport implementation:
+  - `raft/libp2p_network.rs` - Full libp2p implementation:
     - Custom RaftNetwork trait implementation over libp2p
     - Request-response protocol for Raft RPCs
     - Peer discovery and connection management
     - Transport encryption using noise protocol
     - Connection pooling and automatic reconnection
-  - **Option B:** `raft/tcp_network.rs` - Simpler TCP-based implementation:
-    - Direct TCP connections for Raft RPCs
-    - Serialization using serde/bincode
-    - Basic peer management
-    - TLS for encryption
 - `raft/peer_manager.rs` for health monitoring and failover
 - Integration tests with actual network transport (`tests/raft_integration_tests.rs`):
   - 3-node cluster formation

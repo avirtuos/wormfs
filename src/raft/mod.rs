@@ -9,6 +9,7 @@
 
 pub mod config;
 pub mod log_store;
+pub mod proto_types;
 pub mod snapshot_store;
 pub mod state_machine;
 pub mod storage;
@@ -16,6 +17,7 @@ pub mod types;
 
 pub use config::RaftConfig;
 pub use log_store::LogStore;
+pub use proto_types::{deserialize_metadata_op, serialize_metadata_op};
 pub use snapshot_store::SnapshotStore;
 pub use state_machine::StateMachine;
 pub use types::WormFSTypeConfig;
