@@ -442,7 +442,7 @@ async fn test_multiple_peers() {
 
 ---
 
-### Chunk 7: Efficient Snapshot Transfer (~300 lines)
+### Chunk 7: Efficient Snapshot Transfer (~300 lines) - PARTIALLY COMPLETED
 
 **Files:**
 - `proto/wormfs.proto` (modify)

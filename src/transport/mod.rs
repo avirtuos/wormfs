@@ -14,6 +14,7 @@ pub mod codec;
 pub mod libp2p_network;
 pub mod peer_manager;
 pub mod protocol;
+pub mod snapshot_transfer;
 
 pub use codec::{
     decode_raft_request, decode_raft_response, encode_raft_request, encode_raft_response,
@@ -23,6 +24,10 @@ pub use libp2p_network::{
 };
 pub use peer_manager::{PeerHealth, PeerManager, PeerStats, PeerStatus};
 pub use protocol::{RaftCodec, RaftProtocol};
+pub use snapshot_transfer::{
+    compute_file_hash, SnapshotTransferClient, SnapshotTransferConfig, SnapshotTransferError,
+    SnapshotTransferServiceImpl,
+};
 
 use std::fmt;
 
