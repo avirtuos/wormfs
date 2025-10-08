@@ -18,8 +18,10 @@ pub mod protocol;
 pub use codec::{
     decode_raft_request, decode_raft_response, encode_raft_request, encode_raft_response,
 };
-pub use libp2p_network::{IncomingRequestHandler, NetworkConfig, StorageNetwork};
-pub use peer_manager::{PeerHealth, PeerManager, PeerStatus};
+pub use libp2p_network::{
+    IncomingRequestHandler, NetworkCommand, NetworkConfig, NetworkEvent, StorageNetwork,
+};
+pub use peer_manager::{PeerHealth, PeerManager, PeerStats, PeerStatus};
 pub use protocol::{RaftCodec, RaftProtocol};
 
 use std::fmt;
