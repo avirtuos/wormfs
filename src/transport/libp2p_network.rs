@@ -60,6 +60,14 @@ pub struct NetworkConfig {
     /// When false: only accept connections from pre-configured peer_ids
     #[serde(default = "default_allow_discovery")]
     pub allow_peer_discovery: bool,
+
+    /// Port for gRPC snapshot transfer server
+    #[serde(default = "default_snapshot_server_port")]
+    pub snapshot_server_port: u16,
+
+    /// Directory where snapshots are stored
+    #[serde(default = "default_snapshot_dir")]
+    pub snapshot_dir: String,
 }
 
 fn default_request_timeout() -> u64 {
@@ -78,6 +86,14 @@ fn default_allow_discovery() -> bool {
     false // Default to strict mode for security
 }
 
+fn default_snapshot_server_port() -> u16 {
+    8082 // Default port for snapshot transfers
+}
+
+fn default_snapshot_dir() -> String {
+    "./data/snapshots".to_string()
+}
+
 impl NetworkConfig {
     /// Create a new network configuration
     pub fn new(node_id: u64, listen_address: String, peers: Vec<PeerInfo>) -> Self {
@@ -89,6 +105,8 @@ impl NetworkConfig {
             connection_timeout_ms: default_connection_timeout(),
             max_retries: default_max_retries(),
             allow_peer_discovery: default_allow_discovery(),
+            snapshot_server_port: default_snapshot_server_port(),
+            snapshot_dir: default_snapshot_dir(),
         }
     }
 

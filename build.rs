@@ -3,10 +3,10 @@
 // This script generates Rust code from protobuf definitions
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Compile protobuf files
+    // Compile protobuf files with clippy suppressions for generated code
     tonic_build::configure()
-        .build_server(false) // We don't need gRPC server code yet (Phase 3A)
-        .build_client(false) // We don't need gRPC client code yet (Phase 3A)
+        .build_server(true) // Generate gRPC server code for SnapshotTransferService
+        .build_client(true) // Generate gRPC client code for SnapshotTransferService
         .compile(&["proto/wormfs.proto"], &["proto"])?;
 
     // Tell cargo to rerun this build script if the proto file changes

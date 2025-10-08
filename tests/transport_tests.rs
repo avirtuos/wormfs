@@ -26,6 +26,8 @@ fn create_test_config(node_id: u64, port: u16, peers: Vec<PeerInfo>) -> NetworkC
         connection_timeout_ms: 10000,
         max_retries: 3,
         allow_peer_discovery: true,
+        snapshot_server_port: 8082, // Default test snapshot server port
+        snapshot_dir: format!("./data/test_snapshots/{}", node_id), // Test snapshot directory
     }
 }
 
@@ -69,6 +71,7 @@ fn create_mock_handler(
                                 InstallSnapshotResponse {
                                     term: 1,
                                     success: true,
+                                    error_message: String::new(),
                                 },
                             ),
                         ),

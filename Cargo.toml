@@ -16,6 +16,7 @@ readme = "README.md"
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -24,7 +25,18 @@ serde_yaml = "0.9"
 humantime-serde = "1.1"
 
 # Networking
-libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "gossipsub", "mdns", "kad", "request-response", "dns", "tokio", "macros"] }
+libp2p = { version = "0.56", features = [
+    "tcp",
+    "noise",
+    "yamux",
+    "gossipsub",
+    "mdns",
+    "kad",
+    "request-response",
+    "dns",
+    "tokio",
+    "macros",
+] }
 tonic = "0.10"
 tonic-build = "0.10"
 prost = "0.12"
@@ -83,11 +95,6 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
-# Web interface
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "fs"] }
-
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
@@ -121,10 +128,13 @@ debug = true
 debug = true
 
 [workspace]
-members = [
-    ".",
-]
+members = ["."]
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+# Clippy configuration to suppress warnings in generated code
+[lints.clippy]
+match_single_binding = "allow"
+mixed_attributes_style = "allow"

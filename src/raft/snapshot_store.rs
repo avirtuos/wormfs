@@ -238,6 +238,58 @@ impl SnapshotStore {
     pub fn snapshot_dir(&self) -> &Path {
         &self.snapshot_dir
     }
+
+    /// Get the path to a specific snapshot's data file
+    pub fn get_snapshot_data_path(&self, snapshot_id: &str) -> Option<PathBuf> {
+        let data_path = self.snapshot_dir.join(format!("{}.data", snapshot_id));
+        if data_path.exists() {
+            Some(data_path)
+        } else {
+            None
+        }
+    }
+
+    /// Get metadata for a specific snapshot
+    pub fn get_snapshot_metadata(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<PersistedSnapshotMeta, io::Error> {
+        let meta_path = self.snapshot_dir.join(format!("{}.meta", snapshot_id));
+        self.load_snapshot_meta(&meta_path)
+    }
+
+    /// Check if a snapshot exists
+    pub fn snapshot_exists(&self, snapshot_id: &str) -> bool {
+        let data_path = self.snapshot_dir.join(format!("{}.data", snapshot_id));
+        let meta_path = self.snapshot_dir.join(format!("{}.meta", snapshot_id));
+        data_path.exists() && meta_path.exists()
+    }
+
+    /// Get path for temporary snapshot file
+    pub fn get_temp_path(&self, snapshot_id: &str) -> PathBuf {
+        self.snapshot_dir.join(format!("{}.tmp", snapshot_id))
+    }
+
+    /// Install a snapshot from a temporary file (atomic move)
+    pub async fn install_snapshot_from_temp(
+        &self,
+        snapshot_id: &str,
+        temp_path: PathBuf,
+        metadata: PersistedSnapshotMeta,
+    ) -> Result<(), io::Error> {
+        // Write metadata file
+        let meta_path = self.snapshot_dir.join(format!("{}.meta", snapshot_id));
+        let meta_json = serde_json::to_string_pretty(&metadata)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        tokio::fs::write(&meta_path, meta_json).await?;
+
+        // Atomically move temporary file to final location
+        let final_path = self.snapshot_dir.join(format!("{}.data", snapshot_id));
+        tokio::fs::rename(&temp_path, &final_path).await?;
+
+        tracing::info!("Installed snapshot '{}' from temporary file", snapshot_id);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
