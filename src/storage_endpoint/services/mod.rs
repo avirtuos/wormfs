@@ -4,8 +4,9 @@
 //! - Snapshot transfer (current)
 //! - Chunk data operations (future)
 
-// Currently empty - Task 2 will move SnapshotTransferService here
-// pub mod snapshot;
+pub mod snapshot;
+
+pub use snapshot::SnapshotTransferServiceImpl;
 
 // Future: Task for Phase 3A
 // pub mod chunk_data;

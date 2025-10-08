@@ -1,8 +1,8 @@
-//! gRPC-based snapshot transfer for efficient Raft snapshot distribution
+//! Snapshot transfer client for downloading snapshots via gRPC
 //!
-//! This module provides:
-//! - SnapshotTransferService implementation for serving snapshots
-//! - SnapshotTransferClient for downloading snapshots
+//! This module provides the client-side utilities for downloading snapshots
+//! from remote StorageEndpoint servers. The server implementation has been
+//! moved to the storage_endpoint module.
 //!
 //! Using gRPC for snapshot transfer has several benefits:
 //! - Separation from Raft protocol (doesn't congest message channel)
@@ -14,142 +14,10 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
-use tonic::{Request, Response, Status};
-use tracing::{error, info, warn};
+use tonic::Request;
+use tracing::{info, warn};
 
-use crate::raft::proto_types::proto::{
-    snapshot_transfer_service_server::SnapshotTransferService as SnapshotTransferServiceTrait,
-    SnapshotChunk, SnapshotTransferRequest,
-};
-
-/// Configuration for snapshot transfer server
-#[derive(Debug, Clone)]
-pub struct SnapshotTransferConfig {
-    /// Port to listen on for gRPC requests
-    pub port: u16,
-    /// Local node ID (for authentication)
-    pub node_id: u64,
-    /// Directory where snapshots are stored
-    pub snapshot_dir: PathBuf,
-}
-
-/// gRPC service implementation for serving snapshots to peers
-pub struct SnapshotTransferServiceImpl {
-    config: SnapshotTransferConfig,
-}
-
-impl SnapshotTransferServiceImpl {
-    /// Create a new snapshot transfer service
-    pub fn new(config: SnapshotTransferConfig) -> Self {
-        Self { config }
-    }
-}
-
-#[tonic::async_trait]
-impl SnapshotTransferServiceTrait for SnapshotTransferServiceImpl {
-    type TransferSnapshotStream =
-        tokio_stream::wrappers::ReceiverStream<Result<SnapshotChunk, Status>>;
-
-    async fn transfer_snapshot(
-        &self,
-        request: Request<SnapshotTransferRequest>,
-    ) -> Result<Response<Self::TransferSnapshotStream>, Status> {
-        let req = request.into_inner();
-        let snapshot_id = req.snapshot_id.clone();
-        let requester_node_id = req.requester_node_id;
-
-        info!(
-            "Received snapshot transfer request for '{}' from node {}",
-            snapshot_id, requester_node_id
-        );
-
-        // Build path to snapshot data file
-        let data_path = self
-            .config
-            .snapshot_dir
-            .join(format!("{}.data", snapshot_id));
-
-        // Check if snapshot exists
-        if !data_path.exists() {
-            warn!("Snapshot not found: {}", snapshot_id);
-            return Err(Status::not_found(format!(
-                "Snapshot '{}' not found",
-                snapshot_id
-            )));
-        }
-
-        // Open the file
-        let mut file = tokio::fs::File::open(&data_path).await.map_err(|e| {
-            error!("Failed to open snapshot file {}: {}", snapshot_id, e);
-            Status::internal(format!("Failed to open snapshot: {}", e))
-        })?;
-
-        // Get file size
-        let metadata = file.metadata().await.map_err(|e| {
-            error!("Failed to get file metadata {}: {}", snapshot_id, e);
-            Status::internal(format!("Failed to get metadata: {}", e))
-        })?;
-
-        let total_size = metadata.len();
-        info!(
-            "Serving snapshot '{}' ({} bytes) to node {}",
-            snapshot_id, total_size, requester_node_id
-        );
-
-        // Create channel for streaming
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
-
-        // Spawn task to stream file chunks
-        tokio::spawn(async move {
-            let chunk_size = 64 * 1024; // 64 KB chunks
-            let mut buffer = vec![0u8; chunk_size];
-            let mut offset = 0u64;
-
-            loop {
-                match file.read(&mut buffer).await {
-                    Ok(0) => {
-                        // EOF - send final chunk
-                        let chunk = SnapshotChunk {
-                            snapshot_id: snapshot_id.clone(),
-                            offset,
-                            data: vec![],
-                            is_last: true,
-                        };
-                        let _ = tx.send(Ok(chunk)).await;
-                        info!("Completed streaming snapshot '{}'", snapshot_id);
-                        break;
-                    }
-                    Ok(n) => {
-                        let chunk = SnapshotChunk {
-                            snapshot_id: snapshot_id.clone(),
-                            offset,
-                            data: buffer[..n].to_vec(),
-                            is_last: false,
-                        };
-
-                        if tx.send(Ok(chunk)).await.is_err() {
-                            warn!("Client disconnected during snapshot transfer");
-                            break;
-                        }
-
-                        offset += n as u64;
-                    }
-                    Err(e) => {
-                        error!("Error reading snapshot file: {}", e);
-                        let _ = tx
-                            .send(Err(Status::internal(format!("Read error: {}", e))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
-            rx,
-        )))
-    }
-}
+use crate::raft::proto_types::proto::SnapshotTransferRequest;
 
 /// Client for downloading snapshots from peers via gRPC
 pub struct SnapshotTransferClient {

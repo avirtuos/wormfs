@@ -24,10 +24,7 @@ pub use libp2p_network::{
 };
 pub use peer_manager::{PeerHealth, PeerManager, PeerStats, PeerStatus};
 pub use protocol::{RaftCodec, RaftProtocol};
-pub use snapshot_transfer::{
-    compute_file_hash, SnapshotTransferClient, SnapshotTransferConfig, SnapshotTransferError,
-    SnapshotTransferServiceImpl,
-};
+pub use snapshot_transfer::{compute_file_hash, SnapshotTransferClient, SnapshotTransferError};
 
 use std::fmt;
 

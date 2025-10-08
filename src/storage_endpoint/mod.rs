@@ -13,6 +13,7 @@ pub mod services;
 
 pub use config::StorageEndpointConfig;
 pub use server::StorageEndpointServer;
+pub use services::SnapshotTransferServiceImpl;
 
 use std::fmt;
 
