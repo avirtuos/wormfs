@@ -45,7 +45,7 @@ StorageEndpoint/
 
 ## Implementation Tasks
 
-### Task 1: Create StorageEndpoint Module Structure
+### Task 1: Create StorageEndpoint Module Structure - COMPLETED
 **Priority: High**
 **Estimated Effort: 2 hours**
 
@@ -60,7 +60,7 @@ Files to create:
 - `src/storage_endpoint/config.rs`
 - `src/storage_endpoint/server.rs`
 
-### Task 2: Move SnapshotTransferService
+### Task 2: Move SnapshotTransferService - COMPLETED
 **Priority: High**
 **Estimated Effort: 1 hour**
 
