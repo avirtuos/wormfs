@@ -146,6 +146,8 @@ pub enum NetworkEvent {
 pub enum NetworkCommand {
     /// Dial a peer
     Dial { node_id: u64, address: Multiaddr },
+    /// Dial all configured peers
+    DialAllPeers,
     /// Send a request
     SendRequest {
         peer_id: PeerId,
@@ -165,14 +167,14 @@ pub struct StorageNetwork {
     local_peer_id: PeerId,
     config: NetworkConfig,
     peer_manager: PeerManager,
-    peer_addresses: HashMap<u64, String>,
     peer_id_to_node_id: HashMap<PeerId, u64>,
     node_id_to_peer_id: HashMap<u64, PeerId>,
-    pending_peers: HashMap<PeerId, Multiaddr>,
     announced_to: HashSet<PeerId>,
+    announcement_requests: HashSet<OutboundRequestId>,
     pending_requests: HashMap<OutboundRequestId, oneshot::Sender<Result<RaftResponse>>>,
     event_tx: mpsc::UnboundedSender<NetworkEvent>,
     command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
+    command_tx: mpsc::UnboundedSender<NetworkCommand>,
     request_handler: Option<IncomingRequestHandler>,
 }
 
@@ -196,13 +198,6 @@ impl StorageNetwork {
             config.node_id,
             local_peer_id
         );
-
-        // Build peer address map
-        let peer_addresses: HashMap<u64, String> = config
-            .peers
-            .iter()
-            .map(|p| (p.node_id, p.address.clone()))
-            .collect();
 
         // Create TCP transport with noise encryption and yamux multiplexing
         let tcp_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
@@ -244,14 +239,14 @@ impl StorageNetwork {
             local_peer_id,
             config,
             peer_manager,
-            peer_addresses,
             peer_id_to_node_id: HashMap::new(),
             node_id_to_peer_id: HashMap::new(),
-            pending_peers: HashMap::new(),
             announced_to: HashSet::new(),
+            announcement_requests: HashSet::new(),
             pending_requests: HashMap::new(),
             event_tx,
             command_rx,
+            command_tx: command_tx.clone(),
             request_handler: None,
         };
 
@@ -381,7 +376,7 @@ impl StorageNetwork {
     /// Dial all configured peers
     pub async fn dial_peers(&mut self) -> Result<()> {
         tracing::info!(
-            "Dialing {} configured peers (discovery mode: {})",
+            "[DIAL_PEERS] Starting to dial {} configured peers (discovery mode: {})",
             self.config.peers.len(),
             self.config.allow_peer_discovery
         );
@@ -392,32 +387,68 @@ impl StorageNetwork {
         // Clone the peer list to avoid borrowing issues
         let peers = self.config.peers.clone();
 
+        tracing::info!(
+            "[DIAL_PEERS] Local node ID: {}, Processing {} peers",
+            local_node_id,
+            peers.len()
+        );
+
         for peer in &peers {
             if peer.node_id == local_node_id {
                 // Skip ourselves
+                tracing::debug!("[DIAL_PEERS] Skipping self (node {})", peer.node_id);
                 continue;
             }
 
-            let addr: Multiaddr = peer
-                .address
-                .parse()
-                .map_err(|e| TransportError::Config(format!("Invalid peer address: {}", e)))?;
+            tracing::info!(
+                "[DIAL_PEERS] Processing peer: node_id={}, address={}, has_peer_id={}",
+                peer.node_id,
+                peer.address,
+                peer.peer_id.is_some()
+            );
+
+            let addr: Multiaddr = match peer.address.parse() {
+                Ok(a) => {
+                    tracing::debug!("[DIAL_PEERS] Parsed address successfully: {}", a);
+                    a
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "[DIAL_PEERS] Failed to parse address '{}' for node {}: {}",
+                        peer.address,
+                        peer.node_id,
+                        e
+                    );
+                    return Err(TransportError::Config(format!(
+                        "Invalid peer address: {}",
+                        e
+                    )));
+                }
+            };
 
             // If peer_id is configured, we can map it immediately
             if let Some(ref peer_id_str) = peer.peer_id {
                 match PeerId::from_str(peer_id_str) {
                     Ok(peer_id) => {
                         tracing::info!(
-                            "Dialing peer {} (node {}) at {}",
+                            "[DIAL_PEERS] Dialing peer {} (node {}) at {}",
                             peer_id,
                             peer.node_id,
                             addr
                         );
                         // Pre-register the mapping
                         self.register_peer(peer_id, peer.node_id);
+                        tracing::debug!(
+                            "[DIAL_PEERS] Pre-registered mapping for node {}",
+                            peer.node_id
+                        );
                     }
                     Err(e) => {
-                        tracing::warn!("Invalid peer_id for node {}: {}", peer.node_id, e);
+                        tracing::warn!(
+                            "[DIAL_PEERS] Invalid peer_id for node {}: {}",
+                            peer.node_id,
+                            e
+                        );
                         if !allow_discovery {
                             return Err(TransportError::Config(format!(
                                 "Invalid peer_id for node {}: {}",
@@ -427,25 +458,49 @@ impl StorageNetwork {
                     }
                 }
             } else if !allow_discovery {
+                tracing::error!(
+                    "[DIAL_PEERS] Peer {} missing peer_id in strict mode",
+                    peer.node_id
+                );
                 return Err(TransportError::Config(format!(
                     "Peer {} missing peer_id in strict mode",
                     peer.node_id
                 )));
             } else {
                 tracing::info!(
-                    "Dialing peer (node {}) at {} (discovery mode)",
+                    "[DIAL_PEERS] Dialing peer (node {}) at {} (discovery mode)",
                     peer.node_id,
                     addr
                 );
             }
 
             // Dial the peer
-            if let Err(e) = self.swarm.dial(addr.clone()) {
-                tracing::warn!("Failed to dial peer {} at {}: {}", peer.node_id, addr, e);
-                self.peer_manager.record_failure(peer.node_id);
+            tracing::info!(
+                "[DIAL_PEERS] Calling swarm.dial() for peer {} at {}",
+                peer.node_id,
+                addr
+            );
+            match self.swarm.dial(addr.clone()) {
+                Ok(_) => {
+                    tracing::info!(
+                        "[DIAL_PEERS] Successfully initiated dial to peer {} at {}",
+                        peer.node_id,
+                        addr
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[DIAL_PEERS] Failed to dial peer {} at {}: {}",
+                        peer.node_id,
+                        addr,
+                        e
+                    );
+                    self.peer_manager.record_failure(peer.node_id);
+                }
             }
         }
 
+        tracing::info!("[DIAL_PEERS] Completed dialing all peers");
         Ok(())
     }
 
@@ -479,13 +534,21 @@ impl StorageNetwork {
                 ),
             };
 
-            self.swarm
+            let request_id = self
+                .swarm
                 .behaviour_mut()
                 .request_response
                 .send_request(&peer_id, announcement);
 
+            // Track this announcement request ID so we can ignore its response
+            self.announcement_requests.insert(request_id);
+
             self.announced_to.insert(peer_id);
-            tracing::debug!("Sent NodeAnnouncement to peer {}", peer_id);
+            tracing::debug!(
+                "Sent NodeAnnouncement to peer {} (request_id: {:?})",
+                peer_id,
+                request_id
+            );
         }
 
         // If we already know the node_id, register as connected
@@ -606,7 +669,7 @@ impl StorageNetwork {
 
     /// Send AppendEntries RPC to target node
     pub async fn send_append_entries(
-        &mut self,
+        &self,
         target: u64,
         request: AppendEntriesRequest,
     ) -> Result<AppendEntriesResponse> {
@@ -631,7 +694,7 @@ impl StorageNetwork {
     }
 
     /// Send Vote RPC to target node
-    pub async fn send_vote(&mut self, target: u64, request: VoteRequest) -> Result<VoteResponse> {
+    pub async fn send_vote(&self, target: u64, request: VoteRequest) -> Result<VoteResponse> {
         let peer_id = self.node_id_to_peer_id(target)?;
 
         let raft_request = RaftRequest {
@@ -650,7 +713,7 @@ impl StorageNetwork {
 
     /// Send InstallSnapshot RPC to target node
     pub async fn send_install_snapshot(
-        &mut self,
+        &self,
         target: u64,
         request: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse> {
@@ -674,49 +737,32 @@ impl StorageNetwork {
         }
     }
 
-    /// Generic request sender with timeout
-    async fn send_request(
-        &mut self,
-        peer_id: PeerId,
-        request: RaftRequest,
-    ) -> Result<RaftResponse> {
+    /// Generic request sender with timeout using command channel
+    async fn send_request(&self, peer_id: PeerId, request: RaftRequest) -> Result<RaftResponse> {
         // Create oneshot channel for response
         let (response_tx, response_rx) = oneshot::channel::<Result<RaftResponse>>();
 
-        let request_id = self
-            .swarm
-            .behaviour_mut()
-            .request_response
-            .send_request(&peer_id, request);
+        // Send command to event loop
+        self.command_tx
+            .send(NetworkCommand::SendRequest {
+                peer_id,
+                request,
+                response_tx,
+            })
+            .map_err(|_| TransportError::Network("Command channel closed".into()))?;
 
-        // Track the request
-        self.pending_requests.insert(request_id, response_tx);
-
-        tracing::debug!("Sent request {:?} to peer {}", request_id, peer_id);
+        tracing::debug!("Sent request command to peer {}", peer_id);
 
         // Apply timeout
         let timeout = self.config.request_timeout();
         match tokio::time::timeout(timeout, response_rx).await {
-            Ok(Ok(response)) => {
-                // Update peer manager on success
-                if let Some(node_id) = self.peer_id_to_node_id(&peer_id) {
-                    self.peer_manager.record_success(node_id, None);
-                }
-                response
-            }
+            Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 // Channel closed
-                if let Some(node_id) = self.peer_id_to_node_id(&peer_id) {
-                    self.peer_manager.record_failure(node_id);
-                }
                 Err(TransportError::Network("Response channel closed".into()))
             }
             Err(_) => {
                 // Timeout
-                if let Some(node_id) = self.peer_id_to_node_id(&peer_id) {
-                    self.peer_manager.record_failure(node_id);
-                }
-                self.pending_requests.remove(&request_id);
                 tracing::warn!("Request to peer {} timed out after {:?}", peer_id, timeout);
                 Err(TransportError::Timeout)
             }
@@ -728,6 +774,11 @@ impl StorageNetwork {
         use libp2p::swarm::SwarmEvent;
         use request_response::{Event as RequestResponseEvent, Message};
 
+        tracing::info!(
+            "[EVENT_LOOP] Starting network event loop for node {}",
+            self.config.node_id
+        );
+
         // Set up periodic maintenance timer (every 5 seconds)
         let mut maintenance_interval = tokio::time::interval(Duration::from_secs(5));
         maintenance_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -736,21 +787,27 @@ impl StorageNetwork {
             tokio::select! {
                 // Periodic maintenance
                 _ = maintenance_interval.tick() => {
+                    tracing::trace!("[EVENT_LOOP] Running periodic maintenance");
                     if let Err(e) = self.maintenance().await {
-                        tracing::warn!("Maintenance task failed: {}", e);
+                        tracing::warn!("[EVENT_LOOP] Maintenance task failed: {}", e);
                     }
                 }
 
                 // Process swarm events
                 Some(event) = self.swarm.next() => {
+                    tracing::trace!("[EVENT_LOOP] Received swarm event: {:?}", std::mem::discriminant(&event));
                     match event {
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                            tracing::info!("[EVENT_LOOP] Connection established with peer {} at {:?}", peer_id, endpoint);
                             self.handle_connection_established(peer_id, &endpoint);
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            tracing::info!("[EVENT_LOOP] Connection closed with peer {}", peer_id);
                             self.handle_connection_closed(peer_id);
                         }
                         SwarmEvent::Behaviour(RaftBehaviourEvent::RequestResponse(event)) => {
+                            tracing::info!("[EVENT_LOOP] RequestResponse {:?}", event);
+
                             match event {
                                 RequestResponseEvent::Message { peer, message, .. } => {
                                     match message {
@@ -788,16 +845,25 @@ impl StorageNetwork {
                                             }
                                         }
                                         Message::Response { request_id, response } => {
-                                            // Find the pending request and send the response
-                                            if let Some(response_tx) = self.pending_requests.remove(&request_id) {
+                                            // Check if this is a response to an announcement (which we can ignore)
+                                            if self.announcement_requests.remove(&request_id) {
+                                                tracing::debug!("Received response for NodeAnnouncement {:?}, ignoring", request_id);
+                                            } else if let Some(response_tx) = self.pending_requests.remove(&request_id) {
+                                                // This is a response to a real request
                                                 let _ = response_tx.send(Ok(response));
                                             } else {
+                                                // Unknown request - this is a real warning
                                                 tracing::warn!("Received response for unknown request {:?}", request_id);
                                             }
                                         }
                                     }
                                 }
-                                RequestResponseEvent::OutboundFailure { peer, error, .. } => {
+                                RequestResponseEvent::OutboundFailure { peer, error, request_id, .. } => {
+                                    // Clean up announcement request IDs if present
+                                    self.announcement_requests.remove(&request_id);
+                                    // Also clean up any pending request
+                                    self.pending_requests.remove(&request_id);
+
                                     tracing::warn!("Outbound request failed to peer {}: {:?}", peer, error);
                                     if let Some(node_id) = self.peer_id_to_node_id(&peer) {
                                         self.peer_manager.record_failure(node_id);
@@ -820,7 +886,8 @@ impl StorageNetwork {
                                 self.peer_manager.record_failure(node_id);
                             }
                         }
-                        SwarmEvent::OutgoingConnectionError { peer_id: None, .. } => {
+                        SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                            tracing::info!("[EVENT_LOOP] OutgoingConnectionError peer_id:{:?}, error: {:?}",peer_id, error);
                             // Connection error without peer_id, nothing to track
                         }
                         SwarmEvent::IncomingConnectionError { .. } => {
@@ -832,29 +899,40 @@ impl StorageNetwork {
 
                 // Process network commands
                 Some(command) = self.command_rx.recv() => {
+                    tracing::debug!("[EVENT_LOOP] Received network command: {:?}", std::mem::discriminant(&command));
                     match command {
                         NetworkCommand::Dial { node_id, address } => {
-                            tracing::debug!("Dialing peer {} at {}", node_id, address);
+                            tracing::info!("[EVENT_LOOP] Processing Dial command for peer {} at {}", node_id, address);
                             if let Err(e) = self.swarm.dial(address) {
-                                tracing::warn!("Failed to dial peer {}: {}", node_id, e);
+                                tracing::warn!("[EVENT_LOOP] Failed to dial peer {}: {}", node_id, e);
                                 self.peer_manager.record_failure(node_id);
+                            } else {
+                                tracing::info!("[EVENT_LOOP] Successfully initiated dial for peer {}", node_id);
+                            }
+                        }
+                        NetworkCommand::DialAllPeers => {
+                            tracing::info!("[EVENT_LOOP] Processing DialAllPeers command");
+                            // Dial all configured peers
+                            if let Err(e) = self.dial_peers().await {
+                                tracing::warn!("[EVENT_LOOP] Failed to dial all peers: {}", e);
+                            } else {
+                                tracing::info!("[EVENT_LOOP] DialAllPeers command completed");
                             }
                         }
                         NetworkCommand::SendRequest { peer_id, request, response_tx } => {
+                            tracing::debug!("[EVENT_LOOP] Processing SendRequest command for peer {}", peer_id);
                             let request_id = self.swarm
                                 .behaviour_mut()
                                 .request_response
                                 .send_request(&peer_id, request);
 
-                            tracing::trace!("Sent request {:?} to peer {}", request_id, peer_id);
+                            // Track the request so we can forward the response
+                            self.pending_requests.insert(request_id, response_tx);
 
-                            // Note: In a complete implementation, we would track the request_id
-                            // and match it with the response in RequestResponseEvent::Message
-                            // For now, we just send the request and the response will be handled
-                            // by the caller through a different mechanism
-                            let _ = response_tx.send(Ok(RaftResponse { response: None }));
+                            tracing::trace!("[EVENT_LOOP] Sent request {:?} to peer {}", request_id, peer_id);
                         }
                         NetworkCommand::SendResponse { channel, response } => {
+                            tracing::trace!("[EVENT_LOOP] Processing SendResponse command");
                             let _ = self.swarm
                                 .behaviour_mut()
                                 .request_response
