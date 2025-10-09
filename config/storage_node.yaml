@@ -60,6 +60,22 @@ network:
   #   - node_id: 3
   #     address: "/ip4/192.168.1.102/tcp/3000"
 
+# StorageEndpoint configuration (gRPC data transfer server)
+# Handles bulk data transfers for snapshots and chunks
+storage_endpoint:
+  # Bind address for the gRPC server
+  bind_address: "0.0.0.0"
+  # Port for the gRPC server
+  port: 8082
+  # Directory where snapshots are stored
+  snapshot_dir: "data/snapshots"
+  # Node ID for this endpoint (defaults to raft.node_id if not specified)
+  # node_id: 1
+  
+  # Example for production with specific hostname:
+  # bind_address: "192.168.1.100"
+  # port: 8082
+
 # Storage configuration
 storage_config:
   # OPTION 1: Single disk mode (backward compatibility)

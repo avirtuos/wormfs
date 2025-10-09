@@ -120,7 +120,7 @@ Files to modify:
 - `src/transport/libp2p_network.rs`
 - `tests/transport_tests.rs`
 
-### Task 5: Update Node Initialization
+### Task 5: Update Node Initialization - COMPLETED
 **Priority: Medium**
 **Estimated Effort: 2 hours**
 
