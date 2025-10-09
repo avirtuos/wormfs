@@ -12,7 +12,11 @@ use crate::metadata_store::{
     ChunkId, ChunkMetadata, FileMetadata, MetadataError, MetadataStore, StorageLocation, StripeId,
     StripeMetadata,
 };
+use crate::storage_endpoint::{StorageEndpointConfig, StorageEndpointError, StorageEndpointServer};
 use crate::storage_layout::{StorageLayout, StorageLayoutConfig, StorageLayoutError};
+use crate::transport::{
+    NetworkCommand, NetworkConfig, NetworkEvent, StorageNetwork, TransportError,
+};
 
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -20,6 +24,8 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -38,6 +44,12 @@ pub struct StorageNodeConfig {
     pub min_free_space: u64,
     /// Maximum file size to accept (in bytes)
     pub max_file_size: u64,
+    /// Optional storage endpoint configuration for gRPC data transfer
+    #[serde(default)]
+    pub storage_endpoint: Option<StorageEndpointConfig>,
+    /// Optional network configuration for Raft consensus
+    #[serde(default)]
+    pub network: Option<NetworkConfig>,
 }
 
 impl StorageNodeConfig {
@@ -50,6 +62,8 @@ impl StorageNodeConfig {
             erasure_config: ErasureCodingConfig::preset_4_2()?,
             min_free_space: 1024 * 1024 * 1024,      // 1GB
             max_file_size: 100 * 1024 * 1024 * 1024, // 100GB
+            storage_endpoint: None,
+            network: None,
         })
     }
 
@@ -139,6 +153,12 @@ pub enum StorageNodeError {
 
     #[error("Invalid file path: {path:?}")]
     InvalidFilePath { path: PathBuf },
+
+    #[error("Storage endpoint error: {0}")]
+    StorageEndpoint(#[from] StorageEndpointError),
+
+    #[error("Network error: {0}")]
+    Network(#[from] TransportError),
 }
 
 /// Result type for storage node operations
@@ -171,6 +191,11 @@ pub struct StorageNode {
     config: StorageNodeConfig,
     metadata_store: MetadataStore,
     storage_layout: StorageLayout,
+    storage_endpoint: Option<StorageEndpointServer>,
+    storage_network: Option<StorageNetwork>,
+    network_event_rx: Option<mpsc::UnboundedReceiver<NetworkEvent>>,
+    network_command_tx: Option<mpsc::UnboundedSender<NetworkCommand>>,
+    network_handle: Option<JoinHandle<()>>,
 }
 
 impl StorageNode {
@@ -198,12 +223,37 @@ impl StorageNode {
             .with_auto_create_dirs(true);
         let storage_layout = StorageLayout::new(storage_layout_config)?;
 
+        // Initialize optional storage endpoint
+        let storage_endpoint = if let Some(endpoint_config) = &config.storage_endpoint {
+            debug!("Initializing storage endpoint server");
+            Some(StorageEndpointServer::new(endpoint_config.clone())?)
+        } else {
+            debug!("No storage endpoint configured");
+            None
+        };
+
+        // Initialize optional storage network
+        let (storage_network, network_event_rx, network_command_tx) =
+            if let Some(network_config) = &config.network {
+                debug!("Initializing storage network");
+                let (network, event_rx, cmd_tx) = StorageNetwork::new(network_config.clone())?;
+                (Some(network), Some(event_rx), Some(cmd_tx))
+            } else {
+                debug!("No storage network configured");
+                (None, None, None)
+            };
+
         info!("Storage node initialized successfully");
 
         Ok(Self {
             config,
             metadata_store,
             storage_layout,
+            storage_endpoint,
+            storage_network,
+            network_event_rx,
+            network_command_tx,
+            network_handle: None,
         })
     }
 
@@ -555,6 +605,141 @@ impl StorageNode {
     /// Get a reference to the metadata store
     pub fn metadata_store(&self) -> &MetadataStore {
         &self.metadata_store
+    }
+
+    /// Start the storage endpoint server (if configured)
+    pub async fn start_endpoint(&mut self) -> StorageNodeResult<Option<String>> {
+        if let Some(ref mut endpoint) = self.storage_endpoint {
+            info!("Starting storage endpoint server");
+            let addr = endpoint.start().await?;
+            info!("Storage endpoint started at: {}", addr);
+            Ok(Some(addr))
+        } else {
+            debug!("No storage endpoint to start");
+            Ok(None)
+        }
+    }
+
+    /// Stop the storage endpoint server (if running)
+    pub async fn stop_endpoint(&mut self) -> StorageNodeResult<()> {
+        if let Some(ref mut endpoint) = self.storage_endpoint {
+            info!("Stopping storage endpoint server");
+            endpoint.stop().await?;
+            info!("Storage endpoint stopped");
+        }
+        Ok(())
+    }
+
+    /// Get endpoint address (if configured and started)
+    pub fn endpoint_address(&self, hostname: Option<&str>) -> Option<String> {
+        self.storage_endpoint
+            .as_ref()
+            .filter(|e| e.is_running())
+            .map(|e| e.endpoint_address(hostname))
+    }
+
+    /// Check if storage endpoint is running
+    pub fn is_endpoint_running(&self) -> bool {
+        self.storage_endpoint
+            .as_ref()
+            .map(|e| e.is_running())
+            .unwrap_or(false)
+    }
+
+    /// Start the storage network and spawn event loop
+    pub async fn start_network(&mut self) -> StorageNodeResult<()> {
+        if let Some(network) = self.storage_network.take() {
+            info!("Starting storage network");
+
+            // Start listening
+            let mut network = network;
+            network.start_listening()?;
+
+            // Spawn network event loop
+            let network_handle = tokio::spawn(async move {
+                if let Err(e) = network.run().await {
+                    error!("Network event loop error: {}", e);
+                }
+            });
+
+            self.network_handle = Some(network_handle);
+            info!("Storage network started");
+            Ok(())
+        } else {
+            debug!("No storage network to start");
+            Ok(())
+        }
+    }
+
+    /// Dial all configured peers
+    pub async fn dial_all_peers(&self) -> StorageNodeResult<()> {
+        if let Some(ref cmd_tx) = self.network_command_tx {
+            cmd_tx.send(NetworkCommand::DialAllPeers).map_err(|_| {
+                StorageNodeError::Network(TransportError::Network("Command channel closed".into()))
+            })?;
+            info!("Sent dial all peers command");
+            Ok(())
+        } else {
+            debug!("No network to dial peers");
+            Ok(())
+        }
+    }
+
+    /// Stop the storage network
+    pub async fn stop_network(&mut self) -> StorageNodeResult<()> {
+        if let Some(handle) = self.network_handle.take() {
+            info!("Stopping storage network");
+            handle.abort();
+            let _ = handle.await;
+            info!("Storage network stopped");
+        }
+        Ok(())
+    }
+
+    /// Get network command sender
+    pub fn network_command_tx(&self) -> Option<&mpsc::UnboundedSender<NetworkCommand>> {
+        self.network_command_tx.as_ref()
+    }
+
+    /// Get mutable reference to network event receiver
+    pub fn network_event_rx(&mut self) -> Option<&mut mpsc::UnboundedReceiver<NetworkEvent>> {
+        self.network_event_rx.as_mut()
+    }
+
+    /// Check if network is configured
+    pub fn has_network(&self) -> bool {
+        self.network_command_tx.is_some()
+    }
+
+    /// Check if network is running
+    pub fn is_network_running(&self) -> bool {
+        self.network_handle
+            .as_ref()
+            .map(|h| !h.is_finished())
+            .unwrap_or(false)
+    }
+
+    /// Start all services in correct order (endpoint first, then network)
+    pub async fn start_services(&mut self) -> StorageNodeResult<()> {
+        // 1. Start endpoint first (so address is known)
+        let endpoint_addr = self.start_endpoint().await?;
+        if let Some(ref addr) = endpoint_addr {
+            info!("Storage endpoint started at: {}", addr);
+        }
+
+        // 2. Start network
+        self.start_network().await?;
+
+        info!("All services started successfully");
+        Ok(())
+    }
+
+    /// Stop all services
+    pub async fn stop_services(&mut self) -> StorageNodeResult<()> {
+        self.stop_network().await?;
+        self.stop_endpoint().await?;
+        info!("All services stopped");
+        Ok(())
     }
 
     /// Perform an integrity check on the storage system
