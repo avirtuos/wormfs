@@ -1,0 +1,56 @@
+[package]
+name = "wormfs"
+version = "0.1.0"
+edition = "2021"
+authors = ["WormFS Contributors"]
+description = "A distributed, erasure-coded filesystem with strong consistency"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Networking (libp2p)
+libp2p = { version = "0.53", optional = true }
+
+# Raft consensus (OpenRaft)
+openraft = { version = "0.9", optional = true }
+
+# Storage
+rusqlite = { version = "0.30", optional = true }
+redb = { version = "2.0", optional = true }
+
+# Erasure coding
+reed-solomon-erasure = { version = "6.0", optional = true }
+
+# Cryptography
+crc32fast = "1.3"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# gRPC
+tonic = { version = "0.11", optional = true }
+prost = { version = "0.12", optional = true }
+
+[build-dependencies]
+tonic-build = "0.11"
+prost-build = "0.12"
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = "1.4"
+
+[features]
+default = []
+full = ["libp2p", "openraft", "rusqlite", "redb", "reed-solomon-erasure", "tonic", "prost"]

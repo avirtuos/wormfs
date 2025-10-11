@@ -1,3 +1,5 @@
+![WormFS Logo](docs/images/logo.png)
+
 # WormFS
 
 WormFS, short for write-once-read-many file system, is intended to be user-space file system that uses erasure encoding to spread files across multiple storage devices, each running their own commodity filesystems. This allows great flexibility with respect to configuring device failure tolerance at a file or directory level. I envision this being extremely useful for media storage and deep archive use-cases.

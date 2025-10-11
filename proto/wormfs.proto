@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package wormfs;
+
+// WormFS Protocol Buffer Definitions
+// This file will contain message definitions for network communication
+// and data serialization in the WormFS distributed filesystem.
+
+// Placeholder message - to be expanded with actual protocol definitions
+message Placeholder {
+  string message = 1;
+}
