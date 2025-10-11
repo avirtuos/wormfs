@@ -1,0 +1,86 @@
+# Codecov configuration for WormFS
+# See https://docs.codecov.com/docs/codecov-yaml for reference
+
+coverage:
+  precision: 2
+  round: down
+  range: "70...100"
+  
+  status:
+    project:
+      default:
+        target: 70%           # Target coverage percentage
+        threshold: 5%         # Allow 2% drop without failing
+        if_ci_failed: error   # Fail if CI failed
+        if_not_found: success # Don't fail if coverage data not found
+        only_pulls: false     # Run on all commits, not just PRs
+        
+    patch:
+      default:
+        target: 70%           # New code should have 80% coverage
+        threshold: 5%         # Allow 1% drop without failing
+        if_ci_failed: error
+        if_not_found: success
+        only_pulls: true      # Only check patch coverage on PRs
+
+  ignore:
+    - "benches/**/*"          # Ignore benchmark files
+    - "tests/**/*"            # Ignore test files (already testing, don't need coverage)
+    - "src/main.rs"           # Ignore CLI entry point (hard to test comprehensively)
+    - "examples/**/*"         # Ignore example code
+
+comment:
+  layout: "reach,diff,flags,tree,reach"
+  behavior: default
+  require_changes: false
+  require_base: false
+  require_head: true
+
+github_checks:
+  annotations: true
+
+# Component-specific coverage targets
+flag_management:
+  default_rules:
+    carryforward: true
+    statuses:
+      - type: project
+        target: 85%
+      - type: patch
+        target: 80%
+
+# Define coverage flags for different components
+flags:
+  core:
+    paths:
+      - src/lib.rs
+      - src/chunk_format.rs
+      - src/erasure_coding.rs
+      - src/metadata_store.rs
+      - src/storage_layout.rs
+    carryforward: true
+    
+  storage_node:
+    paths:
+      - src/storage_node.rs
+    carryforward: true
+    
+  cli:
+    paths:
+      - src/main.rs
+    carryforward: true
+
+# Configure how comments appear on PRs
+comment:
+  layout: "reach,diff,flags,tree"
+  behavior: default
+  require_changes: true
+  
+# Prevent status checks from failing the build for small changes
+parsers:
+  gcov:
+    branch_detection:
+      conditional: true
+      loop: true
+      method: false
+      macro: false
