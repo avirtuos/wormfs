@@ -56,6 +56,9 @@ pub use types::{ChunkId, ClientId, Config, DiskId, Error, FileId, FileMetadata, 
 ///
 /// Implementations provide storage and retrieval of filesystem metadata,
 /// chunk locations, and lock state.
+///
+/// Note: This trait cannot be automocked due to the Clone bound requirement.
+/// Manual mocking or alternative testing strategies should be used.
 #[async_trait]
 pub trait MetadataStore: Send + Sync + Clone {
     /// Data types

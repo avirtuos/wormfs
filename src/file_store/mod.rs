@@ -75,7 +75,6 @@ pub mod types;
 
 use async_trait::async_trait;
 use std::path::PathBuf;
-use std::time::SystemTime;
 pub use types::{
     ChunkData, ChunkHeader, ChunkId, ChunkLocation, CompressionAlgorithm, Config, DiskId,
     DiskStats, ErasureAlgorithm, Error, FileId, NodeId, PrepareVote, RebuildResult, StoragePolicy,
@@ -86,6 +85,7 @@ pub use types::{
 ///
 /// Implementations handle the conversion of file data into erasure-coded chunks
 /// distributed across the storage cluster.
+#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait FileStore: Send + Sync {
     /// Create a new FileStore instance.
@@ -155,70 +155,64 @@ pub trait FileStore: Send + Sync {
 
     // ===== Two-Phase Commit Operations =====
 
-    /// Prepare a chunk locally (Phase 1 of 2PC).
+    /// Stage a chunk on local disk without metadata tracking.
     ///
-    /// Writes chunk with state="preparing" and fsyncs to disk. The chunk
-    /// is durable but not yet visible to readers.
+    /// Writes chunk data to disk in a "staged" state. The chunk is not visible
+    /// in the filesystem and has no metadata record. Only the Leader tracks
+    /// staged chunks in memory for the duration of the transaction.
+    ///
+    /// Staged chunks older than 1 hour are considered orphaned and will be
+    /// cleaned up by StorageWatchdog.
     ///
     /// # Arguments
     ///
-    /// * `tx_id` - Transaction identifier
     /// * `chunk_data` - Chunk data including header and payload
     ///
     /// # Returns
     ///
-    /// Vote indicating whether the chunk was successfully prepared (COMMIT)
-    /// or preparation failed (ABORT).
+    /// The ChunkId of the staged chunk.
     ///
     /// # Errors
     ///
-    /// Returns an error if validation fails or I/O errors occur.
-    async fn prepare_chunk(&self, tx_id: TxId, chunk_data: ChunkData)
-        -> Result<PrepareVote, Error>;
+    /// Returns an error if:
+    /// - Disk is full or unavailable
+    /// - I/O errors occur during write
+    /// - Chunk validation fails
+    async fn stage_chunk(&self, chunk_data: ChunkData) -> Result<ChunkId, Error>;
 
-    /// Commit a prepared chunk (Phase 2 of 2PC).
+    /// Activate a staged chunk after metadata commit.
     ///
-    /// Transitions chunk from "preparing" to "active" state, making it
-    /// visible to readers.
+    /// Transitions a staged chunk to "active" state, making it visible in
+    /// the filesystem. This is called after Raft successfully commits the
+    /// metadata operations that reference this chunk.
     ///
     /// # Arguments
     ///
-    /// * `tx_id` - Transaction identifier
-    /// * `chunk_id` - Chunk identifier
+    /// * `chunk_id` - Identifier of the staged chunk to activate
     ///
     /// # Errors
     ///
-    /// Returns an error if the chunk cannot be found or state transition fails.
-    async fn commit_chunk(&self, tx_id: TxId, chunk_id: ChunkId) -> Result<(), Error>;
+    /// Returns an error if:
+    /// - Chunk is not found (may have been cleaned up)
+    /// - State transition fails
+    /// - I/O errors occur
+    async fn activate_chunk(&self, chunk_id: ChunkId) -> Result<(), Error>;
 
-    /// Abort a prepared chunk (Phase 2 of 2PC).
+    /// Discard a staged chunk after transaction failure.
     ///
-    /// Deletes a chunk in "preparing" state, rolling back the transaction.
+    /// Deletes a staged chunk when the metadata transaction fails or is aborted.
+    /// The chunk data is permanently removed from disk.
     ///
     /// # Arguments
     ///
-    /// * `tx_id` - Transaction identifier
-    /// * `chunk_id` - Chunk identifier
+    /// * `chunk_id` - Identifier of the staged chunk to discard
     ///
     /// # Errors
     ///
-    /// Returns an error if the chunk cannot be found or deletion fails.
-    async fn abort_chunk(&self, tx_id: TxId, chunk_id: ChunkId) -> Result<(), Error>;
-
-    /// Cleanup orphaned preparing chunks (background task).
-    ///
-    /// Scans for chunks in "preparing" state older than the specified age
-    /// and deletes them. This handles transactions that were interrupted
-    /// by crashes.
-    ///
-    /// # Arguments
-    ///
-    /// * `older_than` - Delete preparing chunks older than this time
-    ///
-    /// # Returns
-    ///
-    /// Number of orphaned chunks cleaned up.
-    async fn cleanup_orphaned_chunks(&self, older_than: SystemTime) -> Result<u64, Error>;
+    /// Returns an error if:
+    /// - Chunk is not found (may have already been cleaned up)
+    /// - Deletion fails
+    async fn discard_staged_chunk(&self, chunk_id: ChunkId) -> Result<(), Error>;
 
     // ===== Local Chunk Operations =====
 

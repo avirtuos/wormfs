@@ -49,6 +49,10 @@ pub use types::{Config, Error};
 ///
 /// Implementations of this trait are responsible for initializing all WormFS components
 /// and managing their lifecycle.
+#[cfg_attr(any(test, feature = "test-utils"), mockall::automock(
+    type Status = ();
+    type ClusterInfo = ();
+))]
 #[async_trait]
 pub trait StorageNode: Send + Sync {
     /// Status type returned by health checks

@@ -1,4 +1,6 @@
-![WormFS Logo](docs/images/logo.png)
+<p align="center">
+<img src="docs/images/logo.png" width="400">
+</p>
 
 # WormFS
 

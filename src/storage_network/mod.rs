@@ -61,6 +61,9 @@ pub use types::{
 ///
 /// Implementations provide libp2p-based networking with topic subscriptions,
 /// direct streaming, and peer management.
+///
+/// Note: This trait is not mocked via automock due to Clone requirement.
+/// Manual mock implementations can be created in test code as needed.
 #[async_trait]
 pub trait StorageNetwork: Send + Sync + Clone {
     /// Stream type for direct data transfer
