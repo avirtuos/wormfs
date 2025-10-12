@@ -65,7 +65,7 @@ FileStore manages the erasure coding, chunk storage, and chunk placement for fil
 
 ```
 For each stripe:
-  1. Get storage policy (k data, m parity shards)
+  1. Get storage policy (k data, m parity shards). This may come from the request or require lookup in the MetadataStore as this is can be set at the File level (for writes) or Stripe level (for reads while a File is transitioning between StoragePolicies)
   2. Query MetadataStore for available nodes/disks
   3. For each chunk (0 to k+m-1):
      a. Filter disks that already have a chunk from this stripe
@@ -122,61 +122,36 @@ orphaned and are cleaned up by StorageWatchdog. This handles scenarios where:
 
 The 1-hour threshold ensures no in-flight transactions are affected by cleanup.
 
-#### Phase 1: Prepare
+#### Write Operation
 
-When `prepare_chunk()` is called by StorageRaftMember (acting on Raft leader's prepare directive):
+When a client (e.g. fuse client) attempts to write a new file, the FileSystem component receives the request via the StorageEndpoint the client was connected to. FileSystem then initiates the following flow, if and only if its node is the current Raft leader:
 
-1. **Validate Request**: Check tx_id, chunk_id, and available disk space
-2. **Select Disk**: Choose target disk based on chunk assignment from leader
-3. **Write Chunk**: 
-   - Write chunk header with state=PREPARING
-   - Write chunk data to temporary location
-   - Compute and verify checksums
-4. **Persist State**:
-   - fsync() chunk file to disk
-   - Record tx_id → chunk_id mapping in memory
-5. **Return Vote**:
-   - Vote::Commit if successful (chunk durably stored)
-   - Vote::Abort if any failure occurred
+1. **Create Empty File**: (this step is only needed if we are creating a new file and writing to it in one step) Calls StorageRaftMember to create an empty file and lock it for writing by the peer that is coordinating the operation (itself). 
+2. **Prepare Chunk Data**: After receiving data for one or more Stripes, the FileSystem prepares the Chunks locally in a temp area on disk. It then makes placement decisions for the chunks and stages the chunks on the intended StorageNodes by calling their respective StorageEndpoints. If any Chunks exceed their max allowed retries, FileSystem makes new placement decisions for the affected Chunks and reattempt staging upto a maximum number of re-attempts. As long as the minimum requirements of the StoragePolicy are satisfied, Staging can be considered a success and we move to the next step.
+3. **Update File Metadata**: Initiate another transaction via StorageRaftMember to add/update/etc the new Stripes and Chunks, making them visible via FileSystem read operations. The FileSystem itself likely needs to participate in Voting so StorageRaftMember may need to ask FileSystem and Metastore (perhaps others) to weigh in on the vote before responding to proposals issued by the Master.
+3a. **Transaction Vote Calculation**: When asked by StorageRaftMember, FileSystem should locate any chunk files which are expected to be local to the node before contributing to the vote.
+4. **Return Result To Caller**: At this point we can notifier the caller (e.g. fuse client) that the operation has completed, either successfully or with errors.
 
 **Key Properties**:
 - Chunk is written to disk but NOT yet visible to readers
 - State is durable (survives crashes)
 - Vote response guarantees chunk can be committed or aborted
 
-#### Phase 2a: Commit
-
-When `commit_chunk()` is called (after Raft commits metadata):
-
-1. **Locate Chunk**: Find chunk file by tx_id and chunk_id
-2. **Verify State**: Ensure chunk is in PREPARING state
-3. **Atomically Update**:
-   - Rename chunk from temp location to final location
-   - Update chunk header state to ACTIVE
-   - fsync() to ensure durability
-4. **Cleanup**: Remove tx_id → chunk_id mapping
-
-**Result**: Chunk becomes visible and readable by clients
-
-#### Phase 2b: Abort
+#### On Abort
 
 When `abort_chunk()` is called (if Raft transaction fails):
 
-1. **Locate Chunk**: Find chunk file by tx_id and chunk_id
-2. **Verify State**: Ensure chunk is in PREPARING state
-3. **Delete Chunk**:
+1. **Locate Chunk**: Find chunk file by chunk_id
+2. **Delete Chunk**:
    - Remove chunk file from disk
    - Free allocated space
-4. **Cleanup**: Remove tx_id → chunk_id mapping
-
-**Result**: Chunk is purged as if it never existed
 
 #### Orphan Cleanup
 
 Background task `cleanup_orphaned_chunks()` handles crash recovery:
 
 1. **Scan Disks**: Find all chunks in PREPARING state
-2. **Check Age**: Filter chunks older than timeout (e.g., 5 minutes)
+2. **Check Age**: Filter chunks older than timeout (e.g.,1 Hour)
 3. **Purge Orphans**: Delete stale preparing chunks
 4. **Log Results**: Record cleanup statistics for monitoring
 
@@ -207,7 +182,6 @@ Background task `cleanup_orphaned_chunks()` handles crash recovery:
 │  │ Compression algorithm (1 byte)     │ │
 │  │ Stripe checksum (4 bytes CRC32)    │ │
 │  │ Chunk state (1 byte)               │ │
-│  │ Transaction ID (16 bytes, if PREPARING) │
 │  │ Reserved (variable)                │ │
 │  └────────────────────────────────────┘ │
 │                                          │
@@ -337,6 +311,7 @@ impl FileStore {
 
 ```rust
 pub struct StoragePolicy {
+    pub parity_algo: ErasureAlgorithm,
     /// Number of data shards
     pub data_shards: u8,
     /// Number of parity shards
@@ -701,48 +676,46 @@ hash_buckets = 1000
 
 ### Two-Phase Commit Protocol
 
-1. **Transaction Timeout**: What should be the default timeout for orphaned chunk cleanup? (5 minutes, 10 minutes, 1 hour?)
+1. **Transaction Timeout**: What should be the default timeout for orphaned chunk cleanup? (5 minutes, 10 minutes, 1 hour?) Answer: 1 hour
 
-2. **Prepare Vote Timeout**: How long should the leader wait for prepare votes before aborting? Should it be configurable per operation type?
+2. **Chunk Location Persistence**: Should we persist the tx_id → chunk_id mapping to disk for crash recovery, or rely on orphan cleanup? Answer: We do not need to keep track of a mapping and can instead rely on orpha clean up. In general, this is something that is tracked by the StorageRaftNode and TransactionLogStore if we want to do a better job of active clean up or carry out other processes that require knowledge of Chunks in a TX.
 
-3. **Chunk Location Persistence**: Should we persist the tx_id → chunk_id mapping to disk for crash recovery, or rely on orphan cleanup?
+4. **Temporary File Location**: Should PREPARING chunks be written to a separate temp directory or in-place with a state marker? Answer: No, staged chunks can be written directly to their final location since StorageMetadata gates the visibility of these items.
 
-4. **Temporary File Location**: Should PREPARING chunks be written to a separate temp directory or in-place with a state marker?
+5. **Commit Operation Atomicity**: Is file rename sufficient for commit atomicity, or do we need additional guarantees (e.g., journal)? Answer: We should not be renaming or moving files once their are staged. They should be stage in their final location as specified by the StoreChunk request.
 
-5. **Commit Operation Atomicity**: Is file rename sufficient for commit atomicity, or do we need additional guarantees (e.g., journal)?
+6. **Partial Stripe Commit**: If some chunks fail to prepare, should we retry with alternate nodes or immediately abort? Answer: We should retry with alternate nodes until we either successfully stage all chunks, run out of nodes to try on (and thus are unable to meet the minimum requirements of the StoragePolicy), or we've exhausted all retries but have met the minimum requirements of the StoragePolicy (and can reply on background storage anti-entropy mechanism to replicate additional chunks)
 
-6. **Partial Stripe Commit**: If some chunks fail to prepare, should we retry with alternate nodes or immediately abort?
+7. **Orphan Cleanup Frequency**: How often should the background cleanup task run? (Every minute, every 5 minutes, on-demand?) Answer: This process should run once an hour.
 
-7. **Orphan Cleanup Frequency**: How often should the background cleanup task run? (Every minute, every 5 minutes, on-demand?)
-
-8. **Vote Response Strategy**: Should nodes vote Commit optimistically (before fsync) or pessimistically (after fsync)? Trade-off between latency and safety.
+8. **Vote Response Strategy**: Should nodes vote Commit optimistically (before fsync) or pessimistically (after fsync)? Trade-off between latency and safety. Answer: We do not need to block on any explicit fsync.
 
 ### General Storage Questions
 
-9. **Compression Support**: Should we implement compression in the initial version, or defer to future iterations? If yes, which algorithm (lz4, zstd)?
+9. **Compression Support**: Should we implement compression in the initial version, or defer to future iterations? If yes, which algorithm (lz4, zstd)? Answer: We can differ chunk compression to a future version
 
-10. **Chunk Size**: Should chunk size be fixed (stripe_size / data_shards) or configurable independently?
+10. **Chunk Size**: Should chunk size be fixed (stripe_size / data_shards) or configurable independently? Answer: We should allow configuring of Chunk size only and allow Strip size to be a function of Chunk size and StoragePolicy (e.g. data + parity shard counts). We can start with a Chunk size of 1MB.
 
-11. **Partial Stripe Writes**: How should we handle the last stripe of a file that's smaller than stripe_size? Pad or use variable-sized encoding?
+11. **Partial Stripe Writes**: How should we handle the last stripe of a file that's smaller than stripe_size? Pad or use variable-sized encoding? Answer: We should reduce the Chunk size such that we do not require more than 10% padding. This may require storing additional metadata in the ChunkHeader.
 
-12. **Chunk Caching**: Should FileStore implement a chunk cache for frequently accessed data? What eviction policy?
+12. **Chunk Caching**: Should FileStore implement a chunk cache for frequently accessed data? What eviction policy? Answer: No Chunk caching is needed at this time. We may add it in a future release.
 
-13. **Disk Balancing**: Should we implement active rebalancing when disk usage becomes imbalanced, or only balance new writes?
+13. **Disk Balancing**: Should we implement active rebalancing when disk usage becomes imbalanced, or only balance new writes? Answer: Yes, this is one of the responsibilities we expect to be added to the StorageWatchdog's background anti-entropy and storage optimization processes.
 
-14. **Chunk Migration**: Should chunk migration be automatic or require operator approval? What triggers migration?
+14. **Chunk Migration**: Should chunk migration be automatic or require operator approval? What triggers migration? Answer: chunk migration should be automatic without operator intervention. The triggers will largely originate from the StorageWatchdog's background anti-entropy and optimization processes.
 
-15. **Verification Frequency**: How often should we verify chunk checksums during normal reads vs. deep verification?
+15. **Verification Frequency**: How often should we verify chunk checksums during normal reads vs. deep verification? Answer: We should have a configuration that controls the probability that we validate checksums as part of a normal read operation where as deep verification always validates checksums.
 
-16. **Reconstruction Priority**: When multiple stripes need reconstruction, how should we prioritize? (FIFO, by file importance, by corruption severity?)?
+16. **Reconstruction Priority**: When multiple stripes need reconstruction, how should we prioritize? (FIFO, by file importance, by corruption severity?)? Answer: We should prioritize by corruption severity with Stripes that are missing more chunks having higher priority.
 
-17. **Chunk Deduplication**: Should we implement chunk-level deduplication for identical data blocks?
+17. **Chunk Deduplication**: Should we implement chunk-level deduplication for identical data blocks? Answer: Not at this time. This is something we may add to the StorageWatchdog in the future.
 
-18. **Storage Efficiency**: Should we optimize storage for small files (< stripe_size) with different encoding strategies?
+18. **Storage Efficiency**: Should we optimize storage for small files (< stripe_size) with different encoding strategies? Answer: For now the only optimization of this type we want to include is the use of variable chunk size to avoid the need to use padding that is more than 10% of the Chunk size.
 
-19. **Disk Hot-Swap**: How should we handle adding/removing disks while the system is running? Graceful migration required?
+19. **Disk Hot-Swap**: How should we handle adding/removing disks while the system is running? Graceful migration required? Answer: We can not force graceful migration because some cases, such as disk failure, are not predictable but we should support an optional graceful migration where an operator can supply a setting in a disk's configuration that informs the system a disk is schedule for removal. The StorageWatchdog should see that setting and request ChunkMigration vis FileSystemService which will work with StorageRaftMember, FileStore, and StorageEndpoint to migrate affected Chunks to different disks and possibly different nodes.
 
-20. **Chunk Versioning**: Should chunks be versioned to support file modifications, or always create new chunks?
+20. **Chunk Versioning**: Should chunks be versioned to support file modifications, or always create new chunks? Answer: Chunks should be immutable so any modification means new chunks with new IDs. The same is true for Stripes. Files and Directories are the only mutable entities because they are purely metadata.
 
-21. **Read Optimization**: Should we read from the "fastest" node/disk based on latency metrics, or always prefer local chunks?
+21. **Read Optimization**: Should we read from the "fastest" node/disk based on latency metrics, or always prefer local chunks? Answer: We do not need such optimizations at this time.
 
-22. **Erasure Algorithm Flexibility**: Should we support multiple erasure algorithms, or strictly Reed-Solomon for simplicity?
+22. **Erasure Algorithm Flexibility**: Should we support multiple erasure algorithms, or strictly Reed-Solomon for simplicity? Answer: Only reed-solomon and None are required at this time.

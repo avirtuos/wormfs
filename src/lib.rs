@@ -42,7 +42,7 @@ pub mod storage_watchdog;
 pub mod transaction_log_store;
 
 // Re-export commonly used traits
-pub use file_store::FileStore;
+pub use file_store::{FileStore, FuseFileSystem};
 pub use filesystem_service::FileSystemService;
 pub use metadata_store::MetadataStore;
 pub use metric_service::MetricService;
