@@ -79,38 +79,7 @@ For each stripe:
 ### Chunk Staging Workflow
 
 FileStore supports a data-plane-first approach where chunk data is written BEFORE
-metadata operations go through Raft consensus:
-
-#### Chunk State Machine
-
-```
-                ┌──────────────┐
-                │              │
-        stage_chunk()      ┌───▼────┐
-                │          │ NULL   │
-                │          └───┬────┘
-                │              │
-                │              │ Initial state (no chunk exists)
-                │              │
-                ▼              ▼
-            ┌─────────────────────┐
-            │    STAGED           │
-            │  (on disk, not      │
-            │   tracked in        │
-            │   metadata)         │
-            └─────────────────────┘
-                    │
-                    │ After Raft commits metadata
-          ┌─────────┴──────────┐
-          │                    │
-   activate_chunk()    discard_staged_chunk()
-          │                    │
-          ▼                    ▼
-    ┌──────────┐          ┌─────────┐
-    │  ACTIVE  │          │ DELETED │
-    │(readable)│          │ (purged)│
-    └──────────┘          └─────────┘
-```
+metadata operations go through Raft consensus though FileStore is mostly unaware of Files or their visibility as it only operates on Stripes and Chunks.
 
 #### Orphaned Chunk Handling
 
@@ -121,21 +90,6 @@ orphaned and are cleaned up by StorageWatchdog. This handles scenarios where:
 - Network partitions prevent metadata commit
 
 The 1-hour threshold ensures no in-flight transactions are affected by cleanup.
-
-#### Write Operation
-
-When a client (e.g. fuse client) attempts to write a new file, the FileSystem component receives the request via the StorageEndpoint the client was connected to. FileSystem then initiates the following flow, if and only if its node is the current Raft leader:
-
-1. **Create Empty File**: (this step is only needed if we are creating a new file and writing to it in one step) Calls StorageRaftMember to create an empty file and lock it for writing by the peer that is coordinating the operation (itself). 
-2. **Prepare Chunk Data**: After receiving data for one or more Stripes, the FileSystem prepares the Chunks locally in a temp area on disk. It then makes placement decisions for the chunks and stages the chunks on the intended StorageNodes by calling their respective StorageEndpoints. If any Chunks exceed their max allowed retries, FileSystem makes new placement decisions for the affected Chunks and reattempt staging upto a maximum number of re-attempts. As long as the minimum requirements of the StoragePolicy are satisfied, Staging can be considered a success and we move to the next step.
-3. **Update File Metadata**: Initiate another transaction via StorageRaftMember to add/update/etc the new Stripes and Chunks, making them visible via FileSystem read operations. The FileSystem itself likely needs to participate in Voting so StorageRaftMember may need to ask FileSystem and Metastore (perhaps others) to weigh in on the vote before responding to proposals issued by the Master.
-3a. **Transaction Vote Calculation**: When asked by StorageRaftMember, FileSystem should locate any chunk files which are expected to be local to the node before contributing to the vote.
-4. **Return Result To Caller**: At this point we can notifier the caller (e.g. fuse client) that the operation has completed, either successfully or with errors.
-
-**Key Properties**:
-- Chunk is written to disk but NOT yet visible to readers
-- State is durable (survives crashes)
-- Vote response guarantees chunk can be committed or aborted
 
 #### On Abort
 
@@ -156,6 +110,7 @@ Background task `cleanup_orphaned_chunks()` handles crash recovery:
 4. **Log Results**: Record cleanup statistics for monitoring
 
 **Rationale**: If coordinator crashes after PREPARE but before COMMIT/ABORT, orphaned chunks are eventually cleaned up automatically.
+
 
 ### Chunk File Format
 

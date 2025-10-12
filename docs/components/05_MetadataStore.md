@@ -131,14 +131,22 @@ CREATE INDEX idx_disks_node ON disks(node_id);
 
 ## Interfaces
 
-### Architecture: Client Pattern with Interior Mutability
+### Architecture: Read Pool + Single Writer Pattern
 
-To support OpenRaft's requirement for exclusive ownership while allowing other components concurrent access, MetadataStore uses a client/server pattern:
+To maximize concurrent read performance while maintaining Raft-aligned write semantics, MetadataStore uses a hybrid connection strategy:
 
 ```rust
-/// Internal implementation with interior mutability
+/// Internal implementation with read pool and single writer
 struct MetadataStoreInner {
-    conn: RwLock<rusqlite::Connection>,
+    // Single connection for all writes (Raft-aligned)
+    write_conn: Mutex<rusqlite::Connection>,
+    
+    // Pool of connections for concurrent reads (4-8 connections)
+    read_pool: Pool<SqliteConnectionManager>,
+    
+    // Optional: LRU cache for hot metadata
+    cache: RwLock<LruCache<CacheKey, CachedValue>>,
+    
     config: MetadataStoreConfig,
 }
 
@@ -150,11 +158,78 @@ pub struct MetadataStore {
 }
 ```
 
-**Key Benefits:**
-1. **OpenRaft Compatibility**: OpenRaft can "own" a MetadataStore instance (which clones cheaply)
-2. **Concurrent Access**: StorageEndpoint, Watchdog, etc. can hold their own cloned instances
-3. **Thread Safety**: Interior mutability via RwLock ensures safe concurrent access
-4. **Familiar Pattern**: Similar to hyper::Client, tokio::runtime::Handle, etc.
+**Key Design Decisions:**
+
+1. **Read Pool for Concurrency**
+   - Pool of 4-8 SQLite connections dedicated to read operations
+   - Enables true concurrent reads without Rust-level lock contention
+   - Fully leverages SQLite's WAL mode capabilities
+   - Critical for FUSE filesystem performance (reads dominate workload)
+
+2. **Single Writer for Raft Alignment**
+   - All write operations use a single connection protected by Mutex
+   - Aligns perfectly with Raft's serialized write model (leader writes only)
+   - Simplifies transaction management and consistency
+   - No connection pool overhead for writes (already serialized by Raft)
+
+3. **SQLite WAL Mode**
+   - Enables readers to access database while writer is active
+   - No read blocking during writes
+   - Checkpoint management for WAL file size control
+   - Better crash recovery than rollback journal
+
+4. **Optional Caching Layer**
+   - LRU cache for frequently accessed metadata (file attributes, directory listings)
+   - Reduces database load for hot paths
+   - TTL-based invalidation for bounded staleness
+   - Write-through cache for consistency
+
+**Architecture Diagram:**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│              MetadataStore (Cloneable)                   │
+├─────────────────────────────────────────────────────────┤
+│                                                           │
+│  ┌────────────────────────────────────────────────┐     │
+│  │            MetadataStoreInner (Arc)             │     │
+│  ├────────────────────────────────────────────────┤     │
+│  │                                                  │     │
+│  │  Write Path (Raft-aligned):                     │     │
+│  │  ┌───────────────────────────────────────┐     │     │
+│  │  │ write_conn: Mutex<Connection>          │     │     │
+│  │  │  - Single connection                   │     │     │
+│  │  │  - All writes serialized through Raft  │     │     │
+│  │  │  - BEGIN IMMEDIATE transactions        │     │     │
+│  │  └───────────────────────────────────────┘     │     │
+│  │                                                  │     │
+│  │  Read Path (Concurrent):                        │     │
+│  │  ┌───────────────────────────────────────┐     │     │
+│  │  │ read_pool: Pool<SqliteConnection>     │     │     │
+│  │  │  - 4-8 connections (configurable)      │     │     │
+│  │  │  - True concurrent reads               │     │     │
+│  │  │  - No Rust-level locking               │     │     │
+│  │  │  - WAL mode allows reads while writing │     │     │
+│  │  └───────────────────────────────────────┘     │     │
+│  │                                                  │     │
+│  │  Cache (Optional):                              │     │
+│  │  ┌───────────────────────────────────────┐     │     │
+│  │  │ cache: RwLock<LruCache<...>>          │     │     │
+│  │  │  - Hot metadata (file attrs, dirs)     │     │     │
+│  │  │  - Write-through for consistency       │     │     │
+│  │  │  - TTL-based invalidation              │     │     │
+│  │  └───────────────────────────────────────┘     │     │
+│  └────────────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Benefits:**
+1. **True Read Concurrency**: Multiple threads read simultaneously without blocking
+2. **Optimized for FUSE**: Filesystem read operations dominate, this maximizes throughput
+3. **Raft-Aligned Writes**: Single writer matches Raft's leader-writes model
+4. **WAL Utilization**: Fully leverages SQLite's concurrent reader support
+5. **Bounded Resources**: Pool size limits connection overhead
+6. **OpenRaft Compatible**: Cloneable handle allows Raft to "own" an instance
 
 ### Public API
 
@@ -524,6 +599,15 @@ cache_size_mb = 256
 wal_mode = true
 sync_mode = "normal"  # full, normal, or off
 
+# Connection pool settings
+read_pool_size = 8  # Number of concurrent read connections (4-8 recommended)
+read_pool_timeout_secs = 30  # Timeout for acquiring connection from pool
+
+# Optional caching
+enable_cache = true
+cache_ttl_secs = 60  # TTL for cached metadata entries
+max_cache_entries = 10000  # LRU cache capacity
+
 # SQLite pragmas
 [metadata_store.pragmas]
 journal_mode = "WAL"
@@ -532,6 +616,11 @@ cache_size = -262144  # 256MB
 mmap_size = 268435456  # 256MB
 temp_store = "memory"
 locking_mode = "normal"
+
+# WAL checkpoint settings
+[metadata_store.wal]
+auto_checkpoint = 1000  # Checkpoint after N pages
+checkpoint_mode = "TRUNCATE"  # PASSIVE, FULL, RESTART, or TRUNCATE
 ```
 
 ## Error Handling
@@ -575,11 +664,23 @@ locking_mode = "normal"
 - Write throughput
 - Concurrent transaction handling
 
+## Design Decisions
+
+### ✅ Connection Management (RESOLVED)
+
+**Decision**: Use **Read Pool + Single Writer** pattern
+- **Read Pool**: 4-8 SQLite connections for concurrent read operations
+- **Single Writer**: One connection for all write operations (Raft-aligned)
+- **WAL Mode**: Enabled to allow readers while writing
+- **Rationale**: 
+  - Maximizes read concurrency for FUSE workloads (reads dominate)
+  - Aligns write serialization with Raft's leader-only writes
+  - Fully leverages SQLite's WAL concurrent reader capabilities
+  - Avoids Rust-level lock contention on reads
+
 ## Open Questions
 
-1. **Connection Pooling**: Should we use a connection pool for concurrent access, or rely on SQLite's WAL mode with single connection?
-
-2. **Lock Cleanup**: Should expired lock cleanup run on a timer, or be triggered by lock operations?
+1. **Lock Cleanup**: Should expired lock cleanup run on a timer, or be triggered by lock operations?
 
 3. **Cache Size**: What's the optimal cache size for typical workloads? Should it be auto-tuned based on available memory?
 

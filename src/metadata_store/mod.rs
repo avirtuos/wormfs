@@ -25,12 +25,68 @@
 //! - **Disks**: Disk information and capacity
 //! - **StoragePolicies**: Erasure coding configurations
 //!
-//! ## Architecture: Client Pattern
+//! ## Architecture: Read Pool + Single Writer Pattern
 //!
-//! MetadataStore uses a client pattern with interior mutability to support:
-//! 1. **OpenRaft Compatibility**: Raft can own a cloned instance
-//! 2. **Concurrent Access**: Multiple components can safely query metadata
-//! 3. **Thread Safety**: RwLock ensures safe concurrent reads and exclusive writes
+//! MetadataStore uses a hybrid connection strategy for optimal performance:
+//!
+//! ### Connection Management
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────┐
+//! │         MetadataStore (Cloneable Handle)            │
+//! ├─────────────────────────────────────────────────────┤
+//! │                                                       │
+//! │  Write Path (Raft-aligned):                         │
+//! │  ┌──────────────────────────────────────────┐       │
+//! │  │ write_conn: Mutex<Connection>             │       │
+//! │  │  • Single connection for all writes       │       │
+//! │  │  • Serialized through Raft leader         │       │
+//! │  │  • BEGIN IMMEDIATE transactions           │       │
+//! │  └──────────────────────────────────────────┘       │
+//! │                                                       │
+//! │  Read Path (Concurrent):                            │
+//! │  ┌──────────────────────────────────────────┐       │
+//! │  │ read_pool: Pool<SqliteConnection>         │       │
+//! │  │  • 4-8 connections (configurable)          │       │
+//! │  │  • True concurrent reads                   │       │
+//! │  │  • No Rust-level locking                   │       │
+//! │  │  • WAL mode allows reads while writing     │       │
+//! │  └──────────────────────────────────────────┘       │
+//! │                                                       │
+//! │  Cache (Optional):                                   │
+//! │  ┌──────────────────────────────────────────┐       │
+//! │  │ cache: RwLock<LruCache<...>>              │       │
+//! │  │  • Hot metadata (file attrs, dirs)         │       │
+//! │  │  • Write-through for consistency           │       │
+//! │  │  • TTL-based invalidation                  │       │
+//! │  └──────────────────────────────────────────┘       │
+//! └─────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ### Key Benefits
+//!
+//! 1. **True Read Concurrency**: Multiple threads read simultaneously without blocking
+//! 2. **Raft-Aligned Writes**: Single writer matches Raft's leader-only write model
+//! 3. **WAL Mode Utilization**: Fully leverages SQLite's concurrent reader support
+//! 4. **FUSE Optimized**: Read-heavy workloads get maximum throughput
+//! 5. **Bounded Resources**: Pool size limits connection overhead
+//! 6. **OpenRaft Compatible**: Cloneable handle allows Raft to "own" an instance
+//!
+//! ### Implementation Structure
+//!
+//! ```ignore
+//! struct MetadataStoreInner {
+//!     write_conn: Mutex<rusqlite::Connection>,
+//!     read_pool: Pool<SqliteConnectionManager>,
+//!     cache: RwLock<LruCache<CacheKey, CachedValue>>,
+//!     config: Config,
+//! }
+//!
+//! #[derive(Clone)]
+//! pub struct MetadataStoreImpl {
+//!     inner: Arc<MetadataStoreInner>,
+//! }
+//! ```
 //!
 //! ## Transaction Support
 //!
