@@ -103,6 +103,7 @@ pub use types::{ClientId, Config, DirEntry, Error, FileAttr, FileId, FileType, L
 /// Implementations provide filesystem operations that interact with
 /// the underlying distributed storage system.
 #[async_trait]
+#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 pub trait FileSystemService: Send + Sync {
     /// Create a new FileSystemService.
     ///

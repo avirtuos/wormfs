@@ -26,9 +26,10 @@ impl NodeId {
 /// Raft configuration options.
 ///
 /// These parameters control Raft's behavior for elections, log replication,
-/// and snapshot management.
+/// snapshot management, and transaction coordination.
 #[derive(Debug, Clone)]
 pub struct Config {
+    // === Election Configuration ===
     /// Interval between heartbeats from leader to followers
     pub heartbeat_interval: Duration,
 
@@ -38,26 +39,51 @@ pub struct Config {
     /// Maximum election timeout duration
     pub election_timeout_max: Duration,
 
+    // === Log Replication Configuration ===
     /// Maximum number of log entries per AppendEntries RPC
     pub max_payload_entries: u64,
 
+    /// Maximum number of in-flight AppendEntries RPCs per follower (pipeline optimization)
+    pub max_in_flight_append_entries: usize,
+
+    /// Threshold for considering a follower lagging
+    pub replication_lag_threshold: u64,
+
+    /// Maximum number of uncommitted log entries before rejecting new writes (backpressure)
+    pub max_uncommitted_entries: u64,
+
+    // === Snapshot Configuration ===
     /// Time threshold for triggering snapshot
     pub snapshot_time_threshold: Duration,
 
     /// Log size threshold (bytes) for triggering snapshot
     pub snapshot_log_size_threshold: u64,
 
-    /// Threshold for considering a follower lagging
-    pub replication_lag_threshold: u64,
+    /// Enable zstd compression for snapshots
+    pub enable_snapshot_compression: bool,
 
-    /// Maximum number of in-flight AppendEntries RPCs per follower
-    pub max_in_flight_append_entries: usize,
+    /// Compression level for zstd (1-22, higher = better compression but slower)
+    pub snapshot_compression_level: i32,
 
-    /// Enable lease-based read optimization
+    // === Read Consistency Configuration ===
+    /// Enable lease-based read optimization (currently unused, for future support)
     pub enable_lease_based_reads: bool,
 
-    /// Duration of read lease
+    /// Duration of read lease (currently unused, for future support)
     pub lease_duration: Duration,
+
+    /// Maximum staleness allowed for local reads (default: 120 seconds)
+    pub max_read_staleness: Duration,
+
+    // === Transaction Configuration ===
+    /// Default timeout for transactions (can be overridden per-transaction)
+    pub default_transaction_timeout: Duration,
+
+    /// Maximum number of concurrent in-flight transactions
+    pub max_concurrent_transactions: usize,
+
+    /// Timeout for new leader to recover in-flight transactions after election
+    pub transaction_recovery_timeout: Duration,
 }
 
 /// Errors that can occur during Raft operations.

@@ -43,6 +43,9 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 tonic = { version = "0.11", optional = true }
 prost = { version = "0.12", optional = true }
 
+# Mocking (test utilities)
+mockall = { version = "0.12", optional = true }
+
 [build-dependencies]
 tonic-build = "0.11"
 prost-build = "0.12"
@@ -50,7 +53,9 @@ prost-build = "0.12"
 [dev-dependencies]
 tokio-test = "0.4"
 proptest = "1.4"
+mockall = "0.12"
 
 [features]
 default = []
+test-utils = ["mockall"]
 full = ["libp2p", "openraft", "rusqlite", "redb", "reed-solomon-erasure", "tonic", "prost"]

@@ -60,6 +60,7 @@ pub use types::{Config, Error, SnapshotMetadata, SnapshotStats};
 /// Implementations handle storage, retrieval, and lifecycle management
 /// of metadata snapshots for Raft log compaction.
 #[async_trait]
+#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 pub trait SnapshotStore: Send + Sync {
     /// Create a new SnapshotStore.
     ///

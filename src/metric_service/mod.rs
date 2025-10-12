@@ -80,6 +80,9 @@ pub use types::{
 /// MetricService trait defines the interface for metrics collection and aggregation.
 ///
 /// Implementations provide lock-free metric publishing with background aggregation.
+///
+/// Note: This trait cannot be automocked due to the Clone bound requirement.
+/// Manual mocking or alternative testing strategies should be used.
 #[async_trait]
 pub trait MetricService: Send + Sync + Clone {
     /// Create a new MetricService.

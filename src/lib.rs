@@ -53,3 +53,7 @@ pub use storage_node::StorageNode;
 pub use storage_raft_member::StorageRaftMember;
 pub use storage_watchdog::StorageWatchdog;
 pub use transaction_log_store::TransactionLogStore;
+
+// Test utilities module (only available with test-utils feature or during testing)
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;

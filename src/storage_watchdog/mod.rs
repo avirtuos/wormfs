@@ -68,6 +68,9 @@ pub use types::{
 /// Implementations continuously verify chunk availability and integrity
 /// across the storage cluster.
 #[async_trait]
+#[cfg_attr(any(test, feature = "test-utils"), mockall::automock(
+    type ConsistencyEvent = ();
+))]
 pub trait StorageWatchdog: Send + Sync {
     /// Event type for consistency issues
     type ConsistencyEvent: Send + Sync;
@@ -179,4 +182,29 @@ pub trait StorageWatchdog: Send + Sync {
     ///
     /// Statistics about checks performed and issues found.
     fn get_stats(&self) -> WatchdogStats;
+
+    /// Cleanup orphaned staged chunks (background task).
+    ///
+    /// Scans for chunks in "staged" state that are older than 1 hour and not
+    /// tracked in any metadata records. These are chunks that were staged for
+    /// a write operation but the metadata transaction never completed (due to
+    /// failures, crashes, or client abandonment).
+    ///
+    /// The 1-hour threshold ensures that no in-flight transactions are affected
+    /// by the cleanup process. Since staged chunks are only tracked in the
+    /// Leader's memory during a transaction, this cleanup must be conservative
+    /// to avoid race conditions.
+    ///
+    /// This method is typically called periodically by a background task.
+    ///
+    /// # Returns
+    ///
+    /// Number of orphaned staged chunks that were deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Filesystem scan fails
+    /// - Deletion operations fail
+    async fn cleanup_orphaned_staged_chunks(&self) -> Result<u64, Error>;
 }

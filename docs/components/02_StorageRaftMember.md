@@ -54,45 +54,50 @@ StorageRaftMember implements the Raft consensus protocol for WormFS, ensuring st
 
 ### Operation Flow
 
-**Write Operations (Two-Phase Commit via Raft):**
+**Write Operations (Metadata-Only Two-Phase Commit via Raft):**
 
 *Example: Appending data to end of file*
 
-**Phase 1: PREPARE (via Raft consensus)**
-1. Client/Component submits write request to any node
-2. If follower: forward to leader
-3. Leader becomes 2PC coordinator:
-   - Generates transaction ID (TxID)
-   - Calculates stripe layout, erasure coding, and chunk placement
-   - Creates unified TransactionPrepare entry containing:
-     * Metadata changes (file size, chunk allocations)
-     * Chunk assignments (which nodes get which chunk data)
-4. Leader proposes TransactionPrepare through Raft
-5. Raft replicates prepare entry to all followers
-6. Each node (including leader) applies prepare locally:
-   - Prepares metadata changes (not yet visible in MetadataStore)
-   - If node has chunks assigned: writes chunks with state="preparing" and fsyncs
-   - Votes PREPARED or ABORT based on success
-   - Stores vote locally
-7. Once majority commits prepare entry, leader collects votes from all nodes
-8. Leader makes decision: COMMIT if all voted PREPARED, else ABORT
+**Phase 0: CHUNK STAGING (Data Plane - Before Raft)**
+1. Client submits write request to Leader
+2. Leader calculates:
+   - Stripe layout and erasure coding parameters
+   - Chunk placement (which nodes, which disks)
+3. Leader stages chunks (two options):
+   - **Option A**: Leader receives data from client, distributes to storage nodes
+   - **Option B**: Leader issues time-limited upload tokens, client uploads directly
+4. Storage nodes write chunks to disk in "staged" state:
+   - No metadata tracking (not in MetadataStore)
+   - Only Leader tracks staged chunks in memory
+   - Staged chunks older than 1 hour will be cleaned up by StorageWatchdog
 
-**Phase 2: COMMIT/ABORT (via Raft consensus)**
+**Phase 1: PREPARE METADATA (Control Plane - Raft)**
+5. Leader proposes TransactionPrepare through Raft containing ONLY metadata operations:
+   - Update file size, and other file attributes
+   - Add stripe record with chunk locations
+   - Add chunk location records
+6. Raft replicates prepare entry to all followers
+7. Each node applies prepare locally:
+   - Stages metadata changes (not yet visible in MetadataStore)
+   - Votes PREPARED or ABORT based on validation
+8. Once majority commits prepare entry, metadata is prepared on all nodes
+
+**Phase 2: COMMIT/ABORT METADATA (Control Plane - Raft)**
 
 *Commit Path:*
 9. Leader proposes TransactionCommit through Raft
 10. Raft replicates commit decision to all followers
 11. Each node applies commit:
-    - Applies metadata changes to MetadataStore (chunks now visible)
-    - Changes local preparing chunks to state="active"
+    - Applies metadata changes to MetadataStore (now visible)
+    - Signals storage nodes to activate staged chunks (transition to "active")
 12. Return success to client
 
 *Abort Path:*
 9. Leader proposes TransactionAbort through Raft
 10. Raft replicates abort decision to all followers
 11. Each node applies abort:
-    - Discards metadata changes
-    - Deletes local preparing chunks
+    - Discards prepared metadata changes
+    - Signals storage nodes to discard staged chunks
 12. Return error to client
 
 *Example: Deleting a file*
@@ -154,24 +159,14 @@ impl StorageRaftMember {
     /// Propose a metadata write operation (goes through consensus)
     pub async fn propose_operation(
         &self,
-        operation: MetadataOperation,
+        operation: WormFsOperation,
     ) -> Result<OperationResult, RaftError>;
-    
-    /// Read metadata (may serve stale reads on followers)
-    pub async fn read_metadata(
-        &self,
-        query: MetadataQuery,
-        allow_stale: bool,
-    ) -> Result<MetadataResult, RaftError>;
     
     /// Check if this node is the current leader
     pub fn is_leader(&self) -> bool;
     
     /// Get current Raft metrics and status
-    pub fn get_metrics(&self) -> RaftMetrics;
-    
-    /// Manually trigger a snapshot
-    pub async fn trigger_snapshot(&self) -> Result<(), RaftError>;
+    pub fn get_status(&self) -> RaftStatus;
     
     /// Add a new node to the cluster
     pub async fn add_node(&self, node_id: NodeId, address: SocketAddr) -> Result<(), RaftError>;
@@ -204,7 +199,6 @@ pub enum WormFsOperation {
     TransactionPrepare {
         tx_id: TxId,
         metadata_ops: Option<Vec<MetadataOperation>>,
-        chunk_ops: Option<Vec<ChunkDataOperation>>,
         command_ops: Option<Vec<CommandOperation>>,
         timeout: SystemTime,
     },
@@ -265,21 +259,6 @@ pub enum MetadataOperation {
     DeleteChunk {
         pub node_id: NodeId,
         pub disk_id: DiskId,
-        pub chunk_id: ChunkId,
-    },
-}
-
-/// ChunkDataOperation that can be proposed through Raft
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ChunkDataOperation {
-    StoreChunk{
-        pub node_id: NodeId,
-        pub disk_id: DiskId,
-        pub source: StorageEndpointUrl,
-        pub chunk_id: ChunkId,
-    },
-    DeleteChunk{
-        pub node_id: NodeId,
         pub chunk_id: ChunkId,
     },
 }
@@ -386,7 +365,7 @@ pub struct SnapshotPolicy {
     pub log_size_threshold: u64,
 }
 
-pub struct RaftMetrics {
+pub struct RaftStatus {
     pub current_term: u64,
     pub role: RaftRole,
     pub leader_id: Option<NodeId>,
@@ -403,13 +382,6 @@ pub enum RaftRole {
     Leader,
     Follower,
     Candidate,
-}
-
-pub struct ChunkAllocation {
-    pub chunk_id: ChunkId,
-    pub node_id: NodeId,
-    pub disk_id: DiskId,
-    pub chunk_index: u8,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -434,6 +406,43 @@ pub enum RaftError {
 }
 ```
 
+## Design Decisions
+
+Based on the open questions answered below, the following key design decisions have been made:
+
+### Transaction Coordination
+- **Vote Collection**: Votes collected via Raft acknowledgements (not separate RPCs)
+- **Transaction Timeout**: Configurable per-transaction; default based on stripe size
+- **Vote Persistence**: Kept in memory only during transaction
+- **Concurrent Transactions**: Configurable maximum limit for resource management
+- **Leader Recovery**: Conservative timeout-based approach for in-flight transactions
+
+### Read Operations
+- **Consistency Model**: Local reads with bounded staleness (default: 120 seconds)
+- **Client Handling**: Reject writes at non-leaders with leader hint (no automatic forwarding)
+- **Future Support**: Linearizable and quorum reads deferred to future versions
+
+### Snapshot Management
+- **Coordination**: Eventual consistency acceptable (no two-phase snapshot)
+- **Compression**: zstd compression with streaming to avoid memory issues
+- **Strategy**: Time and size thresholds; no additional compaction for now
+
+### Performance Optimizations
+- **Pipeline Optimization**: Enabled (multiple in-flight AppendEntries)
+- **Pre-vote**: Skipped for initial release
+- **Parallel Log Application**: Deferred to future optimization
+- **Backpressure**: Reject writes when log backlog exists
+
+### Membership Changes
+- **Approach**: Single-node changes (simpler than joint consensus)
+- **Observer Nodes**: Not required for initial release
+
+### Operational Features
+- **Lock Expiration**: Leader-driven via Raft consensus
+- **Metrics**: Basic metrics (latency, replication lag, success/failure rates)
+- **Tuning**: LAN-optimized (no special WAN configuration)
+- **Orphaned Chunks**: StorageWatchdog cleanup (1-hour threshold)
+
 ## Configuration
 
 ```toml
@@ -445,16 +454,25 @@ election_timeout_max_ms = 2000
 
 # Log management
 max_payload_entries = 1000
+max_in_flight_append_entries = 10
+replication_lag_threshold = 100
+max_uncommitted_entries = 10000
+
+# Snapshot configuration
 snapshot_time_threshold_hours = 24
 snapshot_log_size_threshold_mb = 10
+enable_snapshot_compression = true
+snapshot_compression_level = 3
 
-# Replication
-replication_lag_threshold = 100
-max_in_flight_append_entries = 10
+# Read consistency
+enable_lease_based_reads = false  # Reserved for future use
+lease_duration_ms = 5000           # Reserved for future use
+max_read_staleness_seconds = 120
 
-# Read optimization
-enable_lease_based_reads = true
-lease_duration_ms = 5000
+# Transaction configuration
+default_transaction_timeout_seconds = 300
+max_concurrent_transactions = 100
+transaction_recovery_timeout_seconds = 60
 ```
 
 ## Error Handling
@@ -505,50 +523,46 @@ lease_duration_ms = 5000
 
 ## Open Questions
 
-### Two-Phase Commit Protocol
+1. **Vote Collection Mechanism**: Should votes be collected via direct RPC queries to each node, or should votes be embedded in Raft acknowledgments of the prepare entry? Answer: We should use raft acknowledgements to convey votes.
 
-1. **Vote Collection Mechanism**: Should votes be collected via direct RPC queries to each node, or should votes be embedded in Raft acknowledgments of the prepare entry?
+2. **Transaction Timeout**: What's an appropriate timeout for transactions, especially for large file writes (100s of MB)? Should it be configurable per operation? Answer: We should make it configurable per transaction but most transactions will be of similar size since most file data operations operate on Stripes and Chunks which have a max size that should help bound operation duration. A good timeout
 
-2. **Transaction Timeout**: What's an appropriate timeout for transactions, especially for large file writes (100s of MB)? Should it be configurable per operation?
+3. **Partial Prepare Failure**: If some nodes prepare successfully but others fail, should we attempt retry with different node placement, or immediately abort? Answer: We should respect quorum rules for metadata operations. However, for Chunk staging, we need to meet the StoragePolicy's minimum requirements before attempting the Raft transaction.
 
-3. **Partial Prepare Failure**: If some nodes prepare successfully but others fail, should we attempt retry with different node placement, or immediately abort?
+4. **Transaction Recovery on Leader Change**: How should the new leader handle in-flight transactions? Query all participants, or use a conservative timeout-based approach? Answer: We should start with a conservative timeout-based approach.
 
-4. **Transaction Recovery on Leader Change**: How should the new leader handle in-flight transactions? Query all participants, or use a conservative timeout-based approach?
+5. **Orphaned Chunk Cleanup**: How frequently should nodes scan for and clean up orphaned "preparing" chunks from aborted transactions? Answer: This warrants its own design document but we ca likely start with something basic, but configurable within the StorageWatchdog to handle this. For examples, perform a basic validation of all chunks once a week (including Orphaned Chunks). Perform a deeper validation where we do Stripe level reads and checksum validations once every 6 months. Both of these operations should be going slowly in the background over the course of their respective intervals to avoid high resource demands.
 
-5. **Orphaned Chunk Cleanup**: How frequently should nodes scan for and clean up orphaned "preparing" chunks from aborted transactions?
+6. **Vote Persistence**: Should prepare votes be persisted to disk, or can they be kept in memory (and re-queried after crashes)? Answer: Prepare votes can be kept in memory while a transaction is in-flight.
 
-6. **Vote Persistence**: Should prepare votes be persisted to disk, or can they be kept in memory (and re-queried after crashes)?
-
-7. **Transaction State Limits**: Should there be a maximum number of concurrent transactions to prevent resource exhaustion?
-
-8. **Chunk Data in Raft Log**: Given that chunk data can be large (MBs), should we limit the size of individual TransactionPrepare entries, or handle large operations specially?
+7. **Transaction State Limits**: Should there be a maximum number of concurrent transactions to prevent resource exhaustion? Answer: Yes but it should be a configurable limit.
 
 ### Raft Operations
 
-9. **Read Consistency Guarantees**: Should we support linearizable reads by default (forward to leader), or prefer lease-based reads with bounded staleness? What should the default staleness bound be?
+9. **Read Consistency Guarantees**: Should we support linearizable reads by default (forward to leader), or prefer lease-based reads with bounded staleness? What should the default staleness bound be? Answer: We should favor local reads with bounded staleness. The staleness threshold should be configurable with a sane default (120 seconds).
 
-10. **Snapshot Coordination**: The design mentions signaling all nodes to snapshot simultaneously. Should this be a two-phase process (prepare + commit) to ensure transactional consistency, or is eventual consistency acceptable?
+10. **Snapshot Coordination**: The design mentions signaling all nodes to snapshot simultaneously. Should this be a two-phase process (prepare + commit) to ensure transactional consistency, or is eventual consistency acceptable? Answer: Eventual consistency is acceptable.
 
-11. **Pre-vote Optimization**: Should we implement Raft's pre-vote extension to avoid unnecessary leader changes when a partitioned node rejoins?
+11. **Pre-vote Optimization**: Should we implement Raft's pre-vote extension to avoid unnecessary leader changes when a partitioned node rejoins? Answer: Lets skip this optimization for now.
 
-12. **Log Compaction Strategy**: Beyond snapshots, should we implement additional log compaction (e.g., log cleaning, log-structured merge trees)?
+12. **Log Compaction Strategy**: Beyond snapshots, should we implement additional log compaction (e.g., log cleaning, log-structured merge trees)? Answer: Not yet, lets save this optimization for a future date.
 
-13. **Client Request Routing**: Should followers automatically forward writes to the leader transparently, or return an error with leader hint and let clients retry?
+13. **Client Request Routing**: Should followers automatically forward writes to the leader transparently, or return an error with leader hint and let clients retry? Answer: We should reject the client's request and inform them of the current leader's connection details.
 
-14. **Quorum Reads**: Should we support quorum reads (read from majority) as an option between stale reads and linearizable reads?
+14. **Quorum Reads**: Should we support quorum reads (read from majority) as an option between stale reads and linearizable reads? Answer: We may support quorum reads and linearizable reads in the future but to start we will only support local (potentially stale) reads.
 
-15. **Configuration Changes**: Should membership changes (add/remove node) use single-node or joint consensus approach? OpenRaft supports both.
+15. **Configuration Changes**: Should membership changes (add/remove node) use single-node or joint consensus approach? OpenRaft supports both. Answer: Single node is fine for now.
 
-16. **Metrics Granularity**: What specific Raft metrics should be exposed for monitoring? Per-operation latency, replication lag histograms, transaction success/failure rates?
+16. **Metrics Granularity**: What specific Raft metrics should be exposed for monitoring? Answer: Lets start with basic metrics like transaction latency, replication lag, and transaction success/failure rates.
 
-17. **Backpressure**: How should we handle backpressure when the Raft log grows faster than it can be applied to the state machine?
+17. **Backpressure**: How should we handle backpressure when the Raft log grows faster than it can be applied to the state machine? Answer: We should reject new write operations when there is a log backlog.
 
-18. **Lock Expiration**: Should lock expiration be handled by Raft consensus (explicit timeout proposals) or locally by each node's state machine with clock-based expiration?
+18. **Lock Expiration**: Should lock expiration be handled by Raft consensus (explicit timeout proposals) or locally by each node's state machine with clock-based expiration? Answer: The leader should detect expired locks and issue a Raft transaction to ensure the lock clears on all nodes.
 
-19. **Snapshot Compression**: Should metadata snapshots be compressed before storage/transfer? What compression algorithm?
+19. **Snapshot Compression**: Should metadata snapshots be compressed before storage/transfer? What compression algorithm? Answer: Lets use zstd compression but we need to be careful to stream the compress and decompress phases so that we never need to hold the entire metadata snapshot in memory as part of the backup or restore process.
 
-20. **Observer Nodes**: Should we support read-only observer nodes that receive log replication but don't vote in elections?
+20. **Observer Nodes**: Should we support read-only observer nodes that receive log replication but don't vote in elections? Answer: No, this feature is not required today.
 
-21. **Raft Extensions**: Should we implement any Raft extensions like pipeline optimization, parallel log application, or batched AppendEntries?
+21. **Raft Extensions**: Should we implement any Raft extensions like pipeline optimization, parallel log application, or batched AppendEntries? Answer: Lets start with only the pipeline optimization.
 
-22. **Failure Detection Tuning**: How should heartbeat and election timeout be tuned for different network conditions (LAN vs WAN deployments)?
+22. **Failure Detection Tuning**: How should heartbeat and election timeout be tuned for different network conditions (LAN vs WAN deployments)? Answer: We are only targeting LAN usecases for now so no special tunning is required in our initial release.

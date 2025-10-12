@@ -76,38 +76,51 @@ For each stripe:
   5. Return chunk placement map
 ```
 
-### Two-Phase Commit Protocol
+### Chunk Staging Workflow
 
-FileStore participates in distributed transactions using a two-phase commit protocol coordinated by the Raft leader:
+FileStore supports a data-plane-first approach where chunk data is written BEFORE
+metadata operations go through Raft consensus:
 
 #### Chunk State Machine
 
 ```
                 ┌──────────────┐
                 │              │
-        prepare_chunk()    ┌───▼────┐
+        stage_chunk()      ┌───▼────┐
                 │          │ NULL   │
                 │          └───┬────┘
                 │              │
-                │              │ Initial state
+                │              │ Initial state (no chunk exists)
                 │              │
                 ▼              ▼
             ┌─────────────────────┐
-            │    PREPARING        │◄─────┐
-            │  (staged on disk)   │      │
-            └─────────────────────┘      │
-                    │                    │
-                    │                    │ Transaction retry
-          ┌─────────┴──────────┐         │
-          │                    │         │
-   commit_chunk()       abort_chunk()    │
-          │                    │         │
-          ▼                    ▼         │
-    ┌──────────┐          ┌─────────┐   │
-    │  ACTIVE  │          │ DELETED │───┘
+            │    STAGED           │
+            │  (on disk, not      │
+            │   tracked in        │
+            │   metadata)         │
+            └─────────────────────┘
+                    │
+                    │ After Raft commits metadata
+          ┌─────────┴──────────┐
+          │                    │
+   activate_chunk()    discard_staged_chunk()
+          │                    │
+          ▼                    ▼
+    ┌──────────┐          ┌─────────┐
+    │  ACTIVE  │          │ DELETED │
     │(readable)│          │ (purged)│
     └──────────┘          └─────────┘
 ```
+
+#### Orphaned Chunk Handling
+
+Staged chunks that are older than 1 hour with no metadata record are considered
+orphaned and are cleaned up by StorageWatchdog. This handles scenarios where:
+- Client crashes before completing metadata transaction
+- Leader crashes before committing metadata
+- Network partitions prevent metadata commit
+
+The 1-hour threshold ensures no in-flight transactions are affected by cleanup.
 
 #### Phase 1: Prepare
 

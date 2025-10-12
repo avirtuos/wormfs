@@ -17,40 +17,70 @@
 //! ## Two-Phase Commit Protocol
 //!
 //! StorageRaftMember coordinates distributed transactions using a two-phase commit (2PC)
-//! protocol implemented through Raft consensus:
+//! protocol implemented through Raft consensus. **All operations are metadata-only** - chunk
+//! data is staged before Raft operations begin.
 //!
-//! ### Phase 1: PREPARE
-//! 1. Leader creates TransactionPrepare entry with metadata and chunk operations
+//! ### Phase 0: CHUNK STAGING (Data Plane - Before Raft)
+//! 1. Leader calculates stripe layout and chunk placement
+//! 2. Leader stages chunks (either directly or via client upload tokens)
+//! 3. Storage nodes write chunks to disk in "staged" state (not in metadata)
+//! 4. Only Leader tracks staged chunks in memory during transaction
+//!
+//! ### Phase 1: PREPARE METADATA (Control Plane - Raft)
+//! 1. Leader creates TransactionPrepare entry with **metadata operations only**
 //! 2. Prepare entry is replicated via Raft to all nodes
 //! 3. Each node applies prepare locally:
-//!    - Prepares metadata changes (not yet visible)
-//!    - Writes chunks with state="preparing" and fsyncs
-//!    - Votes PREPARED or ABORT
-//! 4. Leader collects votes from all nodes
+//!    - Stages metadata changes (not yet visible in MetadataStore)
+//!    - Validates operations
+//!    - Votes PREPARED or ABORT via Raft acknowledgement
+//! 4. Leader collects votes from Raft acknowledgements (not separate RPCs)
 //!
-//! ### Phase 2: COMMIT/ABORT
-//! - **Commit**: If all voted PREPARED, leader proposes TransactionCommit
+//! ### Phase 2: COMMIT/ABORT METADATA (Control Plane - Raft)
+//! - **Commit**: If quorum voted PREPARED, leader proposes TransactionCommit
 //!   - Metadata becomes visible in MetadataStore
-//!   - Chunks transition to state="active"
-//! - **Abort**: If any voted ABORT, leader proposes TransactionAbort
+//!   - Signals storage nodes to activate staged chunks
+//! - **Abort**: If quorum failed, leader proposes TransactionAbort
 //!   - Metadata changes discarded
-//!   - Preparing chunks deleted
+//!   - Signals storage nodes to discard staged chunks
+//!
+//! ### Transaction Recovery
+//! - **Leader Change**: New leader uses conservative timeout-based approach
+//! - **Vote Persistence**: Votes kept in memory only during transaction
+//! - **Orphaned Chunks**: StorageWatchdog cleans up chunks older than 1 hour
 //!
 //! ## Read Consistency
 //!
-//! StorageRaftMember supports multiple read consistency levels:
-//! - **Linearizable**: Forward to leader, read after commit index
-//! - **Lease-based**: Leader serves reads from local state within lease duration
-//! - **Stale**: Followers serve reads with bounded staleness
+//! StorageRaftMember supports local reads with bounded staleness:
+//! - **Local Reads**: All nodes (leader and followers) serve reads from local MetadataStore
+//! - **Bounded Staleness**: Reads may be stale up to configured threshold (default: 120 seconds)
+//! - **Client Request Handling**: Non-leaders reject writes and inform client of current leader
+//!
+//! Future versions may support:
+//! - Linearizable reads (forward to leader)
+//! - Quorum reads (read from majority)
 //!
 //! ## Snapshot Coordination
 //!
-//! The leader periodically triggers coordinated snapshots:
+//! The leader periodically triggers coordinated snapshots with eventual consistency:
 //! 1. Leader sends snapshot proposal to all nodes
-//! 2. Each node creates consistent MetadataStore snapshot
-//! 3. Nodes report completion
-//! 4. Leader updates cluster snapshot state
-//! 5. All nodes trim TransactionLogStore to snapshot point
+//! 2. Each node creates consistent MetadataStore snapshot (with zstd compression)
+//! 3. Snapshots are streamed to avoid holding entire snapshot in memory
+//! 4. Nodes report completion
+//! 5. Leader updates cluster snapshot state
+//! 6. All nodes trim TransactionLogStore to snapshot point
+//!
+//! ## Performance Optimizations
+//!
+//! - **Pipeline Optimization**: Multiple AppendEntries RPCs in flight simultaneously
+//! - **Batched AppendEntries**: Multiple log entries per RPC
+//! - **Backpressure Handling**: Reject writes when log backlog exists
+//! - **Single-Node Membership Changes**: Simpler than joint consensus
+//!
+//! ## Operational Features
+//!
+//! - **Transaction Timeouts**: Configurable per-transaction
+//! - **Lock Expiration**: Leader detects expired locks and issues Raft transaction
+//! - **Concurrent Transaction Limits**: Configurable maximum for resource management
 
 pub mod types;
 
@@ -62,6 +92,10 @@ pub use types::{Config, Error, NodeId, RaftMetrics, RaftRole};
 ///
 /// Implementations provide distributed consensus for metadata operations, ensuring
 /// strong consistency across the storage cluster.
+#[cfg_attr(any(test, feature = "test-utils"), mockall::automock(
+    type Operation = ();
+    type OperationResult = ();
+))]
 #[async_trait]
 pub trait StorageRaftMember: Send + Sync {
     /// Metadata operation type

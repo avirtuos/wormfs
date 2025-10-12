@@ -60,6 +60,7 @@ pub use types::{Config, Error, LogEntry, LogStats};
 ///
 /// Implementations provide durable storage and retrieval of Raft log entries.
 #[async_trait]
+#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 pub trait TransactionLogStore: Send + Sync {
     /// Create a new TransactionLogStore.
     ///

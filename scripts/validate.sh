@@ -45,15 +45,23 @@ echo -e "${YELLOW}Step 1/4: Building project...${NC}"
 run_check "Cargo Build" "cargo build 2>&1 | tee /tmp/wormfs_build.log && ! grep -i 'error' /tmp/wormfs_build.log && ! grep -i 'warning' /tmp/wormfs_build.log"
 
 # 2. Cargo Test - Run all tests (hide successful test output)
-echo -e "${YELLOW}Step 2/4: Running tests...${NC}"
+echo -e "${YELLOW}Step 2/6: Running tests...${NC}"
 run_check "Cargo Test" "cargo test 2>&1 | grep -v ' ... ok$' | grep -v '^$'"
 
-# 3. Cargo Fmt Check - Verify code formatting
-echo -e "${YELLOW}Step 3/4: Checking code format...${NC}"
+# 3. Cargo Test (Integration Tests) - Run integration tests with test-utils feature
+echo -e "${YELLOW}Step 3/6: Running integration tests...${NC}"
+run_check "Cargo Integration Tests" "cargo test --tests --features test-utils 2>&1 | grep -v ' ... ok$' | grep -v '^$'"
+
+# 4. Cargo Check (test-utils feature) - Verify test utilities compile
+echo -e "${YELLOW}Step 4/6: Checking test-utils feature...${NC}"
+run_check "Cargo Check test-utils" "cargo check --features test-utils"
+
+# 5. Cargo Fmt Check - Verify code formatting
+echo -e "${YELLOW}Step 5/6: Checking code format...${NC}"
 run_check "Cargo Format Check" "cargo fmt --all -- --check"
 
-# 4. Cargo Clippy - Lint with warnings as errors
-echo -e "${YELLOW}Step 4/4: Running clippy linter...${NC}"
+# 6. Cargo Clippy - Lint with warnings as errors
+echo -e "${YELLOW}Step 6/6: Running clippy linter...${NC}"
 run_check "Cargo Clippy" "cargo clippy --all-targets --all-features -- -D warnings"
 
 # Final Summary
@@ -61,10 +69,12 @@ echo "=========================================="
 if [ $FAILED -eq 0 ]; then
     echo -e "${GREEN}✓ All quality checks passed!${NC}"
     echo ""
-    echo "Build:  ✓ No errors or warnings"
-    echo "Tests:  ✓ All tests passing"
-    echo "Format: ✓ Code properly formatted"
-    echo "Clippy: ✓ No linter warnings"
+    echo "Build:             ✓ No errors or warnings"
+    echo "Unit Tests:        ✓ All tests passing"
+    echo "Integration Tests: ✓ All tests passing"
+    echo "Test Utils:        ✓ Mocks compile correctly"
+    echo "Format:            ✓ Code properly formatted"
+    echo "Clippy:            ✓ No linter warnings"
     echo ""
     exit 0
 else
