@@ -109,6 +109,23 @@ pub struct FileSystemService {
     writes)      reads)         I/O)
 ```
 
+
+#### Write Operation
+
+When a client (e.g. fuse client) attempts to write a new file, the FileSystem component receives the request via the StorageEndpoint the client was connected to. FileSystem then initiates the following flow, if and only if its node is the current Raft leader:
+
+1. **Create Empty File**: (this step is only needed if we are creating a new file and writing to it in one step) Calls StorageRaftMember to create an empty file and lock it for writing by the peer that is coordinating the operation (itself). 
+2. **Prepare Chunk Data**: FileSystem then directs data be transmitted to FileStore via StorageEndpoint by the initiating client where FileStore will stage the new Stripes and Chunks. If any Chunks exceed their max allowed retries, FileSystem makes new placement decisions for the affected Chunks and reattempt staging upto a maximum number of re-attempts. As long as the minimum requirements of the StoragePolicy are satisfied, Staging can be considered a success and FileSystem will move to the next step.
+3. **Update File Metadata**: Initiate another transaction via StorageRaftMember to add/update/etc the new Stripes and Chunks, making them visible via FileSystem read operations. The FileSystem itself likely needs to participate in Voting so StorageRaftMember may need to ask FileSystem and Metastore (perhaps others) to weigh in on the vote before responding to proposals issued by the Master.
+3a. **Transaction Vote Calculation**: When asked by StorageRaftMember, FileSystem should locate any chunk files which are expected to be local to the node before contributing to the vote.
+4. **Return Result To Caller**: At this point we can notifier the caller (e.g. fuse client) that the operation has completed, either successfully or with errors.
+
+**Key Properties**:
+- Chunk data operations are purely a data plane (FileStore) process.
+- FileSystem enforces WormFS File System semantics by coordinating Metadata and chunk data independently.
+- State is durable (survives crashes)
+- Vote response guarantees chunk can be committed or aborted
+
 ### Read Operation Example
 
 ```
