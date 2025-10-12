@@ -23,7 +23,15 @@ anyhow = "1.0"
 tracing = "0.1"
 
 # Networking (libp2p)
-libp2p = { version = "0.53", optional = true }
+libp2p = { version = "0.53", optional = true, features = [
+    "gossipsub",          # Pub/sub messaging
+    "request-response",   # Direct RPC
+    "noise",              # Transport encryption
+    "tcp",                # TCP transport
+    "mdns",               # Local peer discovery (optional)
+    "identify",           # Peer info exchange
+    "ping",               # Keep-alive/connection health
+] }
 
 # Raft consensus (OpenRaft)
 openraft = { version = "0.9", optional = true }

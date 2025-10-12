@@ -13,12 +13,30 @@
 //! - Providing efficient direct chunk transfer streams between nodes
 //! - Supporting multiple concurrent protocol handlers without deadlocks
 //!
-//! ## Architecture: Client Pattern with Interior Mutability
+//! ## Architecture: Factory + Inner + Clone Pattern
 //!
-//! StorageNetwork uses a client pattern where the outer struct is cheap to clone,
-//! allowing multiple components to hold instances without ownership conflicts.
-//! This is essential for OpenRaft compatibility, which requires exclusive ownership
-//! of its network handle.
+//! StorageNetwork uses a three-tier pattern to enable safe concurrent access:
+//!
+//! 1. **StorageNetworkFactory**: Creates and initializes the network instance
+//! 2. **StorageNetworkInner**: Contains actual swarm and state (wrapped in Arc<RwLock>)
+//! 3. **StorageNetwork**: Lightweight cloneable handle with command channel
+//!
+//! ### Structure
+//!
+//! ```ignore
+//! struct StorageNetworkInner {
+//!     swarm: RwLock<Swarm<WormFsBehaviour>>,
+//!     peers: RwLock<HashMap<PeerId, PeerState>>,
+//!     topics: RwLock<HashMap<String, TopicHandle>>,
+//!     config: NetworkConfig,
+//! }
+//!
+//! #[derive(Clone)]
+//! pub struct StorageNetwork {
+//!     inner: Arc<StorageNetworkInner>,
+//!     event_tx: mpsc::UnboundedSender<NetworkCommand>,
+//! }
+//! ```
 //!
 //! ### Pattern Benefits
 //!
@@ -27,6 +45,7 @@
 //! 2. **Concurrent Access**: Multiple threads can safely interact with the network
 //! 3. **Interior Mutability**: RwLock and channel-based commands enable safe concurrent access
 //! 4. **Event Loop Isolation**: The swarm runs in a dedicated event loop
+//! 5. **Non-Blocking Operations**: Commands submitted via channel without lock acquisition
 //!
 //! ## Topic-Based Communication
 //!
@@ -51,11 +70,106 @@
 pub mod types;
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::{Arc, RwLock};
 pub use types::{
-    Config, ConnectionState, Error, PeerId, PeerInfo, TopicMessage, TopicReceiver, TopicSender,
-    ValidationResult,
+    Config, ConnectionState, Error, NetworkCommand, PeerId, PeerInfo, PeerState, TopicHandle,
+    TopicMessage, TopicReceiver, TopicSender, ValidationResult,
 };
+
+/// Concrete implementation of StorageNetwork.
+///
+/// This is a lightweight cloneable handle that wraps the inner network state
+/// and provides a command channel for non-blocking operations.
+#[derive(Clone)]
+#[allow(dead_code)] // TODO: Remove when implementation is complete
+pub struct StorageNetworkHandle {
+    /// Reference to inner network state
+    inner: Arc<StorageNetworkInner>,
+
+    /// Command channel for sending network commands to the event loop
+    event_tx: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
+}
+
+/// Factory for creating StorageNetwork instances.
+///
+/// This factory is responsible for initializing the libp2p swarm and
+/// creating the inner network state before returning a cloneable handle.
+pub struct StorageNetworkFactory;
+
+impl StorageNetworkFactory {
+    /// Create a new StorageNetwork instance with the given configuration.
+    ///
+    /// This method initializes the libp2p swarm, sets up the event loop,
+    /// and returns both the inner state and a cloneable network handle.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Network configuration including peers, listen addresses, etc.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(StorageNetworkInner, StorageNetworkHandle)` where:
+    /// - `StorageNetworkInner` contains the actual swarm and should have `run()` called on it
+    /// - `StorageNetworkHandle` is a cloneable handle for network operations
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Configuration is invalid
+    /// - Swarm initialization fails
+    /// - Event loop setup fails
+    pub async fn create(
+        _config: Config,
+    ) -> Result<(StorageNetworkInner, StorageNetworkHandle), Error> {
+        // TODO: Implement actual libp2p swarm initialization
+        // For now, return placeholder error
+        Err(Error::ConfigError(
+            "StorageNetworkFactory not yet implemented".to_string(),
+        ))
+    }
+}
+
+/// Inner network state containing the actual libp2p swarm.
+///
+/// This struct holds all the mutable network state and is wrapped in Arc<RwLock>
+/// to enable safe concurrent access from multiple components.
+#[allow(dead_code)] // TODO: Remove when implementation is complete
+pub struct StorageNetworkInner {
+    /// libp2p swarm - protected by RwLock for concurrent access
+    /// TODO: Replace () with actual Swarm<WormFsBehaviour> once libp2p behavior is implemented
+    swarm: RwLock<()>,
+
+    /// Active peer state tracking
+    peers: RwLock<HashMap<PeerId, PeerState>>,
+
+    /// Active topic subscriptions
+    topics: RwLock<HashMap<String, TopicHandle>>,
+
+    /// Network configuration
+    config: Config,
+}
+
+impl StorageNetworkInner {
+    /// Start the swarm event loop.
+    ///
+    /// This method must be called exactly once to start processing libp2p events
+    /// and network commands. It runs indefinitely until shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event loop cannot be started or encounters a fatal error.
+    pub async fn run(&self) -> Result<(), Error> {
+        // TODO: Implement event loop that processes:
+        // 1. libp2p swarm events
+        // 2. NetworkCommand messages from the command channel
+        // 3. Topic message routing
+        Err(Error::EventLoopFailed(
+            "Event loop not yet implemented".to_string(),
+        ))
+    }
+}
 
 /// StorageNetwork trait defines the interface for peer-to-peer networking.
 ///

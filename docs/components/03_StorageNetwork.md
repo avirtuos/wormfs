@@ -23,7 +23,7 @@ StorageNetwork uses the client pattern with interior mutability to satisfy OpenR
 
 **Solution**: We implement a "client handle" pattern where:
 1. The outer `StorageNetwork` struct is lightweight and cloneable
-2. All shared state lives in an `Arc<NetworkInner>` 
+2. All shared state lives in an `Arc<StorageNetworkInner>` 
 3. Each component holds its own cloned instance of `StorageNetwork`
 4. OpenRaft "owns" one instance, while other components hold clones
 5. The event loop channel (`event_tx`) enables non-blocking command submission
@@ -31,7 +31,7 @@ StorageNetwork uses the client pattern with interior mutability to satisfy OpenR
 ### Structure
 
 ```rust
-struct NetworkInner {
+struct StorageNetworkInner {
     swarm: RwLock<Swarm<WormFsBehaviour>>,
     peers: RwLock<HashMap<PeerId, PeerState>>,
     topics: RwLock<HashMap<String, TopicHandle>>,
@@ -121,22 +121,22 @@ tokio::spawn(async move {
 
 ### Peer Discovery & Validation
 
-**Explicit Peer ID Mode:**
-- Configuration specifies exact peer IDs for each IP
-- Connections rejected if peer ID doesn't match
-- Maximum security, requires pre-configuration
-
-**Auto-ID Mode:**
-- Accept any peer ID on first connection
-- Store discovered peer ID durably
-- Enforce same peer ID on subsequent connections
-- Balance of security and ease of use
+**Peer Config:**
+- Configuration specifies exact peer IPs with IDs being optional.
+- If an Peer's IP is in our explicit peer list but no ID has been specified, we learn the ID
+    and add it to a "learned" Peer IDs map, allowing only 1 ID per IP. This learned IDs map
+    is stored in a file alongside the peer config. It makes configuring new clusters easier.
+- For maximum security, you specify IP and ID in the peers config, leaving no room for learned
+    IDs to interact with our nodes.
+- Any Peers we encounter with an IP that is not in our config, or who's ID differs from our explicit
+    or learned ID, get flagged and written to an unknown peers file.
+- Peer Authorization has two mode: strict - which follows the above rules, and allow-all - which ignores most of the above behaviors, using the explicit peer list as a bootstrap list but ultimately allowing any peer to communicate with us.
 
 ```
-First Connection (auto_id):
+First Connection (strict):
   1. Peer connects from configured IP
   2. Extract and validate peer ID from libp2p handshake
-  3. Store peer_id in durable config/database
+  3. If the configured IP did not have an explicit IP, store the learned peer_id in durable config/learned_peer_ids_file, do not allow overwrites of IP->ID mapping, nor multiple entries for the same ID.
   4. Accept connection
 
 Subsequent Connections:
@@ -150,26 +150,32 @@ Subsequent Connections:
 
 ### Public API
 
-struct NetworkInner {
+srtuct StorageNetworkFactory {
+    /// Create a new network instance
+    pub async fn new(config: NetworkConfig) -> Result<StorageNetworkInner, NetworkError>;
+}
+
+struct StorageNetworkInner {
     swarm: RwLock<Swarm<WormFsBehaviour>>,
     peers: RwLock<HashMap<PeerId, PeerState>>,
     topics: RwLock<HashMap<String, TopicHandle>>,
     config: NetworkConfig,
 }
 
+//In addition to the below methods which are unique to StorageNetworkInner, we need to 
+// ensure we the methods required to support the methods on StorageNetwork
+impl StorageNetworkInner {
+    /// Start the swarm event loop (must be called once)
+    pub async fn run(&self) -> Result<(), NetworkError>;
+}
+
 #[derive(Clone)]
 pub struct StorageNetwork {
-    inner: Arc<NetworkInner>,
+    inner: Arc<StorageNetworkInner>,
     event_tx: mpsc::UnboundedSender<NetworkCommand>,
 }
 
 impl StorageNetwork {
-    /// Create a new network instance
-    pub async fn new(config: NetworkConfig) -> Result<Self, NetworkError>;
-    
-    /// Start the swarm event loop (must be called once)
-    pub async fn run(&self) -> Result<(), NetworkError>;
-    
     /// Join a topic and get channels for communication
     pub async fn join_topic(
         &self,
@@ -190,13 +196,6 @@ impl StorageNetwork {
         topic: &str,
         message: Vec<u8>,
     ) -> Result<(), NetworkError>;
-    
-    /// Open a direct stream to a peer for bulk data transfer
-    pub async fn open_stream(
-        &self,
-        peer_id: &PeerId,
-        protocol: &str,
-    ) -> Result<Stream, NetworkError>;
     
     /// Get list of currently connected peers
     pub fn get_connected_peers(&self) -> Vec<PeerInfo>;
@@ -484,32 +483,32 @@ mesh_n_high = 12
 
 ## Open Questions
 
-1. **Transport Selection**: Should we support QUIC in addition to TCP? QUIC offers better performance but requires UDP, which some networks block.
+1. **Transport Selection**: Should we support QUIC in addition to TCP? QUIC offers better performance but requires UDP, which some networks block. Answer: Lets stick with TCP for now.
 
-2. **Local Discovery**: Should we enable mDNS for automatic local peer discovery, or rely solely on configured peer lists?
+2. **Local Discovery**: Should we enable mDNS for automatic local peer discovery, or rely solely on configured peer lists? Answer: Lets rely solely on our configured peer list and gossip, not mDNS.
 
-3. **NAT Traversal**: Do we need to support NAT hole-punching (via libp2p-relay), or can we assume direct connectivity between storage nodes?
+3. **NAT Traversal**: Do we need to support NAT hole-punching (via libp2p-relay), or can we assume direct connectivity between storage nodes? Answer: We can assume direct connectivity between storage nodes.
 
-4. **Message Size Limits**: What should be the maximum message size for gossipsub? Large metadata operations might exceed default limits.
+4. **Message Size Limits**: What should be the maximum message size for gossipsub? Large metadata operations might exceed default limits. Answer: We can assume message won't be larger than 10MB but we should make this limit configurable and log a clear warning message when gossip message come within 90% of the configured max size. If messages exceed the max size, we should log an error.
 
-5. **Topic Security**: Should we implement topic-level access control, or rely on peer authentication being sufficient?
+5. **Topic Security**: Should we implement topic-level access control, or rely on peer authentication being sufficient? Answer: peer authentication is sufficient for now.
 
-6. **Protocol Versioning**: How should we handle protocol version mismatches between nodes? Reject connection, downgrade, or maintain compatibility matrix?
+6. **Protocol Versioning**: How should we handle protocol version mismatches between nodes? Reject connection, downgrade, or maintain compatibility matrix? Answer: We should keep it simple and reject connections for now.
 
-7. **Bandwidth Throttling**: Should StorageNetwork implement bandwidth limiting for chunk transfers to prevent network saturation?
+7. **Bandwidth Throttling**: Should StorageNetwork implement bandwidth limiting for chunk transfers to prevent network saturation? Answer: chunk transfers do not go over the StorageNetwork, they use StorageEndpoint's gRPC transport directly. So, no bandwidth limiting is needed at this time for StorageNetwork.
 
-8. **Connection Pooling**: Should we maintain connection pools per protocol, or share connections across all protocols?
+8. **Connection Pooling**: Should we maintain connection pools per protocol, or share connections across all protocols? Answer: We are only supporting one protocol for now but even if we add more latter, we'd likely keep things simple and use connection pools per protocol.
 
-9. **Metrics Export**: What network metrics should be exposed? Connection count, bandwidth usage, message latency, error rates?
+9. **Metrics Export**: What network metrics should be exposed? Connection count, bandwidth usage, message latency, error rates? Answer: message rate, message latency, error rates, bandwidth usage (bytes/sec), number of connected peers, and number of stale peers should be a good starting point.
 
-10. **Peer Reputation**: Should we implement a peer reputation system to deprioritize unreliable peers?
+10. **Peer Reputation**: Should we implement a peer reputation system to deprioritize unreliable peers? Answer: We do not need any peer reputation system right now.
 
-11. **Auto-ID Security**: In auto-id mode, should we require manual admin approval for newly discovered peers before trusting them?
+11. **Auto-ID Security**: In auto-id mode, should we require manual admin approval for newly discovered peers before trusting them? Answer: No, it is up to admins to police the system when not all peers are fully configured in the explicit peer list.
 
-12. **Encryption Options**: Should we support different encryption algorithms beyond libp2p-noise (e.g., TLS)?
+12. **Encryption Options**: Should we support different encryption algorithms beyond libp2p-noise (e.g., TLS)? Answer: libp2p-noise is perfectly adequate for now, we do not need the complexity of supporting more transport security options.
 
-13. **Topic Persistence**: Should topic subscriptions be persisted across node restarts, or re-established on startup?
+13. **Topic Persistence**: Should topic subscriptions be persisted across node restarts, or re-established on startup? Answer: No, we expect components to re-do their subscriptions on each start up anyway as part of their bootstrapping. 
 
-14. **Network Topology**: Should we support different network topologies (mesh, star, hierarchical) or stick with full mesh?
+14. **Network Topology**: Should we support different network topologies (mesh, star, hierarchical) or stick with full mesh? Answer: This question isn't particularly relevant as libp2p doesn't really work this way. Its inherently a peer to peer mesh. Our leaders and followers will use a combination of broadcast and unicast message passing that will resemble variations of start and mesh at the applicaiton level without forcing the network topology itself to follow any one paridigm.
 
-15. **Compression**: Should we enable message compression for gossipsub and request-response protocols?
+15. **Compression**: Should we enable message compression for gossipsub and request-response protocols? Answer: No message compression is needed at the moment.

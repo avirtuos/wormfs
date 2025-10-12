@@ -23,11 +23,37 @@ impl PeerId {
     }
 }
 
+/// Configuration for a peer in the network.
+#[derive(Debug, Clone)]
+pub struct PeerConfig {
+    /// IP address of the peer
+    pub ip_address: IpAddr,
+
+    /// Peer ID configuration (explicit or auto-discover)
+    pub peer_id: PeerIdConfig,
+}
+
+/// Peer ID configuration mode.
+#[derive(Debug, Clone)]
+pub enum PeerIdConfig {
+    /// Exact peer ID required - reject connections with mismatched IDs
+    Explicit(PeerId),
+
+    /// Accept and store peer ID on first connection, enforce on subsequent connections
+    AutoId,
+}
+
 /// Network configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Listen addresses for libp2p
     pub listen_addresses: Vec<String>,
+
+    /// Configured peers
+    pub peers: Vec<PeerConfig>,
+
+    /// Path to store discovered peer IDs (for auto-ID mode)
+    pub peer_id_store_path: PathBuf,
 
     /// Maximum number of peers to maintain
     pub max_peers: usize,
@@ -43,9 +69,91 @@ pub struct Config {
 
     /// Keep-alive interval
     pub keep_alive_interval: Duration,
+}
 
-    /// Path to store discovered peer IDs (for auto-ID mode)
-    pub peer_id_store_path: Option<PathBuf>,
+/// State of a peer in the network.
+#[derive(Debug, Clone)]
+pub struct PeerState {
+    /// Peer identifier
+    pub peer_id: PeerId,
+
+    /// Known addresses for this peer
+    pub addresses: Vec<String>,
+
+    /// Current connection state
+    pub connection_state: ConnectionState,
+
+    /// Last time we saw activity from this peer
+    pub last_seen: SystemTime,
+
+    /// Validation status for this peer
+    pub validation_status: ValidationStatus,
+}
+
+/// Peer validation status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationStatus {
+    /// Peer has been validated against configured peer ID
+    Validated,
+
+    /// Peer was auto-discovered (first connection in auto-ID mode)
+    AutoDiscovered,
+
+    /// Validation is pending
+    Pending,
+
+    /// Validation failed
+    Failed,
+}
+
+/// Handle for a topic subscription.
+#[derive(Debug)]
+pub struct TopicHandle {
+    /// Sender for publishing messages to this topic
+    pub tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+
+    /// Receiver for consuming messages from this topic
+    pub rx: tokio::sync::mpsc::UnboundedReceiver<TopicMessage>,
+}
+
+/// Commands sent to the network event loop.
+#[derive(Debug)]
+pub enum NetworkCommand {
+    /// Join a topic and get a handle for communication
+    JoinTopic {
+        /// Name of the topic to join
+        name: String,
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<Result<TopicHandle, Error>>,
+    },
+
+    /// Send a message to a specific peer on a topic
+    SendToPeer {
+        /// Target peer identifier
+        peer_id: PeerId,
+        /// Topic name
+        topic: String,
+        /// Message bytes
+        message: Vec<u8>,
+    },
+
+    /// Broadcast a message to all peers on a topic
+    Broadcast {
+        /// Topic name
+        topic: String,
+        /// Message bytes
+        message: Vec<u8>,
+    },
+
+    /// Open a stream to a peer for direct communication
+    OpenStream {
+        /// Target peer identifier
+        peer_id: PeerId,
+        /// Protocol name
+        protocol: String,
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<Result<(), Error>>,
+    },
 }
 
 /// Errors that can occur during network operations.
