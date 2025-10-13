@@ -101,12 +101,20 @@
 //! - **Lock Expiration**: Automatic cleanup of expired locks
 //! - **Lock Extension**: Clients can extend lease duration
 
+pub mod factory;
+mod implementation;
 pub mod types;
 
 use async_trait::async_trait;
 use std::path::Path;
 use std::time::SystemTime;
-pub use types::{ChunkId, ClientId, Config, DiskId, Error, FileId, FileMetadata, NodeId, StripeId};
+
+pub use factory::MetadataStoreFactory;
+pub use types::{
+    ChunkId, ChunkRecord, ChunkStatus, ClientId, Config, DiskId, DiskRecord, DiskStatus, Error,
+    FileId, FileMetadata, FileRecord, LockRecord, LockType, NodeId, NodeRecord, NodeStatus,
+    StripeId, StripeRecord,
+};
 
 /// MetadataStore trait defines the interface for metadata persistence.
 ///
@@ -117,30 +125,6 @@ pub use types::{ChunkId, ClientId, Config, DiskId, Error, FileId, FileMetadata, 
 /// Manual mocking or alternative testing strategies should be used.
 #[async_trait]
 pub trait MetadataStore: Send + Sync + Clone {
-    /// Data types
-    type FileRecord: Send + Sync;
-    type StripeRecord: Send + Sync;
-    type ChunkRecord: Send + Sync;
-    type LockRecord: Send + Sync;
-    type NodeRecord: Send + Sync;
-    type DiskRecord: Send + Sync;
-
-    /// Create a new MetadataStore.
-    ///
-    /// Returns a cheap-to-clone client handle that wraps the actual database
-    /// connection with interior mutability.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Configuration including database path and tuning parameters
-    ///
-    /// # Returns
-    ///
-    /// A cloneable MetadataStore handle.
-    fn new(config: Config) -> Result<Self, Error>
-    where
-        Self: Sized;
-
     /// Initialize database schema.
     ///
     /// Creates all tables, indexes, and constraints. This method is idempotent
@@ -179,13 +163,13 @@ pub trait MetadataStore: Send + Sync + Clone {
     ) -> Result<FileId, Error>;
 
     /// Get file metadata by path.
-    async fn get_file_by_path(&self, path: &Path) -> Result<Self::FileRecord, Error>;
+    async fn get_file_by_path(&self, path: &Path) -> Result<FileRecord, Error>;
 
     /// Get file metadata by inode.
-    async fn get_file_by_inode(&self, inode: u64) -> Result<Self::FileRecord, Error>;
+    async fn get_file_by_inode(&self, inode: u64) -> Result<FileRecord, Error>;
 
     /// Get file metadata by file ID.
-    async fn get_file(&self, file_id: FileId) -> Result<Self::FileRecord, Error>;
+    async fn get_file(&self, file_id: FileId) -> Result<FileRecord, Error>;
 
     /// Update file metadata.
     async fn update_file(&self, file_id: FileId, metadata: FileMetadata) -> Result<(), Error>;
@@ -194,7 +178,7 @@ pub trait MetadataStore: Send + Sync + Clone {
     async fn delete_file(&self, file_id: FileId) -> Result<(), Error>;
 
     /// List files in a directory.
-    async fn list_directory(&self, path: &Path) -> Result<Vec<Self::FileRecord>, Error>;
+    async fn list_directory(&self, path: &Path) -> Result<Vec<FileRecord>, Error>;
 
     // ===== Stripe Operations =====
 
@@ -202,21 +186,21 @@ pub trait MetadataStore: Send + Sync + Clone {
     async fn allocate_stripes(
         &self,
         file_id: FileId,
-        stripes: Vec<Self::StripeRecord>,
+        stripes: Vec<StripeRecord>,
     ) -> Result<(), Error>;
 
     /// Get stripe by ID.
-    async fn get_stripe(&self, stripe_id: StripeId) -> Result<Self::StripeRecord, Error>;
+    async fn get_stripe(&self, stripe_id: StripeId) -> Result<StripeRecord, Error>;
 
     /// Get all stripes for a file.
-    async fn get_file_stripes(&self, file_id: FileId) -> Result<Vec<Self::StripeRecord>, Error>;
+    async fn get_file_stripes(&self, file_id: FileId) -> Result<Vec<StripeRecord>, Error>;
 
     /// Get stripe at specific offset in file.
     async fn get_stripe_at_offset(
         &self,
         file_id: FileId,
         offset: u64,
-    ) -> Result<Self::StripeRecord, Error>;
+    ) -> Result<StripeRecord, Error>;
 
     // ===== Chunk Operations =====
 
@@ -224,15 +208,14 @@ pub trait MetadataStore: Send + Sync + Clone {
     async fn allocate_chunks(
         &self,
         stripe_id: StripeId,
-        chunks: Vec<Self::ChunkRecord>,
+        chunks: Vec<ChunkRecord>,
     ) -> Result<(), Error>;
 
     /// Get chunk by ID.
-    async fn get_chunk(&self, chunk_id: ChunkId) -> Result<Self::ChunkRecord, Error>;
+    async fn get_chunk(&self, chunk_id: ChunkId) -> Result<ChunkRecord, Error>;
 
     /// Get all chunks for a stripe.
-    async fn get_stripe_chunks(&self, stripe_id: StripeId)
-        -> Result<Vec<Self::ChunkRecord>, Error>;
+    async fn get_stripe_chunks(&self, stripe_id: StripeId) -> Result<Vec<ChunkRecord>, Error>;
 
     /// Update chunk location.
     async fn update_chunk_location(
@@ -282,10 +265,82 @@ pub trait MetadataStore: Send + Sync + Clone {
     ) -> Result<(), Error>;
 
     /// Get active locks for a file.
-    async fn get_file_locks(&self, file_id: FileId) -> Result<Vec<Self::LockRecord>, Error>;
+    async fn get_file_locks(&self, file_id: FileId) -> Result<Vec<LockRecord>, Error>;
 
     /// Clean up expired locks.
     async fn cleanup_expired_locks(&self) -> Result<u64, Error>;
+
+    // ===== Inode Reservation Operations =====
+
+    /// Reserve an available inode for future use.
+    ///
+    /// Reserves an inode from the inode pool with a 1-hour expiration time.
+    /// This is typically called by StorageRaftMember when preparing to create
+    /// a new file, before the actual Raft transaction is committed.
+    ///
+    /// The reservation ensures that multiple concurrent file creation operations
+    /// don't try to use the same inode. If the reservation expires (after 1 hour)
+    /// without being confirmed, the inode becomes available for reuse.
+    ///
+    /// # Returns
+    ///
+    /// The reserved inode number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No inodes are available (`Error::NoAvailableInodes`)
+    /// - Database operation fails
+    async fn reserve_inode(&self) -> Result<u64, Error>;
+
+    /// Confirm an inode reservation and mark it as used.
+    ///
+    /// Called when a Raft transaction successfully commits and the inode
+    /// is permanently assigned to a file. This marks the inode as used
+    /// and prevents it from being reused.
+    ///
+    /// # Arguments
+    ///
+    /// * `inode` - The inode number to confirm
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Inode is not reserved (`Error::InodeNotReserved`)
+    /// - Inode reservation has expired (`Error::InodeReservationExpired`)
+    /// - Inode is already in use (`Error::InodeInUse`)
+    async fn confirm_inode(&self, inode: u64) -> Result<(), Error>;
+
+    /// Release an inode reservation.
+    ///
+    /// Called when a Raft transaction fails or is aborted, making the
+    /// reserved inode available for reuse by other operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `inode` - The inode number to release
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Inode is not reserved (`Error::InodeNotReserved`)
+    /// - Database operation fails
+    async fn release_inode(&self, inode: u64) -> Result<(), Error>;
+
+    /// Clean up expired inode reservations.
+    ///
+    /// Scans for inode reservations older than 1 hour and releases them
+    /// back to the available pool. This is typically called periodically
+    /// by a background task.
+    ///
+    /// # Returns
+    ///
+    /// Number of expired reservations that were cleaned up.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database operation fails.
+    async fn cleanup_expired_inode_reservations(&self) -> Result<u64, Error>;
 
     // ===== Snapshot Operations =====
 

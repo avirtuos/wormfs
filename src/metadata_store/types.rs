@@ -29,20 +29,45 @@ pub struct Config {
     /// Path to SQLite database file
     pub database_path: PathBuf,
 
-    /// Maximum number of database connections in pool
-    pub max_connections: u32,
+    /// Number of read connections in pool (4-8 recommended)
+    pub read_pool_size: usize,
 
     /// Enable WAL mode for better concurrent access
     pub enable_wal: bool,
 
-    /// SQLite cache size (in KB)
-    pub cache_size_kb: u32,
+    /// SQLite page cache size in MB (default: 10MB)
+    pub cache_size_mb: usize,
 
     /// Enable foreign key constraints
     pub enable_foreign_keys: bool,
 
     /// Synchronous mode setting
     pub synchronous: SynchronousMode,
+
+    /// Transaction isolation level
+    pub transaction_isolation: IsolationLevel,
+
+    /// Enable prepared statements for common queries
+    pub enable_prepared_statements: bool,
+
+    /// Timeout for acquiring connection from read pool (in seconds)
+    pub read_pool_timeout_secs: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            database_path: PathBuf::from("/var/lib/wormfs/metadata.db"),
+            read_pool_size: 8,
+            enable_wal: true,
+            cache_size_mb: 10,
+            enable_foreign_keys: true,
+            synchronous: SynchronousMode::Normal,
+            transaction_isolation: IsolationLevel::Serializable,
+            enable_prepared_statements: true,
+            read_pool_timeout_secs: 30,
+        }
+    }
 }
 
 /// SQLite synchronous mode.
@@ -54,6 +79,15 @@ pub enum SynchronousMode {
     Normal,
     /// Full sync after each transaction (slowest, safest)
     Full,
+}
+
+/// Transaction isolation level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    /// Read committed isolation
+    ReadCommitted,
+    /// Serializable isolation (strictest)
+    Serializable,
 }
 
 /// Errors that can occur during MetadataStore operations.
@@ -125,6 +159,22 @@ pub enum Error {
     /// I/O error
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Inode not available
+    #[error("No available inodes")]
+    NoAvailableInodes,
+
+    /// Inode not reserved
+    #[error("Inode {0} is not reserved")]
+    InodeNotReserved(u64),
+
+    /// Inode already in use
+    #[error("Inode {0} is already in use")]
+    InodeInUse(u64),
+
+    /// Inode reservation expired
+    #[error("Inode {0} reservation has expired")]
+    InodeReservationExpired(u64),
 }
 
 /// File metadata structure.
@@ -150,4 +200,113 @@ pub struct FileMetadata {
 
     /// Last access timestamp
     pub accessed_at: SystemTime,
+}
+
+// ===== Database Record Types =====
+
+/// File record from the database.
+#[derive(Debug, Clone)]
+pub struct FileRecord {
+    pub file_id: FileId,
+    pub inode: u64,
+    pub path: PathBuf,
+    pub parent_path: PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub permissions: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub created_at: SystemTime,
+    pub modified_at: SystemTime,
+    pub accessed_at: SystemTime,
+    pub storage_policy_id: u32,
+}
+
+/// Stripe record from the database.
+#[derive(Debug, Clone)]
+pub struct StripeRecord {
+    pub stripe_id: StripeId,
+    pub file_id: FileId,
+    pub stripe_index: u32,
+    pub offset: u64,
+    pub size: u64,
+    pub checksum: u32,
+    pub created_at: SystemTime,
+}
+
+/// Chunk record from the database.
+#[derive(Debug, Clone)]
+pub struct ChunkRecord {
+    pub chunk_id: ChunkId,
+    pub stripe_id: StripeId,
+    pub chunk_index: u8,
+    pub node_id: NodeId,
+    pub disk_id: DiskId,
+    pub checksum: u32,
+    pub status: ChunkStatus,
+    pub created_at: SystemTime,
+    pub last_verified: Option<SystemTime>,
+}
+
+/// Chunk status enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkStatus {
+    Healthy,
+    Corrupt,
+    Missing,
+    Rebuilding,
+}
+
+/// Lock record from the database.
+#[derive(Debug, Clone)]
+pub struct LockRecord {
+    pub lock_id: u64,
+    pub file_id: FileId,
+    pub client_id: ClientId,
+    pub lock_type: LockType,
+    pub acquired_at: SystemTime,
+    pub expires_at: SystemTime,
+}
+
+/// Lock type enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockType {
+    Read,
+    Write,
+}
+
+/// Node record from the database.
+#[derive(Debug, Clone)]
+pub struct NodeRecord {
+    pub node_id: NodeId,
+    pub address: String,
+    pub status: NodeStatus,
+    pub last_seen: SystemTime,
+}
+
+/// Node status enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeStatus {
+    Online,
+    Offline,
+    Failed,
+}
+
+/// Disk record from the database.
+#[derive(Debug, Clone)]
+pub struct DiskRecord {
+    pub disk_id: DiskId,
+    pub node_id: NodeId,
+    pub path: PathBuf,
+    pub total_space: u64,
+    pub free_space: u64,
+    pub status: DiskStatus,
+}
+
+/// Disk status enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskStatus {
+    Healthy,
+    Degraded,
+    Failed,
 }

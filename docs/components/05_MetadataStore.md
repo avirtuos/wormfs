@@ -680,30 +680,30 @@ checkpoint_mode = "TRUNCATE"  # PASSIVE, FULL, RESTART, or TRUNCATE
 
 ## Open Questions
 
-1. **Lock Cleanup**: Should expired lock cleanup run on a timer, or be triggered by lock operations?
+1. **Lock Cleanup**: Should expired lock cleanup run on a timer, or be triggered by lock operations? Answer: Expired lock should not require explicit unlocks as locks are inherently time limited, requiring extension. So when a lock is expired someone new can acquire it without the system or the caller needing to trigger an explicit expire or unlock.
 
-3. **Cache Size**: What's the optimal cache size for typical workloads? Should it be auto-tuned based on available memory?
+3. **Cache Size**: What's the optimal cache size for typical workloads? Should it be auto-tuned based on available memory? Answer: We should expose configs for the page cache with a default cache of 10MB. 
 
-4. **Snapshot Format**: Should snapshots be raw SQLite files, or exported to a portable format?
+4. **Snapshot Format**: Should snapshots be raw SQLite files, or exported to a portable format? Answer: They should be SQLite's backup format, likely binary so they restore quickly.
 
-5. **Query Optimization**: Should we use prepared statements for common queries, or rely on SQLite's query cache?
+5. **Query Optimization**: Should we use prepared statements for common queries, or rely on SQLite's query cache? Answer: We should use prepared statements where reasonable, especially for common queries.
 
-6. **Inode Allocation**: Should MetadataStore be responsible for inode generation, or should it come from the caller?
+6. **Inode Allocation**: Should MetadataStore be responsible for inode generation, or should it come from the caller? Answer: The MetadataStore needs to provide an API to reserve a free inode from the inode table. These reservations expire after an hour if the inode doesn't get used in an actual Raft transaction. The reserve_inode API is a write API that is called by StorageRaftMember to assign an inode if one is needed. FileSystemService learns of the inode upon completion of the metadata operation it initiated via StorageRaftMember.
 
-7. **Soft Deletes**: Should file deletion be soft (mark as deleted) or hard (remove from database)?
+7. **Soft Deletes**: Should file deletion be soft (mark as deleted) or hard (remove from database)? Answer: They should be hard and then a background process in the StorageWatchdog can handle the data plane operation of removing the orphaned chunks.
 
-8. **Path Normalization**: Should paths be normalized (e.g., resolve "..", "//" ) before storage?
+8. **Path Normalization**: Should paths be normalized (e.g., resolve "..", "//" ) before storage? Answer: Yes, paths should be normalized before storage.
 
-9. **Metadata Versioning**: Should we version metadata schema for future migrations?
+9. **Metadata Versioning**: Should we version metadata schema for future migrations? Answer: Yes
 
-10. **Audit Trail**: Should we maintain an audit log of metadata changes for debugging?
+10. **Audit Trail**: Should we maintain an audit log of metadata changes for debugging? Answer: Yes, I imagine the TransactionLogStore can service this purpose though.
 
-11. **Statistics**: Should we maintain aggregated statistics (file count, total size, etc.) or compute on-demand?
+11. **Statistics**: Should we maintain aggregated statistics (file count, total size, etc.) or compute on-demand? Answer: We can calculate them when needed.
 
-12. **Path Depth Limit**: Should we enforce a maximum path depth or length?
+12. **Path Depth Limit**: Should we enforce a maximum path depth or length? Answer: No
 
-13. **Case Sensitivity**: Should file paths be case-sensitive or case-insensitive?
+13. **Case Sensitivity**: Should file paths be case-sensitive or case-insensitive? Answer: It should be case sensitive.
 
-14. **Transaction Isolation**: What isolation level should we use for transactions? (READ COMMITTED, SERIALIZABLE)?
+14. **Transaction Isolation**: What isolation level should we use for transactions? (READ COMMITTED, SERIALIZABLE)? Answer: Serializable.
 
-15. **Backup Strategy**: Should MetadataStore support online backups, or require snapshot creation?
+15. **Backup Strategy**: Should MetadataStore support online backups, or require snapshot creation? Answer: We can use the backup API or VACUUM INTO command to produce a transactionally consistent snapshot while the database is online.
