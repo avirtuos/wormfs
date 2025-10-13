@@ -1,7 +1,9 @@
 //! Common types for the StorageRaftMember component.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
 /// Unique identifier for a node in the Raft cluster.
@@ -178,4 +180,144 @@ pub struct RaftMetrics {
 
     /// Replication lag per follower (leader only)
     pub replication_lag: HashMap<NodeId, u64>,
+}
+
+// ============================================================================
+// Raft Operations and Transaction Types
+// ============================================================================
+
+/// Transaction ID for two-phase commit coordination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TxId(pub u64);
+
+/// Operations that can be proposed through Raft consensus.
+#[derive(Debug, Clone)]
+pub enum WormFsOperation {
+    /// Prepare phase of two-phase commit transaction
+    TransactionPrepare {
+        tx_id: TxId,
+        metadata_ops: Option<Vec<MetadataOperation>>,
+        command_ops: Option<Vec<CommandOperation>>,
+        timeout: SystemTime,
+    },
+    /// Commit phase of two-phase commit transaction
+    TransactionCommit { tx_id: TxId },
+    /// Abort phase of two-phase commit transaction
+    TransactionAbort { tx_id: TxId, reason: Option<String> },
+}
+
+/// Metadata operations that can be proposed through Raft.
+#[derive(Debug, Clone)]
+pub enum MetadataOperation {
+    /// Create a new file
+    FileCreate {
+        path: PathBuf,
+        inode: u64,
+        metadata: FileMetadata,
+        policy: StoragePolicy,
+    },
+    /// Update file metadata
+    FileUpdate {
+        file_id: FileId,
+        metadata: FileMetadata,
+        policy: StoragePolicy,
+    },
+    /// Delete a file
+    FileDelete { file_id: FileId },
+    /// Create a stripe for a file
+    CreateStripe {
+        file_id: FileId,
+        stripe_id: StripeId,
+        policy: StoragePolicy,
+        offset: u64,
+        size: u64,
+        chunks: Vec<ChunkId>,
+    },
+    /// Delete a stripe
+    DeleteStripe { stripe_id: StripeId },
+    /// Create a chunk location record
+    CreateChunk {
+        node_id: NodeId,
+        disk: DiskId,
+        chunk: ChunkId,
+        chunk_index: ChunkIndex,
+    },
+    /// Move a chunk from one location to another
+    MoveChunk {
+        chunk_id: ChunkId,
+        old_node: NodeId,
+        new_node: NodeId,
+        old_disk: DiskId,
+        new_disk: DiskId,
+    },
+    /// Delete a chunk
+    DeleteChunk {
+        node_id: NodeId,
+        disk_id: DiskId,
+        chunk_id: ChunkId,
+    },
+}
+
+/// Command operations that can be proposed through Raft.
+#[derive(Debug, Clone)]
+pub enum CommandOperation {
+    /// Create a snapshot
+    CreateSnapshot { snapshot_id: u64, index: u64 },
+    /// Trim transaction log to a specific index
+    TrimLog { trim_to_index: u64 },
+    /// Add a new member to the cluster
+    AddMember {
+        node_id: NodeId,
+        address: SocketAddr,
+    },
+    /// Remove a member from the cluster
+    RemoveMember { node_id: NodeId },
+}
+
+// ============================================================================
+// Placeholder types (to be defined in appropriate modules)
+// ============================================================================
+
+/// File identifier (placeholder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileId(pub u64);
+
+/// Stripe identifier (placeholder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StripeId(pub u64);
+
+/// Chunk identifier (placeholder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChunkId(pub u64);
+
+/// Disk identifier (placeholder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DiskId(pub u64);
+
+/// Chunk index within a stripe (placeholder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkIndex(pub u32);
+
+/// File metadata (placeholder).
+#[derive(Debug, Clone)]
+pub struct FileMetadata {
+    /// File size in bytes
+    pub size: u64,
+    /// Creation timestamp
+    pub created: SystemTime,
+    /// Last modified timestamp
+    pub modified: SystemTime,
+    /// File permissions (Unix-style)
+    pub mode: u32,
+}
+
+/// Storage policy for erasure coding and replication (placeholder).
+#[derive(Debug, Clone)]
+pub struct StoragePolicy {
+    /// Data chunks per stripe
+    pub data_chunks: u32,
+    /// Parity chunks per stripe
+    pub parity_chunks: u32,
+    /// Replication factor
+    pub replication_factor: u32,
 }

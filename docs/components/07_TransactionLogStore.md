@@ -63,9 +63,8 @@ TransactionLogStore is the redb-based persistent storage for the Raft transactio
 // Stored in redb as bincode-serialized bytes
 struct LogEntry {
     term: u64,
-    operation: MetadataOperation,  // From StorageRaftMember
+    operations: Vec<MetadataOperation>,  // From StorageRaftMember
     timestamp: SystemTime,
-    checksum: u32,  // CRC32 of operation bytes
 }
 ```
 
@@ -99,11 +98,14 @@ pub struct TransactionLogStore {
 ### Public API
 
 ```rust
-impl TransactionLogStore {
+
+impl TransactionLogStoreFactory {
     /// Create a new TransactionLogStore
     /// Returns a cheap-to-clone client handle
-    pub fn new(config: TransactionLogConfig) -> Result<Self, LogError>;
-    
+    pub fn new(config: TransactionLogConfig) -> Result<TransactionLogStore, LogError>;
+}
+
+impl TransactionLogStore {
     /// Initialize log tables
     /// Uses interior mutability for thread-safe access
     pub async fn initialize(&self) -> Result<(), LogError>;
@@ -132,11 +134,11 @@ impl TransactionLogStore {
         end: u64,
     ) -> Result<Vec<LogEntry>, LogError>;
     
-    /// Get the first log index
-    pub async fn get_first_index(&self) -> Result<Option<u64>, LogError>;
+    /// Get the oldest log index available
+    pub async fn get_oldest_index(&self) -> Result<Option<u64>, LogError>;
     
-    /// Get the last log index
-    pub async fn get_last_index(&self) -> Result<Option<u64>, LogError>;
+    /// Get the most recent log index
+    pub async fn get_tip_index(&self) -> Result<Option<u64>, LogError>;
     
     /// Get the term of a specific log entry
     pub async fn get_entry_term(&self, index: u64) -> Result<Option<u64>, LogError>;
@@ -223,60 +225,45 @@ pub struct TransactionLogConfig {
     /// Path to redb database file
     pub db_path: PathBuf,
     
-    /// Cache size for redb
+    /// Cache size for redb (in MB)
     pub cache_size_mb: usize,
     
-    /// Enable checksums for log entries
-    pub enable_checksums: bool,
-    
-    /// Compact database when log grows beyond this size
+    /// Compact database when log grows beyond this size (in MB)
     pub compact_threshold_mb: usize,
+    
+    /// Maximum log size before snapshot is recommended (in MB)
+    pub max_log_size_mb: usize,
+    
+    /// Maximum log age before snapshot is recommended (in days)
+    pub max_log_age_days: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub index: u64,
     pub term: u64,
-    pub operation: MetadataOperation,
+    pub operations: Vec<MetadataOperation>,
     pub timestamp: SystemTime,
-    pub checksum: Option<u32>,
 }
 
 impl LogEntry {
     pub fn new(
         index: u64,
         term: u64,
-        operation: MetadataOperation,
+        operations: Vec<MetadataOperation>,
     ) -> Self {
-        let checksum = Self::compute_checksum(&operation);
         Self {
             index,
             term,
-            operation,
+            operations,
             timestamp: SystemTime::now(),
-            checksum: Some(checksum),
-        }
-    }
-    
-    fn compute_checksum(operation: &MetadataOperation) -> u32 {
-        // Serialize and checksum the operation
-        let bytes = bincode::serialize(operation).unwrap();
-        crc32fast::hash(&bytes)
-    }
-    
-    pub fn verify_checksum(&self) -> bool {
-        if let Some(expected) = self.checksum {
-            let actual = Self::compute_checksum(&self.operation);
-            expected == actual
-        } else {
-            true  // No checksum to verify
         }
     }
     
     pub fn into_raft_entry(self) -> openraft::Entry<WormFsTypeConfig> {
         openraft::Entry {
             log_id: LogId::new(self.term, self.index),
-            payload: EntryPayload::Normal(self.operation),
+            payload: EntryPayload::Normal(self.operations),
         }
     }
 }
@@ -291,8 +278,6 @@ pub struct LogStats {
 
 pub struct IntegrityReport {
     pub total_entries: u64,
-    pub verified_entries: u64,
-    pub corrupt_entries: Vec<u64>,
     pub missing_indices: Vec<u64>,
     pub is_valid: bool,
 }
@@ -308,17 +293,11 @@ pub enum LogError {
     #[error("Invalid log index: {0}")]
     InvalidIndex(u64),
     
-    #[error("Checksum mismatch at index {0}")]
-    ChecksumMismatch(u64),
-    
     #[error("Serialization error: {0}")]
     SerializationError(#[from] bincode::Error),
     
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
-    
-    #[error("Corruption detected: {0}")]
-    Corruption(String),
 }
 ```
 
@@ -330,7 +309,6 @@ pub enum LogError {
 ### External Dependencies
 - `redb`: Embedded key-value database
 - `bincode`: Serialization for log entries
-- `crc32fast`: Checksum calculation
 - `tokio`: Async runtime
 
 ## Configuration
@@ -338,9 +316,12 @@ pub enum LogError {
 ```toml
 [transaction_log]
 db_path = "/var/lib/wormfs/transaction_log.redb"
-cache_size_mb = 128
-enable_checksums = true
+cache_size_mb = 8
 compact_threshold_mb = 100
+
+# Log retention policy (triggers snapshot recommendation)
+max_log_size_mb = 128
+max_log_age_days = 7
 
 # Automatic compaction
 auto_compact = true
@@ -357,12 +338,11 @@ compact_interval_hours = 24
 
 ### Read Failures
 - If entry not found: return None (valid for range queries)
-- If checksum mismatch: log error and return corruption error
 - If database error: attempt retry, then return error
 
 ### Corruption Detection
-- Checksums detect data corruption
-- Missing indices detected during integrity checks
+- redb provides built-in integrity guarantees
+- Missing indices detected during integrity checks (if implemented)
 - Corruption triggers snapshot install from leader
 - Operators alerted for investigation
 
@@ -378,8 +358,8 @@ compact_interval_hours = 24
 - Append and retrieve single entries
 - Append and retrieve ranges
 - Trim operations
-- Checksum verification
 - Metadata tracking (first/last index)
+- Multiple operations per log entry
 
 ### Integration Tests
 - Large log replay scenarios
@@ -403,32 +383,30 @@ compact_interval_hours = 24
 
 ## Open Questions
 
-1. **Batch Size**: What's the optimal batch size for append_entries operations? Trade-off between latency and throughput.
+1. **Batch Size**: What's the optimal batch size for append_entries operations? Trade-off between latency and throughput. Answer: We need this log to be highly durable so we need to avoid batching if it will increase the potential for data loss.
 
-2. **Compaction Strategy**: Should compaction be automatic (background task) or manual (admin triggered)?
+2. **Compaction Strategy**: Should compaction be automatic (background task) or manual (admin triggered)? Answer: Compaction should be automatic.
 
-3. **Checksum Algorithm**: Is CRC32 sufficient, or should we use a stronger hash like SHA-256?
+3. **Cache Size**: How should we tune redb cache size for different workloads? Auto-tuning based on available memory? Answer: We can use a simple config to control cache size. A goo default is 8 MB.
 
-4. **Cache Size**: How should we tune redb cache size for different workloads? Auto-tuning based on available memory?
+5. **Read Optimization**: Should we cache recently accessed log entries in memory? Answer: No, lets keep it simple for now.
 
-5. **Read Optimization**: Should we cache recently accessed log entries in memory?
+6. **Corruption Recovery**: Should we support automatic recovery from partial corruption, or always require snapshot install? Answer: We can keep things simple for now and rely on snapshots for recovery.
 
-6. **Corruption Recovery**: Should we support automatic recovery from partial corruption, or always require snapshot install?
+7. **Monitoring**: What metrics should we expose? Answer: We can start with basic metrics including: append latency, read latency, log size, and compaction reduction (bytes).
 
-7. **Monitoring**: What metrics should we expose? Append latency, read latency, size growth rate, compaction frequency?
+8. **Backup Strategy**: Should we support online backups of the transaction log for disaster recovery? Answer: We do not need any backup strategy for the transaction log.
 
-8. **Backup Strategy**: Should we support online backups of the transaction log for disaster recovery?
+9. **Compression**: Should we compress log entries to reduce storage? Trade-off with CPU overhead. Answer: No compression is needed at this time.
 
-9. **Compression**: Should we compress log entries to reduce storage? Trade-off with CPU overhead.
+10. **Multi-File Support**: Should we support splitting the log across multiple files for easier management? Answer: No, we can keep the log simple for now.
 
-10. **Multi-File Support**: Should we support splitting the log across multiple files for easier management?
+11. **Encryption**: Should transaction log be encrypted at rest? Key management approach? Answer: No encryption is needed at this time, we can assume the disk is sufficiently secure.
 
-11. **Encryption**: Should transaction log be encrypted at rest? Key management approach?
+12. **Snapshot Coordination**: How should we coordinate log trimming with snapshot creation to avoid trimming too aggressively? Answer: StorageRaftMember will handle this coordination by directing us to trim the log to a specific index.
 
-12. **Snapshot Coordination**: How should we coordinate log trimming with snapshot creation to avoid trimming too aggressively?
+13. **Index Gaps**: How should we handle gaps in log indices? Reject, fill with no-op entries, or allow? Answer: We should allow gaps.
 
-13. **Index Gaps**: How should we handle gaps in log indices? Reject, fill with no-op entries, or allow?
+14. **Retention Policy**: Should there be a maximum log size/age before forcing snapshot creation? Answer: Yes, this should be controlled by StorageRaftMember and be configured through a simple option in our configuration file. A good default is likely 128MB or X days, whichever comes first.
 
-14. **Retention Policy**: Should there be a maximum log size/age before forcing snapshot creation?
-
-15. **Integrity Checks**: How frequently should we run integrity checks? On startup, periodic background, or manual?
+15. **Integrity Checks**: How frequently should we run integrity checks? On startup, periodic background, or manual? Answer: We do not need to run integrity checks of the transaction log for now. We may add it in the future.
