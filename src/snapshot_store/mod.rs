@@ -48,122 +48,229 @@
 //!   └── snapshot_005678.json
 //! ```
 
+pub mod factory;
+pub mod implementation;
 pub mod types;
 
 use async_trait::async_trait;
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
-pub use types::{Config, Error, SnapshotMetadata, SnapshotStats};
+pub use factory::SnapshotStoreFactory;
+pub use implementation::SnapshotStoreImpl;
+use std::path::Path;
+pub use types::{
+    CompressionAlgorithm, Config, Error, RetentionPolicy, SnapshotInfo, SnapshotReader,
+    SnapshotStats,
+};
 
 /// SnapshotStore trait defines the interface for snapshot management.
 ///
 /// Implementations handle storage, retrieval, and lifecycle management
 /// of metadata snapshots for Raft log compaction.
+///
+/// ## Architecture: Client Pattern with Interior Mutability
+///
+/// SnapshotStore uses a client/server pattern with interior mutability:
+/// - Multiple components can hold cloned instances (cheap Arc clones)
+/// - OpenRaft can "own" an instance while other components access concurrently
+/// - Thread-safe via interior mutability (RwLock)
+/// - Read-optimized for concurrent snapshot streaming
 #[async_trait]
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 pub trait SnapshotStore: Send + Sync {
-    /// Create a new SnapshotStore.
+    /// Initialize snapshot storage directory.
     ///
-    /// # Arguments
+    /// Scans the snapshot directory on disk to rebuild the in-memory registry.
+    /// This method should be called once during component initialization.
     ///
-    /// * `config` - Configuration including snapshot directory path
+    /// # Errors
     ///
-    /// # Returns
-    ///
-    /// A new SnapshotStore instance.
-    fn new(config: Config) -> Result<Self, Error>
-    where
-        Self: Sized;
+    /// Returns an error if:
+    /// - Storage directory cannot be created or accessed
+    /// - Existing snapshots cannot be scanned or loaded
+    async fn initialize(&self) -> Result<(), Error>;
 
-    /// Ingest a metadata snapshot.
+    /// Ingest a new snapshot.
     ///
-    /// This method is called by StorageRaftMember after a snapshot has been
-    /// created. The snapshot file is copied to the snapshot directory and
-    /// metadata is recorded.
+    /// Called by StorageRaftMember after MetadataStore creates a snapshot.
+    /// The snapshot file is copied to the snapshot directory and metadata is recorded.
     ///
     /// # Arguments
     ///
-    /// * `snapshot_path` - Path to the snapshot file to ingest
-    /// * `tx_index` - Transaction log index at snapshot time
-    /// * `timestamp` - When snapshot was created
+    /// * `snapshot_id` - Sequential snapshot identifier
+    /// * `log_index` - Raft log index at snapshot time
+    /// * `log_term` - Raft term at snapshot time
+    /// * `metadata_db_path` - Path to the snapshot file to ingest
     ///
     /// # Returns
     ///
-    /// Snapshot ID for the ingested snapshot.
+    /// Snapshot information for the ingested snapshot.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - Snapshot file cannot be read
+    /// - Checksum calculation fails
     /// - Snapshot directory is full
     /// - I/O error occurs
     async fn ingest_snapshot(
         &self,
-        snapshot_path: &Path,
-        tx_index: u64,
-        timestamp: SystemTime,
-    ) -> Result<u64, Error>;
+        snapshot_id: u64,
+        log_index: u64,
+        log_term: u64,
+        metadata_db_path: &Path,
+    ) -> Result<SnapshotInfo, Error>;
 
     /// Get the latest snapshot.
     ///
     /// # Returns
     ///
-    /// Path to the latest snapshot file and its metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no snapshots exist.
-    async fn get_latest_snapshot(&self) -> Result<(PathBuf, SnapshotMetadata), Error>;
+    /// The latest snapshot information, or None if no snapshots exist.
+    async fn get_latest_snapshot(&self) -> Result<Option<SnapshotInfo>, Error>;
 
-    /// Get a specific snapshot by transaction index.
+    /// Get a specific snapshot by ID.
     ///
     /// # Arguments
     ///
-    /// * `tx_index` - Transaction log index
+    /// * `snapshot_id` - Snapshot identifier
     ///
     /// # Returns
     ///
-    /// Path to the snapshot file and its metadata.
+    /// Snapshot information.
     ///
     /// # Errors
     ///
     /// Returns an error if snapshot not found.
-    async fn get_snapshot_at_index(
-        &self,
-        tx_index: u64,
-    ) -> Result<(PathBuf, SnapshotMetadata), Error>;
+    async fn get_snapshot(&self, snapshot_id: u64) -> Result<SnapshotInfo, Error>;
+
+    /// Get snapshot at or before a specific log index.
+    ///
+    /// # Arguments
+    ///
+    /// * `log_index` - Raft log index
+    ///
+    /// # Returns
+    ///
+    /// The latest snapshot at or before the given index, or None if no such snapshot exists.
+    async fn get_snapshot_at_index(&self, log_index: u64) -> Result<Option<SnapshotInfo>, Error>;
 
     /// List all available snapshots.
     ///
     /// # Returns
     ///
-    /// Vector of snapshot metadata ordered by transaction index.
-    async fn list_snapshots(&self) -> Result<Vec<SnapshotMetadata>, Error>;
+    /// Vector of snapshot information ordered by snapshot ID.
+    async fn list_snapshots(&self) -> Result<Vec<SnapshotInfo>, Error>;
 
-    /// Prune old snapshots based on retention policy.
+    /// Open a snapshot for reading.
     ///
-    /// This method deletes snapshots that are no longer needed based on:
-    /// - Age threshold
-    /// - Minimum number of snapshots to retain
-    /// - Transaction log coverage
+    /// Returns a SnapshotReader that provides access to the snapshot's metadata database.
     ///
     /// # Arguments
     ///
-    /// * `keep_latest` - Number of latest snapshots to always keep
-    /// * `older_than` - Delete snapshots older than this time
+    /// * `snapshot_id` - Snapshot identifier
     ///
     /// # Returns
     ///
-    /// Number of snapshots pruned.
+    /// SnapshotReader for accessing snapshot data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if snapshot not found or cannot be opened.
+    async fn open_snapshot(&self, snapshot_id: u64) -> Result<SnapshotReader, Error>;
+
+    /// Stream snapshot to a remote node.
+    ///
+    /// Streams the snapshot's metadata database to the provided sink.
+    /// Used for transferring snapshots between nodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot_id` - Snapshot identifier
+    /// * `sink` - Async writer to stream snapshot data to
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Snapshot not found
+    /// - I/O error during streaming
+    async fn stream_snapshot(
+        &self,
+        snapshot_id: u64,
+        sink: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    ) -> Result<(), Error>;
+
+    /// Receive and store a snapshot from a remote node.
+    ///
+    /// Receives snapshot data from the provided source, stores it,
+    /// and updates the registry.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot_id` - Snapshot identifier
+    /// * `log_index` - Raft log index at snapshot time
+    /// * `log_term` - Raft term at snapshot time
+    /// * `source` - Async reader to receive snapshot data from
+    ///
+    /// # Returns
+    ///
+    /// Snapshot information for the received snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - I/O error during reception
+    /// - Checksum validation fails
+    async fn receive_snapshot(
+        &self,
+        snapshot_id: u64,
+        log_index: u64,
+        log_term: u64,
+        source: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    ) -> Result<SnapshotInfo, Error>;
+
+    /// Verify snapshot integrity.
+    ///
+    /// Validates the snapshot's checksum against stored metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot_id` - Snapshot identifier
+    ///
+    /// # Returns
+    ///
+    /// True if snapshot is valid, false otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if snapshot not found.
+    async fn verify_snapshot(&self, snapshot_id: u64) -> Result<bool, Error>;
+
+    /// Prune old snapshots based on retention policy.
+    ///
+    /// Automatically triggered when new snapshots are created.
+    /// Deletes snapshots that exceed retention policy while respecting minimum retention.
+    ///
+    /// # Returns
+    ///
+    /// Vector of snapshot IDs that were deleted.
     ///
     /// # Errors
     ///
     /// Returns an error if deletion fails.
-    async fn prune_snapshots(
-        &self,
-        keep_latest: usize,
-        older_than: Option<SystemTime>,
-    ) -> Result<u64, Error>;
+    async fn prune_snapshots(&self) -> Result<Vec<u64>, Error>;
+
+    /// Delete a specific snapshot.
+    ///
+    /// Removes the snapshot and all associated files.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot_id` - Snapshot identifier
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Snapshot not found
+    /// - Deletion fails
+    async fn delete_snapshot(&self, snapshot_id: u64) -> Result<(), Error>;
 
     /// Get snapshot storage statistics.
     ///

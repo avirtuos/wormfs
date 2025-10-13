@@ -1,92 +1,208 @@
 //! Common types for the SnapshotStore component.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
 /// Configuration for SnapshotStore.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Directory to store snapshots
-    pub snapshot_dir: PathBuf,
+    /// Base directory for snapshot storage
+    pub storage_dir: PathBuf,
 
-    /// Maximum number of snapshots to retain
+    /// Retention policy
+    pub retention_policy: RetentionPolicy,
+
+    /// Compression algorithm (future use)
+    pub compression: CompressionAlgorithm,
+
+    /// Chunk size for streaming snapshots
+    pub stream_chunk_size: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            storage_dir: PathBuf::from("/var/lib/wormfs/snapshots"),
+            retention_policy: RetentionPolicy::default(),
+            compression: CompressionAlgorithm::None,
+            stream_chunk_size: 64 * 1024, // 64KB
+        }
+    }
+}
+
+/// Retention policy for snapshots.
+#[derive(Debug, Clone)]
+pub struct RetentionPolicy {
+    /// Maximum number of snapshots to keep
     pub max_snapshots: usize,
 
-    /// Maximum age for snapshots before pruning
-    pub max_snapshot_age_days: u64,
+    /// Maximum age of snapshots to keep
+    pub max_age: Duration,
 
-    /// Buffer size for snapshot file operations
-    pub buffer_size: usize,
+    /// Always keep at least this many snapshots
+    pub min_snapshots: usize,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self {
+            max_snapshots: 10,
+            max_age: Duration::from_secs(30 * 24 * 60 * 60), // 30 days
+            min_snapshots: 3,
+        }
+    }
+}
+
+/// Compression algorithm for snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionAlgorithm {
+    /// No compression
+    None,
+    // Future: Gzip, Zstd, etc.
 }
 
 /// Errors that can occur during SnapshotStore operations.
 #[derive(Error, Debug)]
 pub enum Error {
-    /// No snapshots available
-    #[error("No snapshots available")]
-    NoSnapshots,
-
     /// Snapshot not found
-    #[error("Snapshot at index {0} not found")]
-    SnapshotNotFound(u64),
+    #[error("Snapshot not found: {0}")]
+    NotFound(u64),
 
-    /// Snapshot ingestion failed
-    #[error("Failed to ingest snapshot: {0}")]
-    IngestFailed(String),
+    /// Invalid snapshot
+    #[error("Invalid snapshot: {0}")]
+    Invalid(String),
 
-    /// Snapshot directory full
-    #[error("Snapshot directory full: {0}")]
-    DirectoryFull(String),
+    /// Checksum mismatch
+    #[error("Checksum mismatch")]
+    ChecksumMismatch,
 
-    /// Snapshot deletion failed
-    #[error("Failed to delete snapshot {snapshot_id}: {reason}")]
-    DeletionFailed { snapshot_id: u64, reason: String },
+    /// I/O error
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
 
-    /// Invalid snapshot file
-    #[error("Invalid snapshot file: {0}")]
-    InvalidSnapshot(String),
+    /// Registry error
+    #[error("Registry error: {0}")]
+    RegistryError(String),
+
+    /// Corruption detected
+    #[error("Corruption detected: {0}")]
+    Corruption(String),
+
+    /// Storage full
+    #[error("Storage full")]
+    StorageFull,
 
     /// Configuration error
     #[error("Configuration error: {0}")]
     ConfigError(String),
-
-    /// I/O error
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
-/// Snapshot metadata structure.
+/// Snapshot information structure.
 #[derive(Debug, Clone)]
-pub struct SnapshotMetadata {
+pub struct SnapshotInfo {
     /// Snapshot identifier
     pub snapshot_id: u64,
 
-    /// Transaction log index at snapshot time
-    pub tx_index: u64,
+    /// Log index at snapshot time
+    pub log_index: u64,
+
+    /// Log term at snapshot time
+    pub log_term: u64,
 
     /// When snapshot was created
-    pub created_at: SystemTime,
+    pub timestamp: SystemTime,
 
-    /// Size of snapshot file in bytes
-    pub size_bytes: u64,
+    /// Format version
+    pub format_version: u16,
 
-    /// Path to snapshot file
-    pub file_path: PathBuf,
+    /// Size of metadata database in bytes
+    pub metadata_db_size: u64,
+
+    /// Checksum of metadata database
+    pub metadata_db_checksum: String,
+
+    /// Compression algorithm used
+    pub compression: CompressionAlgorithm,
+
+    /// Node ID that created the snapshot
+    pub node_id: String,
+
+    /// Path to snapshot storage directory
+    pub storage_path: PathBuf,
+}
+
+impl SnapshotInfo {
+    /// Get path to metadata database file.
+    pub fn metadata_db_path(&self) -> PathBuf {
+        self.storage_path.join("metadata.db")
+    }
+
+    /// Get path to metadata JSON file.
+    pub fn metadata_json_path(&self) -> PathBuf {
+        self.storage_path.join("metadata.json")
+    }
+
+    /// Get path to checksum file.
+    pub fn checksum_path(&self) -> PathBuf {
+        self.storage_path.join("checksum.sha256")
+    }
 }
 
 /// Snapshot storage statistics.
 #[derive(Debug, Clone)]
 pub struct SnapshotStats {
     /// Total number of snapshots
-    pub snapshot_count: usize,
+    pub total_snapshots: usize,
 
     /// Total size of all snapshots in bytes
-    pub total_size_bytes: u64,
+    pub total_size: u64,
 
     /// Oldest snapshot timestamp
     pub oldest_snapshot: Option<SystemTime>,
 
     /// Newest snapshot timestamp
     pub newest_snapshot: Option<SystemTime>,
+
+    /// Disk usage in bytes
+    pub disk_usage: u64,
+}
+
+/// Snapshot reader for accessing snapshot data.
+#[derive(Debug)]
+pub struct SnapshotReader {
+    /// Snapshot ID
+    snapshot_id: u64,
+
+    /// Path to metadata database
+    metadata_path: PathBuf,
+
+    /// Snapshot information
+    snapshot_info: SnapshotInfo,
+}
+
+impl SnapshotReader {
+    /// Create a new snapshot reader.
+    pub fn new(snapshot_id: u64, metadata_path: PathBuf, snapshot_info: SnapshotInfo) -> Self {
+        Self {
+            snapshot_id,
+            metadata_path,
+            snapshot_info,
+        }
+    }
+
+    /// Get the path to the metadata database.
+    pub fn get_metadata_db_path(&self) -> &PathBuf {
+        &self.metadata_path
+    }
+
+    /// Get snapshot information.
+    pub fn get_snapshot_info(&self) -> &SnapshotInfo {
+        &self.snapshot_info
+    }
+
+    /// Get snapshot ID.
+    pub fn snapshot_id(&self) -> u64 {
+        self.snapshot_id
+    }
 }

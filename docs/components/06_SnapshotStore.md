@@ -21,9 +21,12 @@ SnapshotStore manages metadata snapshots for Raft log compaction, enabling nodes
 │                  SnapshotStore                           │
 ├─────────────────────────────────────────────────────────┤
 │                                                           │
+│  In-Memory Registry:                                     │
+│  HashMap<snapshot_id, SnapshotInfo>                      │
+│  (Rebuilt by scanning disk on startup)                   │
+│                                                           │
 │  Storage Directory:                                      │
 │  /var/lib/wormfs/snapshots/                              │
-│    ├── snapshot_registry.db (SQLite)                    │
 │    ├── snapshot_000001/                                  │
 │    │   ├── metadata.json                                │
 │    │   ├── metadata.db (SQLite snapshot)                │
@@ -43,7 +46,7 @@ SnapshotStore manages metadata snapshots for Raft log compaction, enabling nodes
 │  │  2. SnapshotStore copies MetadataStore DB        │   │
 │  │  3. Calculate checksum                           │   │
 │  │  4. Record snapshot metadata                     │   │
-│  │  5. Update registry                              │   │
+│  │  5. Update in-memory registry                    │   │
 │  │  6. Notify RaftMember of completion              │   │
 │  │  7. Prune old snapshots (if policy exceeded)     │   │
 │  └─────────────────────────────────────────────────┘   │
@@ -83,7 +86,7 @@ struct SnapshotStoreInner {
 /// Cheap-to-clone client handle
 /// Multiple components can hold cloned instances
 #[derive(Clone)]
-pub struct SnapshotStore {
+pub struct SnapshotStoreImpl {
     inner: Arc<SnapshotStoreInner>,
 }
 ```
@@ -97,10 +100,15 @@ pub struct SnapshotStore {
 ### Public API
 
 ```rust
-impl SnapshotStore {
+
+impl SnapshotStoreFactory {
+
     /// Create a new SnapshotStore
     /// Returns a cheap-to-clone client handle
-    pub fn new(config: SnapshotStoreConfig) -> Result<Self, SnapshotError>;
+    pub fn new(config: SnapshotStoreConfig) -> Result<SnapshotStoreImpl, SnapshotError>;
+}
+
+impl SnapshotStore {
     
     /// Initialize snapshot storage directory
     /// Uses interior mutability for thread-safe access
@@ -179,44 +187,7 @@ impl SnapshotReader {
 
 ### Snapshot Registry
 
-```rust
-/// SQLite database tracking all snapshots
-struct SnapshotRegistry {
-    conn: rusqlite::Connection,
-}
-
-impl SnapshotRegistry {
-    fn new(path: &Path) -> Result<Self, SnapshotError>;
-    
-    fn register_snapshot(&mut self, info: &SnapshotInfo) -> Result<(), SnapshotError>;
-    
-    fn get_snapshot(&self, snapshot_id: u64) -> Result<Option<SnapshotInfo>, SnapshotError>;
-    
-    fn get_latest_snapshot(&self) -> Result<Option<SnapshotInfo>, SnapshotError>;
-    
-    fn list_snapshots(&self) -> Result<Vec<SnapshotInfo>, SnapshotError>;
-    
-    fn delete_snapshot(&mut self, snapshot_id: u64) -> Result<(), SnapshotError>;
-}
-
-// Registry schema
-const REGISTRY_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS snapshots (
-    snapshot_id INTEGER PRIMARY KEY,
-    log_index INTEGER NOT NULL,
-    log_term INTEGER NOT NULL,
-    timestamp INTEGER NOT NULL,
-    format_version INTEGER NOT NULL,
-    metadata_db_size INTEGER NOT NULL,
-    metadata_db_checksum TEXT NOT NULL,
-    compression TEXT NOT NULL,
-    node_id TEXT NOT NULL
-);
-
-CREATE INDEX idx_snapshots_log_index ON snapshots(log_index);
-CREATE INDEX idx_snapshots_timestamp ON snapshots(timestamp);
-"#;
-```
+Since we do not plan to have many snapshots (<= 10) our Snapshot Registry can be as simple as an in-memory map that is built by scanning the snapshot storage folder on disk on start up.
 
 ### Data Structures
 
@@ -321,7 +292,6 @@ pub enum SnapshotError {
 - **StorageRaftMember**: Triggers snapshot creation and retrieval
 
 ### External Dependencies
-- `rusqlite`: Snapshot registry database
 - `tokio::fs`: Async file I/O
 - `sha2`: Checksum calculation
 - `serde_json`: Metadata serialization
@@ -395,32 +365,28 @@ compression = "none"
 
 ## Open Questions
 
-1. **Snapshot Compression**: Should we implement compression in the initial version? Trade-off between storage space and CPU/time.
+1. **Snapshot Compression**: Should we implement compression in the initial version? Trade-off between storage space and CPU/time. Answer: No, we do not need compression for now.
 
-2. **Incremental Snapshots**: Should we support incremental snapshots (only changed data), or always full snapshots?
+2. **Incremental Snapshots**: Should we support incremental snapshots (only changed data), or always full snapshots? Answer: No, we will only support full snapshots for now.
 
-3. **Streaming Protocol**: Should we use custom protocol or leverage existing transfer mechanisms (rsync, HTTP range requests)?
+3. **Streaming Protocol**: Should we use custom protocol or leverage existing transfer mechanisms (rsync, HTTP range requests)? Answer: data transfer of Snapshots is handled by StorageEndpoint via gRPC. StorageEndpoint will call into SnapshotStore for a stream it can read to forward to the gRPC client requesting the snapshot data.
 
-4. **Snapshot Validation**: How frequently should we validate snapshot integrity? On creation only, or periodic background checks?
+4. **Snapshot Validation**: How frequently should we validate snapshot integrity? On creation only, or periodic background checks? Answer: Only on creation.
 
-5. **Concurrent Access**: Should multiple nodes be able to read the same snapshot simultaneously via network streaming?
+5. **Concurrent Access**: Should multiple nodes be able to read the same snapshot simultaneously via network streaming? Answer: Yes, and I suspect this will work naturally without any special handling.
 
-6. **Snapshot Encryption**: Should snapshots be encrypted at rest? If yes, what key management approach?
+6. **Snapshot Encryption**: Should snapshots be encrypted at rest? If yes, what key management approach? Answer: No, for now we can assume the storage is secure without application level assistance.
 
-7. **Snapshot Deduplication**: Should we deduplicate identical snapshots across nodes to save space?
+7. **Snapshot Deduplication**: Should we deduplicate identical snapshots across nodes to save space? Answer: No, for now we can keep it simple.
 
-8. **Registry Replication**: Should the snapshot registry be replicated via Raft, or maintained independently on each node?
+8. **Registry Replication**: Should the snapshot registry be replicated via Raft, or maintained independently on each node? Answer: No, the snapshot registry is local only with implicit replication via Raft since Raft is triggering the snapshots and the snapshot clean ups.
 
-9. **Snapshot Naming**: Should we use sequential IDs, timestamps, or log indices as primary identifiers?
+9. **Snapshot Naming**: Should we use sequential IDs, timestamps, or log indices as primary identifiers? Answer: We should use sequential IDs that contain the date, hour, minute, plus monotonically increasing number. We can store more details in the snapshot metadata file that accompanies the snapshot itself.
 
-10. **Cleanup Strategy**: Should snapshot cleanup be automatic (background task) or manual (admin triggered)?
+10. **Cleanup Strategy**: Should snapshot cleanup be automatic (background task) or manual (admin triggered)? Answer: Snapshot clean up should be automatic and be triggered every time a new snapshot is created.
 
-11. **Snapshot Format**: Should we support exporting snapshots to portable formats (SQL dump, JSON) for debugging?
+11. **Snapshot Format**: Should we support exporting snapshots to portable formats (SQL dump, JSON) for debugging? Answer: No, we do not need to support portable formats.
 
-12. **Multi-Disk Support**: Should snapshots be stored across multiple disks for redundancy?
+12. **Multi-Disk Support**: Should snapshots be stored across multiple disks for redundancy? Answer: No, snapshot redundancy is not a requirements.
 
-13. **Snapshot Metadata**: What additional metadata should we track? (cluster size, node count, storage policy distribution?)
-
-14. **Transfer Optimization**: Should we support parallel chunk transfers for faster snapshot distribution?
-
-15. **Snapshot Versioning**: How should we handle schema changes between snapshot versions? Automatic migration or manual intervention?
+13. **Snapshot Versioning**: How should we handle schema changes between snapshot versions? Automatic migration or manual intervention? Answer: For now we can ignore this.
