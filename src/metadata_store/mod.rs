@@ -102,8 +102,8 @@
 //! - **Lock Extension**: Clients can extend lease duration
 
 pub mod factory;
-pub mod types;
 mod implementation;
+pub mod types;
 
 use async_trait::async_trait;
 use std::path::Path;
@@ -215,8 +215,7 @@ pub trait MetadataStore: Send + Sync + Clone {
     async fn get_chunk(&self, chunk_id: ChunkId) -> Result<ChunkRecord, Error>;
 
     /// Get all chunks for a stripe.
-    async fn get_stripe_chunks(&self, stripe_id: StripeId)
-        -> Result<Vec<ChunkRecord>, Error>;
+    async fn get_stripe_chunks(&self, stripe_id: StripeId) -> Result<Vec<ChunkRecord>, Error>;
 
     /// Update chunk location.
     async fn update_chunk_location(

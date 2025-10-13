@@ -13,6 +13,7 @@ use std::time::SystemTime;
 ///
 /// This structure is wrapped in Arc to allow cheap cloning.
 struct MetadataStoreInner {
+    #[allow(dead_code)]
     config: Config,
     // TODO: Add actual implementation fields:
     // - write_conn: Mutex<rusqlite::Connection>
@@ -26,6 +27,7 @@ struct MetadataStoreInner {
 /// pattern for optimal concurrent performance.
 #[derive(Clone)]
 pub struct MetadataStoreImpl {
+    #[allow(dead_code)]
     inner: Arc<MetadataStoreInner>,
 }
 
