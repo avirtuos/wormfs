@@ -1,73 +1,68 @@
 //! Common types for the TransactionLogStore component.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 use thiserror::Error;
 
 /// Configuration for TransactionLogStore.
 #[derive(Debug, Clone)]
-pub struct Config {
+pub struct TransactionLogConfig {
     /// Path to the transaction log database file
-    pub log_path: PathBuf,
+    pub db_path: PathBuf,
 
-    /// Enable fsync for durability
-    pub enable_fsync: bool,
+    /// Cache size for redb (in MB)
+    pub cache_size_mb: usize,
 
-    /// Cache size for redb (in bytes)
-    pub cache_size_bytes: u64,
+    /// Compact database when log grows beyond this size (in MB)
+    pub compact_threshold_mb: usize,
 
-    /// Maximum log size before rotation (in bytes)
-    pub max_log_size_bytes: u64,
+    /// Maximum log size before snapshot is recommended (in MB)
+    pub max_log_size_mb: usize,
+
+    /// Maximum log age before snapshot is recommended (in days)
+    pub max_log_age_days: u32,
+}
+
+impl Default for TransactionLogConfig {
+    fn default() -> Self {
+        Self {
+            db_path: PathBuf::from("/var/lib/wormfs/transaction_log.redb"),
+            cache_size_mb: 8,
+            compact_threshold_mb: 100,
+            max_log_size_mb: 128,
+            max_log_age_days: 7,
+        }
+    }
 }
 
 /// Errors that can occur during TransactionLogStore operations.
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum LogError {
+    /// Database error
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+
     /// Log entry not found
-    #[error("Log entry {0} not found")]
+    #[error("Entry not found at index {0}")]
     EntryNotFound(u64),
 
-    /// Log is empty
-    #[error("Log is empty")]
-    LogEmpty,
+    /// Invalid log index
+    #[error("Invalid log index: {0}")]
+    InvalidIndex(u64),
 
-    /// Write operation failed
-    #[error("Failed to write log entry: {0}")]
-    WriteFailed(String),
-
-    /// Read operation failed
-    #[error("Failed to read log entry: {0}")]
-    ReadFailed(String),
-
-    /// Fsync operation failed
-    #[error("Fsync failed: {0}")]
-    FsyncFailed(String),
-
-    /// Disk full
-    #[error("Disk full: cannot write log entry")]
-    DiskFull,
-
-    /// Trim operation failed
-    #[error("Failed to trim log: {0}")]
-    TrimFailed(String),
-
-    /// Checksum mismatch
-    #[error("Checksum mismatch for log entry {0}")]
-    ChecksumMismatch(u64),
-
-    /// Database corruption
-    #[error("Database corruption detected: {0}")]
-    Corruption(String),
-
-    /// Configuration error
-    #[error("Configuration error: {0}")]
-    ConfigError(String),
+    /// Serialization error
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
 
     /// I/O error
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 /// Log entry structure.
+///
+/// Note: This stores serialized MetadataOperation(s) as bytes.
+/// The actual MetadataOperation enum is defined in storage_raft_member::types.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     /// Log entry index
@@ -76,25 +71,41 @@ pub struct LogEntry {
     /// Raft term
     pub term: u64,
 
-    /// Entry data (serialized operation)
-    pub data: Vec<u8>,
+    /// Serialized operations (Vec<MetadataOperation>)
+    pub operations: Vec<u8>,
 
-    /// Entry checksum
-    pub checksum: u32,
+    /// Timestamp when entry was created
+    pub timestamp: SystemTime,
 }
 
 /// Transaction log statistics.
 #[derive(Debug, Clone)]
 pub struct LogStats {
     /// First log index
-    pub first_index: u64,
+    pub first_index: Option<u64>,
 
     /// Last log index
-    pub last_index: u64,
+    pub last_index: Option<u64>,
 
     /// Total number of entries
     pub entry_count: u64,
 
     /// Total size of log in bytes
-    pub total_size_bytes: u64,
+    pub db_size_bytes: u64,
+
+    /// Last compaction timestamp
+    pub last_compaction: Option<SystemTime>,
+}
+
+/// Integrity report for log verification.
+#[derive(Debug, Clone)]
+pub struct IntegrityReport {
+    /// Total number of entries checked
+    pub total_entries: u64,
+
+    /// Missing indices detected
+    pub missing_indices: Vec<u64>,
+
+    /// Whether the log is valid
+    pub is_valid: bool,
 }

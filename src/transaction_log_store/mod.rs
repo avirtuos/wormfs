@@ -51,10 +51,12 @@
 //!   └── log.redb  (redb database file)
 //! ```
 
+pub mod factory;
 pub mod types;
 
 use async_trait::async_trait;
-pub use types::{Config, Error, LogEntry, LogStats};
+pub use factory::TransactionLogStoreFactory;
+pub use types::{IntegrityReport, LogEntry, LogError, LogStats, TransactionLogConfig};
 
 /// TransactionLogStore trait defines the interface for Raft log persistence.
 ///
@@ -71,7 +73,7 @@ pub trait TransactionLogStore: Send + Sync {
     /// # Returns
     ///
     /// A new TransactionLogStore instance.
-    fn new(config: Config) -> Result<Self, Error>
+    fn new(config: TransactionLogConfig) -> Result<Self, LogError>
     where
         Self: Sized;
 
@@ -95,7 +97,7 @@ pub trait TransactionLogStore: Send + Sync {
     /// - Write fails
     /// - Fsync fails
     /// - Disk is full
-    async fn append(&self, term: u64, data: Vec<u8>) -> Result<u64, Error>;
+    async fn append(&self, term: u64, data: Vec<u8>) -> Result<u64, LogError>;
 
     /// Append multiple log entries atomically.
     ///
@@ -112,7 +114,7 @@ pub trait TransactionLogStore: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if any write fails (all entries are rolled back).
-    async fn append_batch(&self, entries: Vec<(u64, Vec<u8>)>) -> Result<u64, Error>;
+    async fn append_batch(&self, entries: Vec<(u64, Vec<u8>)>) -> Result<u64, LogError>;
 
     /// Get a log entry by index.
     ///
@@ -127,7 +129,7 @@ pub trait TransactionLogStore: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if entry not found or read fails.
-    async fn get_entry(&self, index: u64) -> Result<LogEntry, Error>;
+    async fn get_entry(&self, index: u64) -> Result<LogEntry, LogError>;
 
     /// Get a range of log entries.
     ///
@@ -143,7 +145,11 @@ pub trait TransactionLogStore: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if read fails.
-    async fn get_entries(&self, start_index: u64, end_index: u64) -> Result<Vec<LogEntry>, Error>;
+    async fn get_entries(
+        &self,
+        start_index: u64,
+        end_index: u64,
+    ) -> Result<Vec<LogEntry>, LogError>;
 
     /// Get the last log entry.
     ///
@@ -154,7 +160,7 @@ pub trait TransactionLogStore: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if log is empty.
-    async fn get_last_entry(&self) -> Result<LogEntry, Error>;
+    async fn get_last_entry(&self) -> Result<LogEntry, LogError>;
 
     /// Get the index of the last log entry.
     ///
@@ -186,7 +192,7 @@ pub trait TransactionLogStore: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if trim fails.
-    async fn trim(&self, up_to_index: u64) -> Result<u64, Error>;
+    async fn trim(&self, up_to_index: u64) -> Result<u64, LogError>;
 
     /// Get transaction log statistics.
     ///
