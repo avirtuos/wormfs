@@ -533,3 +533,31 @@ impl ChunkLocation {
         }
     }
 }
+
+// =============================================================================
+// Chunk Caching Types
+// =============================================================================
+
+/// Entry in the chunk cache.
+#[derive(Debug, Clone)]
+pub struct ChunkCacheEntry {
+    /// Chunk identifier
+    pub chunk_id: ChunkId,
+    /// Cached chunk data (encoded, not decoded)
+    pub data: Vec<u8>,
+    /// When the chunk was cached
+    pub cached_at: std::time::Instant,
+    /// Size of the chunk in bytes
+    pub size: usize,
+}
+
+/// Prefetch policy for stripe chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefetchPolicy {
+    /// No prefetching
+    None,
+    /// Prefetch next stripe's chunks
+    NextStripe,
+    /// Prefetch N stripes ahead
+    Lookahead { count: usize },
+}

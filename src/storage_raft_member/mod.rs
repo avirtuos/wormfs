@@ -86,7 +86,9 @@ pub mod types;
 
 use async_trait::async_trait;
 use std::net::SocketAddr;
-pub use types::{Config, Error, NodeId, RaftMetrics, RaftRole};
+pub use types::{
+    Config, Error, MetadataChangeEvent, MetadataChangeType, NodeId, RaftMetrics, RaftRole,
+};
 
 /// StorageRaftMember trait defines the interface for Raft consensus operations.
 ///
@@ -234,4 +236,27 @@ pub trait StorageRaftMember: Send + Sync {
     ///
     /// Returns an error if this node is not currently the leader.
     async fn step_down(&self) -> Result<(), Error>;
+
+    /// Subscribe to metadata change events.
+    ///
+    /// Returns a receiver channel for metadata change notifications.
+    /// Events are sent when metadata operations are committed through Raft.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Optional list of event types to subscribe to. If None, all events are received.
+    ///
+    /// # Returns
+    ///
+    /// An unbounded receiver channel for `MetadataChangeEvent`.
+    ///
+    /// # Notes
+    ///
+    /// - Events are sent asynchronously and do not block Raft operations
+    /// - Slow subscribers may experience channel capacity issues
+    /// - At-most-once delivery semantics (events may be missed if channel is full)
+    fn subscribe_metadata_changes(
+        &self,
+        filter: Option<Vec<MetadataChangeType>>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<MetadataChangeEvent>;
 }

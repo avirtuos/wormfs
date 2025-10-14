@@ -95,8 +95,12 @@
 pub mod types;
 
 use async_trait::async_trait;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
-pub use types::{ClientId, Config, DirEntry, Error, FileAttr, FileId, FileType, LockType};
+pub use types::{
+    CachedInode, ClientId, Config, DirEntry, Error, FileAttr, FileHandle, FileId, FileType,
+    InodeCache, LockType, OpenFile, OpenFlags, SetAttr,
+};
 
 /// FileSystemService trait defines the FUSE filesystem API.
 ///
@@ -408,4 +412,238 @@ pub trait FileSystemService: Send + Sync {
         new_expiry: SystemTime,
         client_id: ClientId,
     ) -> Result<(), Error>;
+}
+
+// =============================================================================
+// Concrete Implementation with Client Pattern
+// =============================================================================
+
+/// Inner state for FileSystemService with interior mutability.
+struct FileSystemServiceInner {
+    /// File handle map
+    file_handles: RwLock<std::collections::HashMap<FileHandle, OpenFile>>,
+    /// Inode cache for fast lookups
+    inode_cache: RwLock<InodeCache>,
+    /// Configuration
+    config: Config,
+}
+
+/// Concrete FileSystemService implementation with client pattern.
+///
+/// This struct is cloneable and lightweight, wrapping shared state in Arc.
+/// Multiple FUSE handler threads can hold clones that share the same underlying state.
+#[derive(Clone)]
+pub struct FileSystemServiceImpl {
+    /// Shared inner state
+    inner: Arc<FileSystemServiceInner>,
+    /// Reference to StorageRaftMember for metadata writes
+    raft_member: Arc<dyn crate::storage_raft_member::StorageRaftMember<
+        Operation = crate::storage_raft_member::types::WormFsOperation,
+        OperationResult = (),
+    >>,
+    /// Reference to MetadataStore for metadata reads
+    metadata_store: Arc<dyn crate::metadata_store::MetadataStore>,
+    /// Reference to FileStore for chunk I/O
+    file_store: Arc<dyn crate::file_store::FileStore>,
+}
+
+impl FileSystemServiceImpl {
+    /// Create a new FileSystemService instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration
+    /// * `raft_member` - StorageRaftMember for metadata writes
+    /// * `metadata_store` - MetadataStore for metadata reads
+    /// * `file_store` - FileStore for chunk operations
+    pub fn new(
+        config: Config,
+        raft_member: Arc<dyn crate::storage_raft_member::StorageRaftMember<
+            Operation = crate::storage_raft_member::types::WormFsOperation,
+            OperationResult = (),
+        >>,
+        metadata_store: Arc<dyn crate::metadata_store::MetadataStore>,
+        file_store: Arc<dyn crate::file_store::FileStore>,
+    ) -> Self {
+        let inner = Arc::new(FileSystemServiceInner {
+            file_handles: RwLock::new(std::collections::HashMap::new()),
+            inode_cache: RwLock::new(InodeCache::new()),
+            config,
+        });
+
+        Self {
+            inner,
+            raft_member,
+            metadata_store,
+            file_store,
+        }
+    }
+
+    // === Internal Stripe Operations (stubs) ===
+
+    /// Read one or more stripes and extract requested byte range.
+    ///
+    /// This is a stub - implementation will handle over-scanning.
+    async fn read_stripes(
+        &self,
+        _file_id: FileId,
+        _offset: u64,
+        _length: usize,
+    ) -> Result<Vec<u8>, Error> {
+        unimplemented!("read_stripes will be implemented")
+    }
+
+    /// Write data across one or more stripes (read-modify-write for partial).
+    ///
+    /// This is a stub - implementation will handle buffering and RMW.
+    async fn write_stripes(
+        &self,
+        _file_id: FileId,
+        _offset: u64,
+        _data: &[u8],
+    ) -> Result<(), Error> {
+        unimplemented!("write_stripes will be implemented")
+    }
+
+    /// Acquire file lock (delegated to RaftMember).
+    ///
+    /// This is a stub - implementation will delegate to StorageRaftMember.
+    async fn acquire_lock_internal(
+        &self,
+        _file_id: FileId,
+        _lock_type: LockType,
+    ) -> Result<u64, Error> {
+        unimplemented!("acquire_lock_internal will be implemented")
+    }
+
+    /// Release file lock.
+    ///
+    /// This is a stub - implementation will delegate to StorageRaftMember.
+    async fn release_lock_internal(&self, _lock_id: u64) -> Result<(), Error> {
+        unimplemented!("release_lock_internal will be implemented")
+    }
+}
+
+// Stub implementation of the trait - all methods return unimplemented!()
+#[async_trait]
+impl FileSystemService for FileSystemServiceImpl {
+    fn new(config: Config) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        // This simplified constructor is not suitable for the client pattern.
+        // Users should use FileSystemServiceImpl::new() with dependencies instead.
+        unimplemented!("Use FileSystemServiceImpl::new() with dependencies")
+    }
+
+    async fn create(
+        &self,
+        _parent: u64,
+        _name: &str,
+        _mode: u32,
+        _uid: u32,
+        _gid: u32,
+        _client_id: ClientId,
+    ) -> Result<FileAttr, Error> {
+        unimplemented!("create will be implemented")
+    }
+
+    async fn open(
+        &self,
+        _inode: u64,
+        _flags: u32,
+        _client_id: ClientId,
+    ) -> Result<(u64, FileAttr), Error> {
+        unimplemented!("open will be implemented")
+    }
+
+    async fn read(
+        &self,
+        _inode: u64,
+        _offset: u64,
+        _size: u32,
+        _client_id: ClientId,
+    ) -> Result<Vec<u8>, Error> {
+        unimplemented!("read will be implemented")
+    }
+
+    async fn write(
+        &self,
+        _inode: u64,
+        _offset: u64,
+        _data: Vec<u8>,
+        _client_id: ClientId,
+    ) -> Result<u32, Error> {
+        unimplemented!("write will be implemented")
+    }
+
+    async fn unlink(&self, _parent: u64, _name: &str, _client_id: ClientId) -> Result<(), Error> {
+        unimplemented!("unlink will be implemented")
+    }
+
+    async fn mkdir(
+        &self,
+        _parent: u64,
+        _name: &str,
+        _mode: u32,
+        _uid: u32,
+        _gid: u32,
+        _client_id: ClientId,
+    ) -> Result<FileAttr, Error> {
+        unimplemented!("mkdir will be implemented")
+    }
+
+    async fn rmdir(&self, _parent: u64, _name: &str, _client_id: ClientId) -> Result<(), Error> {
+        unimplemented!("rmdir will be implemented")
+    }
+
+    async fn readdir(
+        &self,
+        _inode: u64,
+        _offset: i64,
+        _client_id: ClientId,
+    ) -> Result<Vec<DirEntry>, Error> {
+        unimplemented!("readdir will be implemented")
+    }
+
+    async fn getattr(&self, _inode: u64) -> Result<FileAttr, Error> {
+        unimplemented!("getattr will be implemented")
+    }
+
+    async fn setattr(
+        &self,
+        _inode: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<SystemTime>,
+        _mtime: Option<SystemTime>,
+        _client_id: ClientId,
+    ) -> Result<FileAttr, Error> {
+        unimplemented!("setattr will be implemented")
+    }
+
+    async fn acquire_lock(
+        &self,
+        _inode: u64,
+        _lock_type: LockType,
+        _expires_at: SystemTime,
+        _client_id: ClientId,
+    ) -> Result<u64, Error> {
+        unimplemented!("acquire_lock will be implemented")
+    }
+
+    async fn release_lock(&self, _inode: u64, _client_id: ClientId) -> Result<(), Error> {
+        unimplemented!("release_lock will be implemented")
+    }
+
+    async fn extend_lock(
+        &self,
+        _inode: u64,
+        _new_expiry: SystemTime,
+        _client_id: ClientId,
+    ) -> Result<(), Error> {
+        unimplemented!("extend_lock will be implemented")
+    }
 }

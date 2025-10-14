@@ -1,15 +1,49 @@
 //! Common types for the FileSystemService component.
 
-use std::time::SystemTime;
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::time::{Duration, Instant, SystemTime};
 use thiserror::Error;
 
 // Re-export common ID types
 pub use crate::file_store::types::FileId;
 pub use crate::metadata_store::types::ClientId;
 
+/// File handle opaque to FUSE.
+pub type FileHandle = u64;
+
 /// Configuration for FileSystemService.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Enable read lock enforcement
+    pub enable_read_locks: bool,
+
+    /// Lock timeout duration
+    pub lock_timeout: Duration,
+
+    /// Lock extend interval for long-lived operations
+    pub lock_extend_interval: Duration,
+
+    /// Maximum file handles per client
+    pub max_file_handles: usize,
+
+    /// Inode cache size (number of entries)
+    pub inode_cache_size: usize,
+
+    /// Inode cache TTL
+    pub inode_cache_ttl: Duration,
+
+    /// Read buffer size (for stripe assembly)
+    pub read_buffer_size: usize,
+
+    /// Write buffer size
+    pub write_buffer_size: usize,
+
+    /// Enable write-through (no buffering)
+    pub write_through: bool,
+
     /// Default file permissions
     pub default_file_mode: u32,
 
@@ -19,11 +53,28 @@ pub struct Config {
     /// Maximum file size
     pub max_file_size: u64,
 
-    /// Default lock timeout
-    pub default_lock_timeout_secs: u64,
-
     /// Enable extended attributes
     pub enable_xattr: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            enable_read_locks: true,
+            lock_timeout: Duration::from_secs(10),
+            lock_extend_interval: Duration::from_secs(5),
+            max_file_handles: 10_000,
+            inode_cache_size: 10_000,
+            inode_cache_ttl: Duration::from_secs(60),
+            read_buffer_size: 10 * 1024 * 1024,  // 10MB
+            write_buffer_size: 10 * 1024 * 1024, // 10MB
+            write_through: true,
+            default_file_mode: 0o644,
+            default_dir_mode: 0o755,
+            max_file_size: u64::MAX,
+            enable_xattr: true,
+        }
+    }
 }
 
 /// Errors that can occur during FileSystemService operations.
@@ -76,6 +127,37 @@ pub enum Error {
     /// Data operation failed
     #[error("Data operation failed: {0}")]
     DataFailed(String),
+
+    /// Invalid file handle
+    #[error("Invalid file handle: {0}")]
+    InvalidFileHandle(FileHandle),
+
+    /// I/O error
+    #[error("I/O error: {0}")]
+    IoError(String),
+}
+
+impl Error {
+    /// Convert error to FUSE errno for kernel interface.
+    ///
+    /// This is a stub implementation - actual mapping will be done during implementation.
+    pub fn to_errno(&self) -> i32 {
+        match self {
+            Self::NotFound(_) => libc::ENOENT,
+            Self::PermissionDenied(_) => libc::EACCES,
+            Self::AlreadyExists(_) => libc::EEXIST,
+            Self::NotADirectory(_) => libc::ENOTDIR,
+            Self::IsADirectory(_) => libc::EISDIR,
+            Self::DirectoryNotEmpty(_) => libc::ENOTEMPTY,
+            Self::InvalidFileHandle(_) => libc::EBADF,
+            Self::LockConflict { .. } => libc::ENOLCK,
+            Self::LockNotHeld { .. } => libc::ENOLCK,
+            Self::NoSpace => libc::ENOSPC,
+            Self::InvalidArgument(_) => libc::EINVAL,
+            Self::Io(_) | Self::IoError(_) => libc::EIO,
+            Self::MetadataFailed(_) | Self::DataFailed(_) => libc::EIO,
+        }
+    }
 }
 
 /// Type of file lock.
@@ -160,4 +242,90 @@ pub enum FileType {
     CharDevice,
     /// Socket
     Socket,
+}
+
+/// Represents an open file with its associated state.
+#[derive(Debug)]
+pub struct OpenFile {
+    /// File identifier
+    pub file_id: FileId,
+    /// Inode number
+    pub inode: u64,
+    /// Lock ID if file is locked
+    pub lock_id: Option<u64>,
+    /// Open flags
+    pub flags: OpenFlags,
+    /// Current file offset (for operations that need it)
+    pub offset: AtomicU64,
+}
+
+/// Open flags parsed from FUSE.
+#[derive(Debug, Clone, Copy)]
+pub struct OpenFlags {
+    pub read: bool,
+    pub write: bool,
+    pub append: bool,
+    pub truncate: bool,
+    pub create: bool,
+    pub exclusive: bool,
+}
+
+impl OpenFlags {
+    /// Create OpenFlags from FUSE flags.
+    ///
+    /// This is a stub implementation - actual parsing will be done during implementation.
+    pub fn from_fuse(_flags: u32) -> Self {
+        unimplemented!("OpenFlags::from_fuse will be implemented")
+    }
+
+    /// Determine the lock type needed for these flags.
+    pub fn lock_type(&self) -> LockType {
+        if self.write {
+            LockType::Write
+        } else {
+            LockType::Read
+        }
+    }
+}
+
+/// Attributes to set via setattr operation.
+#[derive(Debug, Default)]
+pub struct SetAttr {
+    pub mode: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub size: Option<u64>,
+    pub atime: Option<SystemTime>,
+    pub mtime: Option<SystemTime>,
+}
+
+/// Inode cache for fast path lookups.
+#[derive(Debug)]
+pub struct InodeCache {
+    pub entries: HashMap<u64, CachedInode>,
+    pub path_to_inode: HashMap<PathBuf, u64>,
+}
+
+impl InodeCache {
+    /// Create a new empty inode cache.
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            path_to_inode: HashMap::new(),
+        }
+    }
+}
+
+impl Default for InodeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Cached inode entry.
+#[derive(Debug, Clone)]
+pub struct CachedInode {
+    pub file_id: FileId,
+    pub attrs: FileAttr,
+    pub inserted_at: Instant,
 }
