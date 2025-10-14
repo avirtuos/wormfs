@@ -255,7 +255,7 @@ pub trait StorageRaftMember: Send + Sync {
     /// - Events are sent asynchronously and do not block Raft operations
     /// - Slow subscribers may experience channel capacity issues
     /// - At-most-once delivery semantics (events may be missed if channel is full)
-    fn subscribe_metadata_changes(
+    async fn subscribe_metadata_changes(
         &self,
         filter: Option<Vec<MetadataChangeType>>,
     ) -> tokio::sync::mpsc::UnboundedReceiver<MetadataChangeEvent>;
@@ -319,7 +319,7 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         unimplemented!("StorageRaftMemberImpl::step_down will be implemented")
     }
 
-    fn subscribe_metadata_changes(
+    async fn subscribe_metadata_changes(
         &self,
         _filter: Option<Vec<MetadataChangeType>>,
     ) -> tokio::sync::mpsc::UnboundedReceiver<MetadataChangeEvent> {

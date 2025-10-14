@@ -278,9 +278,14 @@ pub enum CommandOperation {
 // Metadata Change Subscription Types
 // ============================================================================
 
+pub struct MetadataChangeEvent {
+    pub committed_at: SystemTime,
+    pub log_index: u64,
+    pub changes: Vec<MetadataChange>,
+}
 /// Events that can be emitted when metadata changes are committed.
 #[derive(Debug, Clone)]
-pub enum MetadataChangeEvent {
+pub enum MetadataChange {
     /// A new file was created
     FileCreated {
         file_id: FileId,

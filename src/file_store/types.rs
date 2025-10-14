@@ -477,7 +477,7 @@ pub struct StripeMetadata {
     pub checksum: u32,
 
     /// Locations of all chunks in this stripe
-    pub chunks: Vec<ChunkLocation>,
+    pub chunks: Vec<ChunkMetadata>,
 }
 
 impl StripeMetadata {
@@ -488,7 +488,7 @@ impl StripeMetadata {
         offset: u64,
         size: u64,
         checksum: u32,
-        chunks: Vec<ChunkLocation>,
+        chunks: Vec<ChunkMetadata>,
     ) -> Self {
         Self {
             stripe_id,
@@ -508,7 +508,7 @@ impl StripeMetadata {
 
 /// Location of a chunk within the storage cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkLocation {
+pub struct ChunkMetadata {
     /// Unique identifier for this chunk
     pub chunk_id: ChunkId,
 
@@ -522,7 +522,7 @@ pub struct ChunkLocation {
     pub chunk_index: u8,
 }
 
-impl ChunkLocation {
+impl ChunkMetadata {
     /// Create a new chunk location.
     pub fn new(chunk_id: ChunkId, node_id: NodeId, disk_id: DiskId, chunk_index: u8) -> Self {
         Self {

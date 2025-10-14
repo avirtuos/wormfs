@@ -76,7 +76,7 @@ pub mod types;
 use async_trait::async_trait;
 use std::path::PathBuf;
 pub use types::{
-    ChunkCacheEntry, ChunkData, ChunkHeader, ChunkId, ChunkLocation, CompressionAlgorithm, Config,
+    ChunkCacheEntry, ChunkData, ChunkHeader, ChunkId, ChunkMetadata, CompressionAlgorithm, Config,
     DiskId, DiskStats, ErasureAlgorithm, Error, FileId, NodeId, PrefetchPolicy, PrepareVote,
     RebuildResult, StoragePolicy, StripeId, StripeMetadata, TxId, VerificationResult,
 };

@@ -92,6 +92,7 @@
 //! - **Lock leases**: Time-bound with automatic expiration
 //! - **Lock extension**: Clients can extend before expiration
 
+pub mod factory;
 pub mod types;
 
 use async_trait::async_trait;
@@ -106,42 +107,12 @@ pub use types::{
 ///
 /// Implementations provide filesystem operations that interact with
 /// the underlying distributed storage system.
+///
+/// Note: Construction is handled by FileSystemServiceFactory to allow
+/// for clean dependency injection and testing.
 #[async_trait]
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 pub trait FileSystemService: Send + Sync {
-    /// StorageRaftMember implementation type
-    type RaftMember: crate::storage_raft_member::StorageRaftMember<
-        Operation = crate::storage_raft_member::types::WormFsOperation,
-        OperationResult = (),
-    >;
-
-    /// MetadataStore implementation type
-    type MetadataStore: crate::metadata_store::MetadataStore;
-
-    /// FileStore implementation type
-    type FileStore: crate::file_store::FileStore;
-
-    /// Create a new FileSystemService.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Configuration
-    /// * `raft_member` - StorageRaftMember for metadata writes
-    /// * `metadata_store` - MetadataStore for metadata reads
-    /// * `file_store` - FileStore for chunk operations
-    ///
-    /// # Returns
-    ///
-    /// A new FileSystemService instance.
-    fn new(
-        config: Config,
-        raft_member: Arc<Self::RaftMember>,
-        metadata_store: Self::MetadataStore,
-        file_store: Arc<Self::FileStore>,
-    ) -> Result<Self, Error>
-    where
-        Self: Sized;
-
     // ===== File Operations =====
 
     /// Create a new file.
