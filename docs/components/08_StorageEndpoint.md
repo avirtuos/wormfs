@@ -2,7 +2,7 @@
 
 ## Purpose & Responsibilities
 
-StorageEndpoint is the gRPC API server that exposes the storage node's functionality to clients and other storage nodes. Its responsibilities include:
+StorageEndpoint is the gRPC API server that exposes the storage node's functionality as well as its storage data plane to clients and other storage nodes. Its responsibilities include:
 
 - Providing FUSE filesystem operations API for client nodes
 - Exposing chunk read/write APIs for inter-node communication
@@ -10,8 +10,9 @@ StorageEndpoint is the gRPC API server that exposes the storage node's functiona
 - Exposing transaction log APIs for Raft replication
 - Handling administrative operations (cluster management, monitoring)
 - Managing client authentication and authorization
-- Implementing request rate limiting and backpressure
+- Implementing request rate limiting and back-pressure
 - Routing requests to appropriate internal components
+- Support Stripe upload and download from FUSE clients
 
 ## Architecture & Design
 
@@ -97,9 +98,7 @@ Check if Local Node is Raft Leader
 │   → Coordinate 2PC                  │
 │                                     │
 │ If Follower:                        │
-│   → Forward to Raft Leader          │
-│   → Wait for response               │
-│   → Return result to client         │
+│   → Redirect caller to leader       │
 └─────────────────────────────────────┘
 ```
 
@@ -149,28 +148,6 @@ FileStore          SnapshotStore      TxLogStore     StorageNode
 (read_chunk)       (stream_snapshot)  (get_entries)  (status)
      ↓                  ↓                  ↓                ↓
 Response           Response           Response         Response
-```
-
-#### Transaction Prepare/Commit/Abort (Inter-Node)
-
-```
-Raft Leader → Follower (via Raft consensus)
-     ↓
-TransactionService.PrepareChunk()
-     ↓
-FileStore.prepare_chunk()
-     ↓
-Return PrepareVote
-
-     OR
-
-Raft Leader → Follower (via Raft apply)
-     ↓
-TransactionService.CommitChunk() / AbortChunk()
-     ↓
-FileStore.commit_chunk() / abort_chunk()
-     ↓
-Return Success
 ```
 
 ## Interfaces
@@ -621,19 +598,40 @@ listen_address = "0.0.0.0:7000"
 max_concurrent_requests = 1000
 request_timeout_secs = 30
 
-# TLS configuration
+# TLS PSK Authentication
 enable_tls = true
-tls_cert_path = "/etc/wormfs/server.crt"
-tls_key_path = "/etc/wormfs/server.key"
-
-# Authentication
 enable_auth = true
-auth_psk_path = "/etc/wormfs/client_keys/"
+identities_dir = "/etc/wormfs/identities/"
+node_identity = "storage_node"  # Which PSK file in identities_dir to use for this node
 
-# Rate limiting
+# Rate limiting (two-level: per-client identity and overall)
 [endpoint.rate_limit]
-requests_per_second = 1000
+per_client_requests_per_second = 100
+overall_requests_per_second = 1000
 burst_size = 100
+```
+
+### PSK Identity System
+
+WormFS uses TLS 1.3 with Pre-Shared Keys (PSK) for authentication:
+
+- **Storage Nodes**: All storage nodes share the same PSK file (e.g., `storage_node`)
+- **Clients**: Each client has its own PSK file for individual identity and permissions
+- **PSK Storage**: All PSK files are stored in the `identities/` directory
+- **File Format**: Each file contains one PSK, the filename represents the identity
+- **Node Configuration**: The node's config specifies which PSK file to use for its identity
+
+Example directory structure:
+```
+/etc/wormfs/identities/
+  ├── storage_node  (shared by all storage nodes)
+  ├── plex          (client identity for Plex)
+  └── backup_client (client identity for backup jobs)
+```
+
+A PSK utility binary can be used to generate new PSK files:
+```bash
+wormfs-keygen --output /etc/wormfs/identities/new_client
 ```
 
 ## Error Handling
@@ -678,104 +676,36 @@ burst_size = 100
 - Snapshot transfer throughput
 - Request latency under load
 
-### Transaction Protocol Integration
 
-The StorageEndpoint integrates with the two-phase commit protocol for write operations:
+## Design Decisions
 
-#### Leader Request Handling
+Based on the requirements and constraints, the following key design decisions have been made:
 
-When a write request arrives at the Raft leader node:
+### Transaction Protocol
+- **Write Redirection**: Follower nodes reject write requests and redirect clients to the leader
+- **Read Availability**: Reads can be performed against any node (with potential staleness)
+- **Leader Discovery**: Clients use the `list_leaders()` API to discover current leader(s)
+- **No Result Caching**: Transaction results are not cached on followers
 
-1. **Parse Request**: Extract file_id, stripe_id, data, and storage policy
-2. **Apply Erasure Coding**: Encode data into k+m shards using FileStore encoder
-3. **Compute Chunk Assignments**: Select target nodes/disks for each chunk
-4. **Create Transaction**: Generate unique tx_id
-5. **Propose via Raft**: Submit `TransactionPrepare` operation containing:
-   - Transaction ID
-   - Metadata changes (file size updates, etc.)
-   - Complete chunk assignments with encoded data
-6. **Wait for 2PC Completion**: Block until transaction commits or aborts
-7. **Return Result**: Send chunk locations to client
+### Authentication & Security  
+- **TLS PSK**: Use TLS 1.3 with Pre-Shared Keys for authentication
+- **Identity System**: Filename-based identity mapping in the `identities/` directory
+- **Shared Node PSK**: All storage nodes share the same PSK file
+- **Individual Client PSKs**: Each client has a unique PSK for identification
 
-#### Follower Request Handling
+### Rate Limiting
+- **Two-Level Limiting**: Per-client identity rate limits and overall node rate limits
+- **Configuration**: Separately configurable limits for flexibility
 
-When a write request arrives at a Raft follower node:
+### Features
+- **Streaming**: Use streaming for large file reads
+- **Health Checks**: Implement gRPC health check protocol
+- **No Compression**: gRPC compression disabled initially
+- **No Caching**: No metadata response caching
+- **No Tracing**: OpenTelemetry tracing deferred to future versions
+- **No Batching**: No batch operation support initially
 
-1. **Detect Non-Leader**: Check Raft leader status
-2. **Get Leader Address**: Query current leader from Raft state
-3. **Forward Request**: Create gRPC client and forward entire request to leader
-4. **Wait for Response**: Block until leader completes transaction
-5. **Return Result**: Forward leader's response to client
-
-**Note**: This design ensures all write coordination happens at the Raft leader, simplifying the transaction protocol and avoiding distributed coordination overhead.
-
-#### Inter-Node Transaction RPC
-
-For transaction prepare/commit/abort operations between nodes:
-
-```rust
-// Note: These are internal operations triggered by Raft, not exposed in public gRPC API
-
-// Called by Raft leader on followers during PREPARE phase
-async fn prepare_chunk_internal(tx_id: TxId, chunk_data: ChunkData) -> PrepareVote {
-    self.file_store.prepare_chunk(tx_id, chunk_data).await
-}
-
-// Called by Raft apply on all nodes during COMMIT phase
-async fn commit_chunk_internal(tx_id: TxId, chunk_id: ChunkId) {
-    self.file_store.commit_chunk(tx_id, chunk_id).await
-}
-
-// Called by Raft apply on all nodes during ABORT phase
-async fn abort_chunk_internal(tx_id: TxId, chunk_id: ChunkId) {
-    self.file_store.abort_chunk(tx_id, chunk_id).await
-}
-```
-
-These operations are triggered internally by the Raft state machine, not exposed as public gRPC endpoints.
-
-## Open Questions
-
-### Transaction Protocol Questions
-
-1. **Leader Forwarding**: Should follower nodes always forward writes to leader, or should they be able to proxy the request while streaming data directly to chunk storage nodes?
-
-2. **Client Retries**: If a client's request to a follower fails during forwarding, should the client automatically retry with the leader address, or always retry with the same node?
-
-3. **Forwarding Timeout**: What timeout should we use for forwarding requests to the leader? Should it be longer than normal request timeout?
-
-4. **Leader Discovery**: How should clients discover the current leader? Via DNS, via follower redirect, or via explicit leader query API?
-
-5. **Transaction Result Caching**: Should we cache recent transaction results on followers to handle duplicate requests during network partitions?
-
-### General Questions
-
-6. **Authentication**: Should we use TLS 1.3 with PSK, mutual TLS, or both?
-
-2. **Rate Limiting**: Should rate limits be per-client, per-endpoint, or global?
-
-3. **Streaming**: Should large file reads/writes use streaming or chunked transfers?
-
-4. **Compression**: Should we enable gRPC compression for all responses or selectively?
-
-5. **Health Checks**: Should we implement gRPC health check protocol for load balancers?
-
-6. **Metadata Caching**: Should we cache metadata responses to reduce Raft load?
-
-7. **Request Tracing**: Should we implement OpenTelemetry for distributed tracing?
-
-8. **Retries**: Should the server implement automatic retries for transient failures?
-
-9. **Backpressure**: How should we handle backpressure when components are overloaded?
-
-10. **API Versioning**: How should we version the gRPC API for compatibility?
-
-11. **Batch Operations**: Should we support batching multiple operations in a single request?
-
-12. **WebSocket Support**: Should we support WebSocket for real-time updates to clients?
-
-13. **REST API**: Should we provide a REST API alongside gRPC for debugging/admin tools?
-
-14. **Circuit Breakers**: Should we implement circuit breakers for downstream components?
-
-15. **Request Prioritization**: Should we prioritize certain request types (admin, metadata, data)?
+### Backpressure
+- **Component Overload**: Return ResourceExhausted status with retry-after headers
+- **Queue Management**: Reject requests when internal queues are full
+- **Connection Limits**: Enforce max_concurrent_requests limit

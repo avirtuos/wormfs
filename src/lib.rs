@@ -40,6 +40,7 @@ pub mod storage_node;
 pub mod storage_raft_member;
 pub mod storage_watchdog;
 pub mod transaction_log_store;
+pub mod worm_validator;
 
 // Re-export commonly used traits
 pub use file_store::FileStore;
@@ -53,6 +54,7 @@ pub use storage_node::StorageNode;
 pub use storage_raft_member::StorageRaftMember;
 pub use storage_watchdog::StorageWatchdog;
 pub use transaction_log_store::TransactionLogStore;
+pub use worm_validator::WormValidator;
 
 // Test utilities module (only available with test-utils feature or during testing)
 #[cfg(any(test, feature = "test-utils"))]

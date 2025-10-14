@@ -61,7 +61,7 @@ pub mod types;
 
 use async_trait::async_trait;
 use std::net::SocketAddr;
-pub use types::{Config, Error};
+pub use types::{EndpointConfig, EndpointError};
 
 /// StorageEndpoint trait defines the interface for the gRPC API server.
 ///
@@ -78,7 +78,7 @@ pub trait StorageEndpoint: Send + Sync {
     /// # Returns
     ///
     /// A new StorageEndpoint instance ready to serve requests.
-    fn new(config: Config) -> Result<Self, Error>
+    fn new(config: EndpointConfig) -> Result<Self, EndpointError>
     where
         Self: Sized;
 
@@ -92,7 +92,7 @@ pub trait StorageEndpoint: Send + Sync {
     /// - Server cannot bind to the listen address
     /// - TLS configuration is invalid
     /// - Server fails during operation
-    async fn serve(&self) -> Result<(), Error>;
+    async fn serve(&self) -> Result<(), EndpointError>;
 
     /// Gracefully shutdown the gRPC server.
     ///
@@ -106,7 +106,7 @@ pub trait StorageEndpoint: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if shutdown cannot complete within the timeout.
-    async fn shutdown(&self, timeout: std::time::Duration) -> Result<(), Error>;
+    async fn shutdown(&self, timeout: std::time::Duration) -> Result<(), EndpointError>;
 
     /// Get the address the server is listening on.
     ///
@@ -166,7 +166,7 @@ pub trait StorageEndpoint: Send + Sync {
         &self,
         chunk_data: crate::file_store::ChunkData,
         token: &str,
-    ) -> Result<crate::file_store::ChunkId, Error>;
+    ) -> Result<crate::file_store::ChunkId, EndpointError>;
 
     /// Generate a time-limited upload token for a chunk (leader only).
     ///
