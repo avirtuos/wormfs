@@ -6,6 +6,14 @@ authors = ["WormFS Contributors"]
 description = "A distributed, erasure-coded filesystem with strong consistency"
 license = "MIT OR Apache-2.0"
 
+[[bin]]
+name = "wormfs-validator"
+path = "src/bin/worm_validator.rs"
+
+[[bin]]
+name = "wormfs-storage-node"
+path = "src/bin/storage_node.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
@@ -53,6 +61,14 @@ prost = { version = "0.12", optional = true }
 
 # Mocking (test utilities)
 mockall = { version = "0.12", optional = true }
+
+# CLI (for binaries)
+clap = { version = "4.5", features = ["derive"] }
+tracing-subscriber = "0.3"
+
+# Testing utilities (for validator)
+tempfile = "3.8"
+serde_json = "1.0"
 
 [build-dependencies]
 tonic-build = "0.11"
