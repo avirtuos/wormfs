@@ -70,6 +70,10 @@ tracing-subscriber = "0.3"
 tempfile = "3.8"
 serde_json = "1.0"
 
+# Watchdog utilities
+ext-sort = "0.1"
+priority-queue = "2.1"
+
 [build-dependencies]
 tonic-build = "0.11"
 prost-build = "0.12"

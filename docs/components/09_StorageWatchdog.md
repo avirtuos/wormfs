@@ -25,8 +25,8 @@ StorageWatchdog is the background monitoring and repair component that continuou
 │  Background Tasks (run on Raft leader only):             │
 │                                                           │
 │  ┌─────────────────────────────────────────────────┐   │
-│  │  Shallow Check Task                              │   │
-│  │  (every 5 minutes)                               │   │
+│  │  Shallow Check Task                             │   │
+│  │  (every 1 week)                                 │   │
 │  │  ┌──────────────────────────────────────────┐   │   │
 │  │  │  1. Get all files from MetadataStore     │   │   │
 │  │  │  2. For each file's stripes:             │   │   │
@@ -36,10 +36,10 @@ StorageWatchdog is the background monitoring and repair component that continuou
 │  │  │  3. Submit repair requests for failures  │   │   │
 │  │  └──────────────────────────────────────────┘   │   │
 │  └─────────────────────────────────────────────────┘   │
-│                                                           │
+│                                                        │
 │  ┌─────────────────────────────────────────────────┐   │
-│  │  Deep Check Task                                 │   │
-│  │  (every 24 hours)                                │   │
+│  │  Deep Check Task                                │   │
+│  │  (every 1 month)                                │   │
 │  │  ┌──────────────────────────────────────────┐   │   │
 │  │  │  1. Get all files from MetadataStore     │   │   │
 │  │  │  2. For each file's stripes:             │   │   │
@@ -73,18 +73,17 @@ StorageWatchdog is the background monitoring and repair component that continuou
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Leader Election Coordination
+### WatchDog Coordination
 
 ```
-Node becomes Raft leader:
-  1. Start watchdog background tasks
-  2. Load verification state from MetadataStore
-  3. Resume shallow/deep checks from last position
+All Nodes:
+  1. Perform periodic "check" for locally stored chunks
+  1a. Notify Leader of missing/damaged chunks
   
-Node loses leadership:
-  1. Cancel all watchdog tasks
-  2. Save verification state to MetadataStore
-  3. Clear repair queue (new leader will rebuild)
+Leader Node:
+  1. Perform periodic "deep check" for all Stripe/Chunks across all nodes.
+  2. Queue repair of missing / damaged Stripes & Chunks
+  3. The Watchdog on the Leader is also continuously processing the repair queue.
 ```
 
 ## Interfaces
@@ -308,13 +307,13 @@ pub enum WatchdogError {
 ```toml
 [watchdog]
 # Check intervals
-shallow_check_interval_mins = 5
-deep_check_interval_hours = 24
+shallow_check_interval_mins = 10080
+deep_check_interval_hours = 43200
 
 # Repair settings
 max_concurrent_repairs = 5
 max_repair_retries = 3
-repair_retry_delay_secs = 60
+repair_retry_delay_secs = 10
 
 # Performance tuning
 shallow_check_batch_size = 100  # Files per batch
@@ -324,7 +323,7 @@ deep_check_batch_size = 10      # Files per batch (more expensive)
 ## Error Handling
 
 ### Check Failures
-- Node unreachable: Mark chunks as potentially missing, retry later
+- Node unreachable: Mark chunks as offline, retry later. Offline is less severe than missing or corrupt as offline can be temporary where are missing or corrupt are likely terminal.
 - Timeout: Skip for now, retry in next cycle
 - Network errors: Log and continue with next check
 - All failures tracked in metrics
@@ -365,32 +364,20 @@ deep_check_batch_size = 10      # Files per batch (more expensive)
 
 ## Open Questions
 
-1. **Check Frequency**: Are the default intervals (5 min shallow, 24hr deep) appropriate for different deployment sizes?
+1. **Repair Throttling**: Should we limit repair bandwidth to avoid impacting user operations? Answer: We don't need to worry about this for now but we should leave ourselves extension points where we can add this logic later so that repairs and checks can yield to client traffic so we don't starve either class of work.
 
-2. **Batch Size**: What's the optimal batch size for checks to balance thoroughness with system load?
+6. **State Persistence**: Should verification state be persisted in MetadataStore or separate file? Answer: For each Stripe, we should store the time and result of the last shallow and deep verification. This should be stored in a dedicated redb instances. Since our list of stripes to check is driven by the list of Stripes in the MetadataStore, any Stripe that is present in this redb but hasn't had its last check updated in more than 3 intervals is likely no longer stored in the system and can safely be purged from redb by the watchdog.
 
-3. **Repair Throttling**: Should we limit repair bandwidth to avoid impacting user operations?
+6. **Alert Thresholds**: At what point should we alert operators vs. auto-repair? Answer: We should always auto-repair but we should be publishing appropriate metrics about the size of the repair queue, repair rate, etc so that an alerting mechanism can be built using the MetricService.
 
-4. **Priority Tuning**: Are the priority levels appropriate? Should we have more granular priorities?
+7. **Concurrency**: Should shallow and deep checks run concurrently or sequentially? Answer: They can run concurrently for now.
 
-5. **State Persistence**: Should verification state be persisted in MetadataStore or separate file?
+8. **Verification Window**: Should we support configurable time windows for checks (e.g., only during off-peak hours)? Answer: not right now, this might be a future enhancement though.
 
-6. **Alert Thresholds**: At what point should we alert operators vs. auto-repair?
+9. **Chunk Age**: Should we prioritize checking older chunks that haven't been verified recently? Answer: Yes, we should use the ext-sort crate to perform the sort of Stripes using the last check times from redb. ext-sort allows us to spill the sort to disk while using a configurable amount of memory (e.g. 10MB default limit). Then we can prioritize Stripes that haven't been checked recently.
 
-7. **Concurrency**: Should shallow and deep checks run concurrently or sequentially?
+10. **Repair Coordination**: Should multiple leaders coordinate repairs across the cluster, or rely on Raft leader only? Answer: Any node may request a Stripe repair be scheduled by the Leader but only the watchdog on the Leader will actually action repairs.
 
-8. **Verification Window**: Should we support configurable time windows for checks (e.g., only during off-peak hours)?
+11. **Metrics Export**: What specific metrics should be exposed for monitoring? Answer: We can start with basic metrics like check rate, repair rate, failure rate, and repair queue size.
 
-9. **Chunk Age**: Should we prioritize checking older chunks that haven't been verified recently?
-
-10. **Repair Coordination**: Should multiple leaders coordinate repairs across the cluster, or rely on Raft leader only?
-
-11. **Incremental Checks**: Should we checkpoint progress more frequently to handle leader changes gracefully?
-
-12. **Metrics Export**: What specific metrics should be exposed for monitoring (check rate, repair rate, failure rate)?
-
-13. **Manual Intervention**: What APIs should be exposed for operators to manually trigger checks/repairs?
-
-14. **Repair Verification**: After repair, should we immediately re-verify the stripe or wait for next cycle?
-
-15. **Resource Limits**: Should we implement CPU/IO throttling for watchdog operations to prevent impact on user workloads?
+12. **Manual Intervention**: What APIs should be exposed for operators to manually trigger checks/repairs? Answer: A simple API that allows admins to request deep check loop be kicked off should be sufficient. The API can be exposed via StorageEndpoint. We do not need an API for triggering the shallow check for now.

@@ -1,5 +1,6 @@
 //! Common types for the StorageWatchdog component.
 
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
@@ -10,47 +11,80 @@ pub use crate::metadata_store::types::DiskId;
 /// Configuration for StorageWatchdog.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Interval between shallow checks
+    /// Interval between shallow checks (default: 1 week)
     pub shallow_check_interval: Duration,
 
-    /// Interval between deep checks
+    /// Interval between deep checks (default: 1 month)
     pub deep_check_interval: Duration,
 
-    /// Maximum concurrent checks
-    pub max_concurrent_checks: usize,
+    /// Maximum concurrent repair operations
+    pub max_concurrent_repairs: usize,
 
-    /// Check timeout duration
-    pub check_timeout: Duration,
+    /// Maximum retries for failed repairs
+    pub max_repair_retries: usize,
 
-    /// Enable automatic repair of detected issues
-    pub enable_auto_repair: bool,
+    /// Delay between repair retries
+    pub repair_retry_delay: Duration,
 
-    /// Rate limit for checks (checks per second)
-    pub max_checks_per_second: f64,
+    /// Batch size for shallow checks
+    pub shallow_check_batch_size: usize,
+
+    /// Batch size for deep checks
+    pub deep_check_batch_size: usize,
+
+    /// Path to verification state database
+    pub verification_state_path: std::path::PathBuf,
+
+    /// Memory limit for ext-sort operations (default: 10MB)
+    pub sort_memory_limit: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            shallow_check_interval: Duration::from_secs(7 * 24 * 60 * 60), // 1 week
+            deep_check_interval: Duration::from_secs(30 * 24 * 60 * 60),   // 1 month
+            max_concurrent_repairs: 5,
+            max_repair_retries: 3,
+            repair_retry_delay: Duration::from_secs(10),
+            shallow_check_batch_size: 100,
+            deep_check_batch_size: 10,
+            verification_state_path: std::path::PathBuf::from("verification_state.redb"),
+            sort_memory_limit: 10 * 1024 * 1024, // 10MB
+        }
+    }
 }
 
 /// Errors that can occur during StorageWatchdog operations.
 #[derive(Error, Debug)]
 pub enum Error {
-    /// Check operation failed
-    #[error("Check failed: {0}")]
-    CheckFailed(String),
-
     /// Watchdog not running
     #[error("Watchdog is not running")]
     NotRunning,
 
-    /// Watchdog already running
-    #[error("Watchdog is already running")]
-    AlreadyRunning,
+    /// Not the Raft leader
+    #[error("Not the leader")]
+    NotLeader,
 
-    /// Task start failed
-    #[error("Failed to start watchdog task: {0}")]
-    TaskStartFailed(String),
+    /// Repair operation failed
+    #[error("Repair failed: {0}")]
+    RepairFailed(String),
 
-    /// Task stop failed
-    #[error("Failed to stop watchdog task: {0}")]
-    TaskStopFailed(String),
+    /// Metadata error
+    #[error("Metadata error: {0}")]
+    MetadataError(String),
+
+    /// FileStore error
+    #[error("FileStore error: {0}")]
+    FileStoreError(String),
+
+    /// Network error
+    #[error("Network error: {0}")]
+    NetworkError(String),
+
+    /// Database error
+    #[error("Database error: {0}")]
+    DatabaseError(String),
 
     /// Configuration error
     #[error("Configuration error: {0}")]
@@ -74,7 +108,7 @@ pub struct CheckResult {
     pub issues_found: u64,
 
     /// List of consistency events (issues)
-    pub events: Vec<ConsistencyEventType>,
+    pub events: Vec<ConsistencyEvent>,
 
     /// Time taken to perform check
     pub duration: Duration,
@@ -82,27 +116,118 @@ pub struct CheckResult {
 
 /// Types of consistency events.
 #[derive(Debug, Clone)]
-pub enum ConsistencyEventType {
-    /// Chunk file not found
-    ChunkMissing { chunk_id: ChunkId, node_id: NodeId },
-
-    /// Chunk checksum mismatch
-    ChunkCorrupt { chunk_id: ChunkId, node_id: NodeId },
-
-    /// Storage node unreachable
-    NodeUnreachable { node_id: NodeId },
-
-    /// Disk I/O errors
-    DiskFailed { disk_id: DiskId, node_id: NodeId },
-
-    /// Stripe cannot be reconstructed
-    StripeUnrecoverable {
-        stripe_id: StripeId,
+pub enum ConsistencyEvent {
+    /// Chunk is missing (shallow check)
+    ChunkMissing {
         file_id: FileId,
+        stripe_id: StripeId,
+        chunk_id: ChunkId,
+        node_id: NodeId,
+    },
+
+    /// Chunk is corrupt (deep check)
+    ChunkCorrupt {
+        file_id: FileId,
+        stripe_id: StripeId,
+        chunk_id: ChunkId,
+        node_id: NodeId,
+        reason: String,
+    },
+
+    /// Stripe checksum mismatch (deep check)
+    StripeCorrupt {
+        file_id: FileId,
+        stripe_id: StripeId,
+        reason: String,
+    },
+
+    /// Node unreachable
+    NodeUnreachable {
+        node_id: NodeId,
+        affected_chunks: Vec<ChunkId>,
+    },
+
+    /// Disk failure
+    DiskFailure {
+        node_id: NodeId,
+        disk_id: DiskId,
+        affected_chunks: Vec<ChunkId>,
     },
 }
 
-/// Watchdog statistics.
+/// Repair request for a stripe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairRequest {
+    pub file_id: FileId,
+    pub stripe_id: StripeId,
+    pub priority: RepairPriority,
+    pub created_at: SystemTime,
+    pub retry_count: u32,
+}
+
+/// Priority levels for repair operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepairPriority {
+    Critical = 0, // Multiple chunks missing
+    High = 1,     // Single chunk missing
+    Medium = 2,   // Corrupt chunk
+    Low = 3,      // Periodic verification
+}
+
+/// Watchdog status information.
+#[derive(Debug, Clone)]
+pub struct WatchdogStatus {
+    pub is_running: bool,
+    pub is_leader: bool,
+    pub shallow_checks_completed: u64,
+    pub deep_checks_completed: u64,
+    pub repairs_completed: u64,
+    pub repairs_failed: u64,
+    pub pending_repairs: usize,
+    pub last_shallow_check: Option<SystemTime>,
+    pub last_deep_check: Option<SystemTime>,
+}
+
+/// Verification progress tracking.
+#[derive(Debug, Clone)]
+pub struct VerificationProgress {
+    pub shallow_check_progress: CheckProgress,
+    pub deep_check_progress: CheckProgress,
+}
+
+/// Progress information for a check cycle.
+#[derive(Debug, Clone)]
+pub struct CheckProgress {
+    pub total_files: u64,
+    pub checked_files: u64,
+    pub total_stripes: u64,
+    pub checked_stripes: u64,
+    pub issues_found: u64,
+    pub started_at: Option<SystemTime>,
+    pub estimated_completion: Option<SystemTime>,
+}
+
+/// Internal state for a repair operation.
+#[derive(Debug, Clone)]
+pub(crate) struct RepairStatus {
+    pub request: RepairRequest,
+    pub started_at: SystemTime,
+    pub retry_count: u32,
+}
+
+/// Internal watchdog state.
+#[derive(Debug)]
+pub(crate) struct WatchdogState {
+    pub is_running: bool,
+    pub shallow_check_position: Option<FileId>,
+    pub deep_check_position: Option<FileId>,
+    pub last_shallow_check: Option<SystemTime>,
+    pub last_deep_check: Option<SystemTime>,
+    pub active_repairs: HashMap<StripeId, RepairStatus>,
+}
+
+/// Watchdog statistics (deprecated - use WatchdogStatus instead).
+#[deprecated(note = "Use WatchdogStatus instead")]
 #[derive(Debug, Clone)]
 pub struct WatchdogStats {
     /// Total shallow checks performed

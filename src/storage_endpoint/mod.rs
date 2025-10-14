@@ -206,4 +206,25 @@ pub trait StorageEndpoint: Send + Sync {
     ///
     /// `true` if the token is valid for the specified chunk, `false` otherwise.
     fn validate_upload_token(&self, chunk_id: crate::file_store::ChunkId, token: &str) -> bool;
+
+    // ===== Administrative Operations =====
+
+    /// Trigger a manual deep verification check (admin only).
+    ///
+    /// This method allows administrators to manually trigger a deep integrity
+    /// check cycle. This is useful for:
+    /// - Testing the verification system
+    /// - Verifying data after maintenance operations
+    /// - Responding to suspected data integrity issues
+    ///
+    /// The request is only processed on the Raft leader node. Follower nodes
+    /// will reject this request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Node is not the Raft leader
+    /// - A deep check is already in progress
+    /// - Watchdog is not running
+    async fn trigger_deep_check(&self) -> Result<(), EndpointError>;
 }
