@@ -59,129 +59,109 @@ pub mod types;
 
 use async_trait::async_trait;
 pub use types::{
-    CheckResult, ChunkId, Config, ConsistencyEventType, Error, FileId, NodeId, StripeId,
-    WatchdogStats,
+    CheckProgress, CheckResult, ChunkId, Config, ConsistencyEvent, Error, FileId, NodeId,
+    RepairPriority, RepairRequest, StripeId, VerificationProgress, WatchdogStats, WatchdogStatus,
 };
 
 /// StorageWatchdog trait defines the interface for data integrity monitoring.
 ///
-/// Implementations continuously verify chunk availability and integrity
-/// across the storage cluster.
+/// The watchdog runs only on the Raft leader node and performs:
+/// - Shallow checks: Fast verification of chunk presence
+/// - Deep checks: Thorough validation including checksums and stripe reconstruction
+/// - Repair coordination: Managing the repair queue and executing repairs
 #[async_trait]
-#[cfg_attr(any(test, feature = "test-utils"), mockall::automock(
-    type ConsistencyEvent = ();
-))]
 pub trait StorageWatchdog: Send + Sync {
-    /// Event type for consistency issues
-    type ConsistencyEvent: Send + Sync;
-
     /// Create a new StorageWatchdog.
     ///
     /// # Arguments
     ///
-    /// * `config` - Configuration including check intervals and thresholds
+    /// * `config` - Configuration including check intervals and repair settings
     ///
     /// # Returns
     ///
     /// A new StorageWatchdog instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if initialization fails.
     fn new(config: Config) -> Result<Self, Error>
     where
         Self: Sized;
 
-    /// Start the watchdog monitoring loops.
+    /// Start watchdog tasks.
     ///
-    /// This method starts background tasks that continuously check data integrity.
-    /// It returns immediately after starting the tasks.
+    /// This method should be called when the node becomes the Raft leader.
+    /// It starts background tasks for:
+    /// - Shallow check loop
+    /// - Deep check loop
+    /// - Repair queue processing
     ///
     /// # Errors
     ///
     /// Returns an error if tasks cannot be started.
     async fn start(&self) -> Result<(), Error>;
 
-    /// Stop the watchdog monitoring loops.
+    /// Stop watchdog tasks.
     ///
-    /// This method gracefully stops all background tasks and waits for
-    /// in-flight checks to complete.
+    /// This method should be called when the node loses Raft leadership.
+    /// It gracefully stops all background tasks and saves state.
     ///
     /// # Errors
     ///
     /// Returns an error if tasks cannot be stopped cleanly.
     async fn stop(&self) -> Result<(), Error>;
 
-    /// Pause watchdog operations.
+    /// Submit a consistency event for processing.
     ///
-    /// Temporarily pauses all checks without stopping background tasks.
-    /// Useful during high load or maintenance windows.
-    async fn pause(&self) -> Result<(), Error>;
-
-    /// Resume watchdog operations after pause.
-    async fn resume(&self) -> Result<(), Error>;
-
-    /// Check if watchdog is currently running.
-    ///
-    /// # Returns
-    ///
-    /// `true` if watchdog is active, `false` otherwise.
-    fn is_running(&self) -> bool;
-
-    /// Perform a shallow check on a specific file.
+    /// This method can be called by any node to report issues detected locally.
+    /// The event will be queued for repair if the node is the leader.
     ///
     /// # Arguments
     ///
-    /// * `file_id` - File to check
-    ///
-    /// # Returns
-    ///
-    /// Check result indicating any issues found.
+    /// * `event` - The consistency event to process
     ///
     /// # Errors
     ///
-    /// Returns an error if check cannot be performed.
-    async fn shallow_check_file(&self, file_id: FileId) -> Result<CheckResult, Error>;
+    /// Returns an error if the event cannot be processed.
+    async fn submit_event(&self, event: ConsistencyEvent) -> Result<(), Error>;
 
-    /// Perform a deep check on a specific file.
-    ///
-    /// # Arguments
-    ///
-    /// * `file_id` - File to check
+    /// Get watchdog status and metrics.
     ///
     /// # Returns
     ///
-    /// Check result indicating any issues found.
+    /// Current status including check progress and repair queue size.
+    fn get_status(&self) -> WatchdogStatus;
+
+    /// Manually trigger a shallow check cycle.
+    ///
+    /// This forces a shallow check to start immediately rather than waiting
+    /// for the scheduled interval. Useful for testing or manual verification.
     ///
     /// # Errors
     ///
-    /// Returns an error if check cannot be performed.
-    async fn deep_check_file(&self, file_id: FileId) -> Result<CheckResult, Error>;
+    /// Returns an error if:
+    /// - Node is not the leader
+    /// - Check cannot be started
+    async fn trigger_shallow_check(&self) -> Result<(), Error>;
 
-    /// Perform a shallow check on a specific stripe.
+    /// Manually trigger a deep check cycle.
     ///
-    /// # Arguments
+    /// This forces a deep check to start immediately rather than waiting
+    /// for the scheduled interval. Useful for testing or manual verification.
     ///
-    /// * `stripe_id` - Stripe to check
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Node is not the leader
+    /// - Check cannot be started
+    async fn trigger_deep_check(&self) -> Result<(), Error>;
+
+    /// Get verification progress for ongoing checks.
     ///
     /// # Returns
     ///
-    /// Check result indicating any issues found.
-    async fn shallow_check_stripe(&self, stripe_id: StripeId) -> Result<CheckResult, Error>;
-
-    /// Perform a deep check on a specific stripe.
-    ///
-    /// # Arguments
-    ///
-    /// * `stripe_id` - Stripe to check
-    ///
-    /// # Returns
-    ///
-    /// Check result indicating any issues found.
-    async fn deep_check_stripe(&self, stripe_id: StripeId) -> Result<CheckResult, Error>;
-
-    /// Get watchdog statistics.
-    ///
-    /// # Returns
-    ///
-    /// Statistics about checks performed and issues found.
-    fn get_stats(&self) -> WatchdogStats;
+    /// Progress information for both shallow and deep check cycles.
+    fn get_verification_progress(&self) -> VerificationProgress;
 
     /// Cleanup orphaned staged chunks (background task).
     ///
