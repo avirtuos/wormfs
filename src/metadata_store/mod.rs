@@ -102,8 +102,11 @@
 //! - **Lock Extension**: Clients can extend lease duration
 
 pub mod factory;
-mod implementation;
+pub mod implementation;
 pub mod types;
+
+// Re-export the concrete implementation
+pub use implementation::MetadataStoreImpl;
 
 use async_trait::async_trait;
 use std::path::Path;

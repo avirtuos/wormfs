@@ -374,3 +374,10 @@ pub trait FileStore: Send + Sync {
         policy: PrefetchPolicy,
     ) -> Result<(), Error>;
 }
+
+// =============================================================================
+// Concrete Implementation (Placeholder)
+// =============================================================================
+
+// NOTE: FileStoreImpl will be added when we implement the FileStore component.
+// For now, the trait definition provides the interface contract.

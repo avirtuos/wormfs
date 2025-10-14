@@ -1,7 +1,6 @@
 //! Common types for the FileSystemService component.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant, SystemTime};
@@ -99,6 +98,10 @@ pub enum Error {
     /// Not a directory
     #[error("Not a directory: inode {0}")]
     NotADirectory(u64),
+
+    /// Is a directory
+    #[error("Is a directory: inode {0}")]
+    IsADirectory(u64),
 
     /// Lock conflict
     #[error("Lock conflict: cannot acquire {lock_type:?} lock on inode {inode}")]

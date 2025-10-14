@@ -109,16 +109,36 @@ pub use types::{
 #[async_trait]
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 pub trait FileSystemService: Send + Sync {
+    /// StorageRaftMember implementation type
+    type RaftMember: crate::storage_raft_member::StorageRaftMember<
+        Operation = crate::storage_raft_member::types::WormFsOperation,
+        OperationResult = (),
+    >;
+
+    /// MetadataStore implementation type
+    type MetadataStore: crate::metadata_store::MetadataStore;
+
+    /// FileStore implementation type
+    type FileStore: crate::file_store::FileStore;
+
     /// Create a new FileSystemService.
     ///
     /// # Arguments
     ///
     /// * `config` - Configuration
+    /// * `raft_member` - StorageRaftMember for metadata writes
+    /// * `metadata_store` - MetadataStore for metadata reads
+    /// * `file_store` - FileStore for chunk operations
     ///
     /// # Returns
     ///
     /// A new FileSystemService instance.
-    fn new(config: Config) -> Result<Self, Error>
+    fn new(
+        config: Config,
+        raft_member: Arc<Self::RaftMember>,
+        metadata_store: Self::MetadataStore,
+        file_store: Arc<Self::FileStore>,
+    ) -> Result<Self, Error>
     where
         Self: Sized;
 
@@ -432,57 +452,25 @@ struct FileSystemServiceInner {
 ///
 /// This struct is cloneable and lightweight, wrapping shared state in Arc.
 /// Multiple FUSE handler threads can hold clones that share the same underlying state.
-#[derive(Clone)]
-pub struct FileSystemServiceImpl {
+///
+/// The concrete types for StorageRaftMember, MetadataStore, and FileStore are determined
+/// at compile time via the trait's associated types.
+///
+/// NOTE: This is a placeholder type definition. The actual implementation will be provided
+/// when the concrete types for all dependencies are available.
+#[allow(dead_code)]
+struct FileSystemServiceImpl {
     /// Shared inner state
     inner: Arc<FileSystemServiceInner>,
     /// Reference to StorageRaftMember for metadata writes
-    raft_member: Arc<
-        dyn crate::storage_raft_member::StorageRaftMember<
-            Operation = crate::storage_raft_member::types::WormFsOperation,
-            OperationResult = (),
-        >,
-    >,
+    raft_member: Arc<crate::storage_raft_member::StorageRaftMemberImpl>,
     /// Reference to MetadataStore for metadata reads
-    metadata_store: Arc<dyn crate::metadata_store::MetadataStore>,
-    /// Reference to FileStore for chunk I/O
-    file_store: Arc<dyn crate::file_store::FileStore>,
+    metadata_store: crate::metadata_store::MetadataStoreImpl,
+    /// Reference to FileStore for chunk I/O - will be added when FileStoreImpl exists
+    _file_store: (),
 }
 
 impl FileSystemServiceImpl {
-    /// Create a new FileSystemService instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Configuration
-    /// * `raft_member` - StorageRaftMember for metadata writes
-    /// * `metadata_store` - MetadataStore for metadata reads
-    /// * `file_store` - FileStore for chunk operations
-    pub fn new(
-        config: Config,
-        raft_member: Arc<
-            dyn crate::storage_raft_member::StorageRaftMember<
-                Operation = crate::storage_raft_member::types::WormFsOperation,
-                OperationResult = (),
-            >,
-        >,
-        metadata_store: Arc<dyn crate::metadata_store::MetadataStore>,
-        file_store: Arc<dyn crate::file_store::FileStore>,
-    ) -> Self {
-        let inner = Arc::new(FileSystemServiceInner {
-            file_handles: RwLock::new(std::collections::HashMap::new()),
-            inode_cache: RwLock::new(InodeCache::new()),
-            config,
-        });
-
-        Self {
-            inner,
-            raft_member,
-            metadata_store,
-            file_store,
-        }
-    }
-
     // === Internal Stripe Operations (stubs) ===
 
     /// Read one or more stripes and extract requested byte range.
@@ -528,18 +516,43 @@ impl FileSystemServiceImpl {
     }
 }
 
-// Stub implementation of the trait - all methods return unimplemented!()
-#[async_trait]
-impl FileSystemService for FileSystemServiceImpl {
-    fn new(config: Config) -> Result<Self, Error>
-    where
-        Self: Sized,
-    {
-        // This simplified constructor is not suitable for the client pattern.
-        // Users should use FileSystemServiceImpl::new() with dependencies instead.
-        unimplemented!("Use FileSystemServiceImpl::new() with dependencies")
-    }
+// NOTE: Trait implementation is commented out until FileStoreImpl is available.
+// Once all concrete types are implemented, uncomment and complete this implementation.
+//
+// #[async_trait]
+// impl FileSystemService for FileSystemServiceImpl {
+//     type RaftMember = crate::storage_raft_member::StorageRaftMemberImpl;
+//     type MetadataStore = crate::metadata_store::MetadataStoreImpl;
+//     type FileStore = crate::file_store::FileStoreImpl;
+//
+//     fn new(
+//         config: Config,
+//         raft_member: Arc<Self::RaftMember>,
+//         metadata_store: Self::MetadataStore,
+//         file_store: Arc<Self::FileStore>,
+//     ) -> Result<Self, Error>
+//     where
+//         Self: Sized,
+//     {
+//         let inner = Arc::new(FileSystemServiceInner {
+//             file_handles: RwLock::new(std::collections::HashMap::new()),
+//             inode_cache: RwLock::new(InodeCache::new()),
+//             config,
+//         });
+//
+//         Ok(Self {
+//             inner,
+//             raft_member,
+//             metadata_store,
+//             _file_store: (),
+//         })
+//     }
+//
+//     // ... rest of trait implementation
+// }
 
+// The following methods would be part of the FileSystemService trait implementation:
+/*
     async fn create(
         &self,
         _parent: u64,
@@ -650,4 +663,4 @@ impl FileSystemService for FileSystemServiceImpl {
     ) -> Result<(), Error> {
         unimplemented!("extend_lock will be implemented")
     }
-}
+*/
