@@ -437,10 +437,12 @@ pub struct FileSystemServiceImpl {
     /// Shared inner state
     inner: Arc<FileSystemServiceInner>,
     /// Reference to StorageRaftMember for metadata writes
-    raft_member: Arc<dyn crate::storage_raft_member::StorageRaftMember<
-        Operation = crate::storage_raft_member::types::WormFsOperation,
-        OperationResult = (),
-    >>,
+    raft_member: Arc<
+        dyn crate::storage_raft_member::StorageRaftMember<
+            Operation = crate::storage_raft_member::types::WormFsOperation,
+            OperationResult = (),
+        >,
+    >,
     /// Reference to MetadataStore for metadata reads
     metadata_store: Arc<dyn crate::metadata_store::MetadataStore>,
     /// Reference to FileStore for chunk I/O
@@ -458,10 +460,12 @@ impl FileSystemServiceImpl {
     /// * `file_store` - FileStore for chunk operations
     pub fn new(
         config: Config,
-        raft_member: Arc<dyn crate::storage_raft_member::StorageRaftMember<
-            Operation = crate::storage_raft_member::types::WormFsOperation,
-            OperationResult = (),
-        >>,
+        raft_member: Arc<
+            dyn crate::storage_raft_member::StorageRaftMember<
+                Operation = crate::storage_raft_member::types::WormFsOperation,
+                OperationResult = (),
+            >,
+        >,
         metadata_store: Arc<dyn crate::metadata_store::MetadataStore>,
         file_store: Arc<dyn crate::file_store::FileStore>,
     ) -> Self {
