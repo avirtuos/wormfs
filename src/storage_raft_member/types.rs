@@ -275,6 +275,102 @@ pub enum CommandOperation {
 }
 
 // ============================================================================
+// Metadata Change Subscription Types
+// ============================================================================
+
+pub struct MetadataChangeEvent {
+    pub committed_at: SystemTime,
+    pub log_index: u64,
+    pub changes: Vec<MetadataChange>,
+}
+/// Events that can be emitted when metadata changes are committed.
+#[derive(Debug, Clone)]
+pub enum MetadataChange {
+    /// A new file was created
+    FileCreated {
+        file_id: FileId,
+        inode: u64,
+        path: PathBuf,
+    },
+    /// File attributes were updated
+    FileUpdated {
+        file_id: FileId,
+        inode: u64,
+        changed_attrs: FileAttributeChanges,
+    },
+    /// A file was deleted
+    FileDeleted { file_id: FileId, inode: u64 },
+    /// A new directory was created
+    DirectoryCreated {
+        inode: u64,
+        path: PathBuf,
+        parent_inode: u64,
+    },
+    /// A directory was deleted
+    DirectoryDeleted { inode: u64, path: PathBuf },
+    /// A new stripe was added to a file
+    StripeCreated {
+        file_id: FileId,
+        stripe_id: StripeId,
+        offset: u64,
+        size: u64,
+    },
+    /// A stripe was deleted from a file
+    StripeDeleted {
+        file_id: FileId,
+        stripe_id: StripeId,
+    },
+    /// A chunk was moved to a different location
+    ChunkMoved {
+        chunk_id: ChunkId,
+        old_location: ChunkLocation,
+        new_location: ChunkLocation,
+    },
+    /// A file lock was released or expired
+    LockReleased { file_id: FileId, inode: u64 },
+}
+
+/// Types of metadata changes for subscription filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MetadataChangeType {
+    FileCreated,
+    FileUpdated,
+    FileDeleted,
+    DirectoryCreated,
+    DirectoryDeleted,
+    StripeCreated,
+    StripeDeleted,
+    ChunkMoved,
+    LockReleased,
+}
+
+/// Tracks which file attributes changed in an update.
+#[derive(Debug, Clone)]
+pub struct FileAttributeChanges {
+    pub size: Option<u64>,
+    pub mtime: Option<SystemTime>,
+    pub atime: Option<SystemTime>,
+    pub mode: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+}
+
+/// Location of a chunk on a specific node and disk.
+#[derive(Debug, Clone)]
+pub struct ChunkLocation {
+    pub node_id: NodeId,
+    pub disk_id: DiskId,
+}
+
+/// Trait for components that want to receive metadata change notifications.
+pub trait MetadataChangeSubscriber: Send + Sync {
+    /// Called when a metadata change event occurs.
+    ///
+    /// Implementations should not block as this is called from the Raft apply path.
+    fn on_metadata_change(&self, event: MetadataChangeEvent);
+}
+
+// ============================================================================
 // Placeholder types (to be defined in appropriate modules)
 // ============================================================================
 

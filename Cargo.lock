@@ -4225,6 +4225,7 @@ dependencies = [
  "clap",
  "crc32fast",
  "ext-sort",
+ "libc",
  "libp2p",
  "mockall",
  "openraft",

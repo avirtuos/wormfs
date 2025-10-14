@@ -477,7 +477,7 @@ pub struct StripeMetadata {
     pub checksum: u32,
 
     /// Locations of all chunks in this stripe
-    pub chunks: Vec<ChunkLocation>,
+    pub chunks: Vec<ChunkMetadata>,
 }
 
 impl StripeMetadata {
@@ -488,7 +488,7 @@ impl StripeMetadata {
         offset: u64,
         size: u64,
         checksum: u32,
-        chunks: Vec<ChunkLocation>,
+        chunks: Vec<ChunkMetadata>,
     ) -> Self {
         Self {
             stripe_id,
@@ -508,7 +508,7 @@ impl StripeMetadata {
 
 /// Location of a chunk within the storage cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkLocation {
+pub struct ChunkMetadata {
     /// Unique identifier for this chunk
     pub chunk_id: ChunkId,
 
@@ -522,7 +522,7 @@ pub struct ChunkLocation {
     pub chunk_index: u8,
 }
 
-impl ChunkLocation {
+impl ChunkMetadata {
     /// Create a new chunk location.
     pub fn new(chunk_id: ChunkId, node_id: NodeId, disk_id: DiskId, chunk_index: u8) -> Self {
         Self {
@@ -532,4 +532,32 @@ impl ChunkLocation {
             chunk_index,
         }
     }
+}
+
+// =============================================================================
+// Chunk Caching Types
+// =============================================================================
+
+/// Entry in the chunk cache.
+#[derive(Debug, Clone)]
+pub struct ChunkCacheEntry {
+    /// Chunk identifier
+    pub chunk_id: ChunkId,
+    /// Cached chunk data (encoded, not decoded)
+    pub data: Vec<u8>,
+    /// When the chunk was cached
+    pub cached_at: std::time::Instant,
+    /// Size of the chunk in bytes
+    pub size: usize,
+}
+
+/// Prefetch policy for stripe chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefetchPolicy {
+    /// No prefetching
+    None,
+    /// Prefetch next stripe's chunks
+    NextStripe,
+    /// Prefetch N stripes ahead
+    Lookahead { count: usize },
 }

@@ -76,9 +76,9 @@ pub mod types;
 use async_trait::async_trait;
 use std::path::PathBuf;
 pub use types::{
-    ChunkData, ChunkHeader, ChunkId, ChunkLocation, CompressionAlgorithm, Config, DiskId,
-    DiskStats, ErasureAlgorithm, Error, FileId, NodeId, PrepareVote, RebuildResult, StoragePolicy,
-    StripeId, StripeMetadata, TxId, VerificationResult,
+    ChunkCacheEntry, ChunkData, ChunkHeader, ChunkId, ChunkMetadata, CompressionAlgorithm, Config,
+    DiskId, DiskStats, ErasureAlgorithm, Error, FileId, NodeId, PrefetchPolicy, PrepareVote,
+    RebuildResult, StoragePolicy, StripeId, StripeMetadata, TxId, VerificationResult,
 };
 
 /// FileStore trait defines the interface for chunk storage and erasure coding.
@@ -319,4 +319,65 @@ pub trait FileStore: Send + Sync {
     ///
     /// Returns an error if disk not found or has unmigrated chunks.
     async fn remove_disk(&mut self, disk_id: DiskId) -> Result<(), Error>;
+
+    // === Chunk Caching Methods ===
+
+    /// Cache a chunk to disk for later retrieval.
+    ///
+    /// Chunks are cached in their encoded form (not decoded) to save space.
+    /// Cached chunks are used to speed up reads and prefetching.
+    ///
+    /// # Arguments
+    ///
+    /// * `chunk_id` - Chunk identifier
+    /// * `data` - Encoded chunk data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if caching fails due to disk I/O issues.
+    async fn cache_chunk(&self, chunk_id: ChunkId, data: Vec<u8>) -> Result<(), Error>;
+
+    /// Retrieve a cached chunk from disk.
+    ///
+    /// # Arguments
+    ///
+    /// * `chunk_id` - Chunk identifier
+    ///
+    /// # Returns
+    ///
+    /// Cached chunk entry if found, None otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cache lookup fails.
+    async fn get_cached_chunk(&self, chunk_id: ChunkId) -> Result<Option<ChunkCacheEntry>, Error>;
+
+    /// Prefetch chunks for a stripe without decoding them.
+    ///
+    /// This method fetches chunks and stores them in the cache for later use.
+    /// Chunks are not decoded until actually needed for a read operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - File identifier
+    /// * `stripe_id` - Stripe identifier
+    /// * `policy` - Prefetch policy (e.g., next stripe, lookahead)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if prefetching fails. Errors are non-fatal and
+    /// should not interrupt normal operations.
+    async fn prefetch_stripe_chunks(
+        &self,
+        file_id: FileId,
+        stripe_id: StripeId,
+        policy: PrefetchPolicy,
+    ) -> Result<(), Error>;
 }
+
+// =============================================================================
+// Concrete Implementation (Placeholder)
+// =============================================================================
+
+// NOTE: FileStoreImpl will be added when we implement the FileStore component.
+// For now, the trait definition provides the interface contract.

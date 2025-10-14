@@ -127,6 +127,63 @@ StorageRaftMember implements the Raft consensus protocol for WormFS, ensuring st
 5. Leader updates cluster snapshot state
 6. All nodes trim TransactionLogStore to snapshot point
 
+### Metadata Change Subscriptions
+
+StorageRaftMember provides a subscription mechanism for local components (e.g., FileSystemService) to receive notifications when metadata changes are committed through Raft consensus. This enables cache invalidation and other reactive behaviors.
+
+**Subscription Flow:**
+```
+┌─────────────────┐
+│FileSystemService│
+└────────┬────────┘
+         │ subscribe_metadata_changes()
+         ▼
+┌─────────────────────────────────────────┐
+│         StorageRaftMember               │
+│  ┌────────────────────────────────────┐ │
+│  │  Subscription Management           │ │
+│  │  • Register subscriber            │ │
+│  │  • Filter by change types         │ │
+│  │  • Maintain subscriber channels   │ │
+│  └────────────────────────────────────┘ │
+│                                         │
+│  When applying committed operations:   │
+│  ┌────────────────────────────────────┐ │
+│  │  1. Apply to MetadataStore         │ │
+│  │  2. Generate MetadataChangeEvent   │ │
+│  │  3. Send to matching subscribers   │ │
+│  └────────────────────────────────────┘ │
+└─────────────────────────────────────────┘
+```
+
+**Example: FileSystemService Cache Invalidation**
+1. FileSystemService subscribes to file and directory change events on startup
+2. User modifies file through different node
+3. Modification goes through Raft consensus
+4. When operation commits, StorageRaftMember:
+   - Applies change to MetadataStore
+   - Creates `MetadataChangeEvent::FileUpdated` event
+   - Sends event to FileSystemService subscriber channel
+5. FileSystemService receives event and invalidates cached inode
+
+**Supported Change Events:**
+- `FileCreated`: New file added to metadata
+- `FileUpdated`: File attributes modified (size, mtime, permissions)
+- `FileDeleted`: File removed from metadata
+- `DirectoryCreated`: New directory created
+- `DirectoryDeleted`: Directory removed
+- `StripeCreated`: New stripe added to file
+- `StripeDeleted`: Stripe removed from file
+- `ChunkMoved`: Chunk relocated to different node/disk
+- `LockReleased`: File lock released or expired
+
+**Subscription Management:**
+- Subscribers use async channels to receive events
+- Events are sent asynchronously to avoid blocking Raft operations
+- Subscribers can filter for specific event types
+- Channel capacity prevents unbounded memory growth
+- Slow subscribers may miss events (at-most-once delivery)
+
 ## Interfaces
 
 ### Public API
@@ -176,6 +233,15 @@ impl StorageRaftMember {
     
     /// Step down from leader (for graceful shutdown)
     pub async fn step_down(&self) -> Result<(), RaftError>;
+
+    /// Subscribe to metadata change events
+    ///
+    /// Returns a receiver channel for metadata change notifications.
+    /// Events are sent when metadata operations are committed through Raft.
+    pub async fn subscribe_metadata_changes(
+        &self,
+        filter: Option<Vec<MetadataChangeType>>,
+    ) -> Result<tokio::sync::mpsc::Receiver<MetadataChangeEvent>, RaftError>;
 }
 ```
 

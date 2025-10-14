@@ -86,7 +86,9 @@ pub mod types;
 
 use async_trait::async_trait;
 use std::net::SocketAddr;
-pub use types::{Config, Error, NodeId, RaftMetrics, RaftRole};
+pub use types::{
+    Config, Error, MetadataChangeEvent, MetadataChangeType, NodeId, RaftMetrics, RaftRole,
+};
 
 /// StorageRaftMember trait defines the interface for Raft consensus operations.
 ///
@@ -234,4 +236,93 @@ pub trait StorageRaftMember: Send + Sync {
     ///
     /// Returns an error if this node is not currently the leader.
     async fn step_down(&self) -> Result<(), Error>;
+
+    /// Subscribe to metadata change events.
+    ///
+    /// Returns a receiver channel for metadata change notifications.
+    /// Events are sent when metadata operations are committed through Raft.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Optional list of event types to subscribe to. If None, all events are received.
+    ///
+    /// # Returns
+    ///
+    /// An unbounded receiver channel for `MetadataChangeEvent`.
+    ///
+    /// # Notes
+    ///
+    /// - Events are sent asynchronously and do not block Raft operations
+    /// - Slow subscribers may experience channel capacity issues
+    /// - At-most-once delivery semantics (events may be missed if channel is full)
+    async fn subscribe_metadata_changes(
+        &self,
+        filter: Option<Vec<MetadataChangeType>>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<MetadataChangeEvent>;
+}
+
+// =============================================================================
+// Concrete Implementation (Placeholder)
+// =============================================================================
+
+/// Placeholder concrete implementation of StorageRaftMember.
+///
+/// This is a stub type that will be properly implemented in the future.
+pub struct StorageRaftMemberImpl {
+    _private: (),
+}
+
+#[async_trait]
+impl StorageRaftMember for StorageRaftMemberImpl {
+    type Operation = types::WormFsOperation;
+    type OperationResult = ();
+
+    async fn new(_node_id: NodeId, _config: Config) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        unimplemented!("StorageRaftMemberImpl::new will be implemented")
+    }
+
+    async fn initialize(&mut self, _peers: Vec<NodeId>) -> Result<(), Error> {
+        unimplemented!("StorageRaftMemberImpl::initialize will be implemented")
+    }
+
+    async fn propose_operation(
+        &self,
+        _operation: Self::Operation,
+    ) -> Result<Self::OperationResult, Error> {
+        unimplemented!("StorageRaftMemberImpl::propose_operation will be implemented")
+    }
+
+    fn is_leader(&self) -> bool {
+        unimplemented!("StorageRaftMemberImpl::is_leader will be implemented")
+    }
+
+    fn get_metrics(&self) -> RaftMetrics {
+        unimplemented!("StorageRaftMemberImpl::get_metrics will be implemented")
+    }
+
+    async fn trigger_snapshot(&self) -> Result<(), Error> {
+        unimplemented!("StorageRaftMemberImpl::trigger_snapshot will be implemented")
+    }
+
+    async fn add_node(&self, _node_id: NodeId, _address: SocketAddr) -> Result<(), Error> {
+        unimplemented!("StorageRaftMemberImpl::add_node will be implemented")
+    }
+
+    async fn remove_node(&self, _node_id: NodeId) -> Result<(), Error> {
+        unimplemented!("StorageRaftMemberImpl::remove_node will be implemented")
+    }
+
+    async fn step_down(&self) -> Result<(), Error> {
+        unimplemented!("StorageRaftMemberImpl::step_down will be implemented")
+    }
+
+    async fn subscribe_metadata_changes(
+        &self,
+        _filter: Option<Vec<MetadataChangeType>>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<MetadataChangeEvent> {
+        unimplemented!("StorageRaftMemberImpl::subscribe_metadata_changes will be implemented")
+    }
 }

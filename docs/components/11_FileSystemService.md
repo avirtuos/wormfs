@@ -23,9 +23,9 @@ FileSystemService uses the client pattern with interior mutability to allow conc
 **Concurrent FUSE Operations**: FUSE filesystems receive operations from multiple threads simultaneously (one per active file operation). Each operation needs access to the FileSystem component to coordinate with storage components.
 
 **Solution**: We implement a cloneable client handle pattern where:
-1. The outer `FileSystem` struct is lightweight and cloneable
-2. Shared state lives in `Arc<FileSystemInner>` with interior mutability
-3. Each FUSE handler thread holds a cloned instance
+1. The outer `FileSystemService` struct is lightweight and cloneable
+2. Shared state lives in `Arc<FileSystemServiceInner>` with interior mutability
+3. Each FUSE handler thread holds a cloned instancec
 4. File handles and operation state use RwLock for concurrent access
 5. No global locks block unrelated operations
 
@@ -757,32 +757,32 @@ async fn write_stripes(
 
 ## Open Questions
 
-1. **Write Buffering**: Should we buffer writes in memory and flush periodically, or always write-through to ensure durability? Buffering improves performance but risks data loss on crash.
+1. **Write Buffering**: Should we buffer writes in memory and flush periodically, or always write-through to ensure durability? Buffering improves performance but risks data loss on crash. Answer: We can buffer writes to 1 Stripe per file until they exceed the Chunk/Stripe size, or start modifying a different Stripe.
 
-2. **Prefetching**: Should we implement read-ahead prefetching for sequential access patterns? This could significantly improve streaming read performance.
+2. **Prefetching**: Should we implement read-ahead prefetching for sequential access patterns? This could significantly improve streaming read performance. Answer: yea, we should fetch the Chunks for 1 Stripe after the requested Stripe but not decode them until they are actually needed to satisfy a read. All chunks when fetched should be cached on disk and only pulled into memory when decoding occurs.
 
-3. **Stripe Size Changes**: If a file's stripe size changes (future feature), how should we handle reads/writes that span old and new stripe boundaries?
+3. **Stripe Size Changes**: If a file's stripe size changes (future feature), how should we handle reads/writes that span old and new stripe boundaries? Answer: When a file's stripe size changes, the change is only applied to new Stripe indexes (e.g. new Stripes at the end of a file). When an existing Stripe is replaced, for whatever reason it retains the size of the Stripe it replaced. In the future we may add a Watchdog optimizer task that will re-write files so they can fully adopt changes to Chunk size and StoragePolicy.
 
-4. **Lock Timeout Handling**: When a lock expires, should we automatically try to re-acquire it, or fail the operation and force the client to retry?
+4. **Lock Timeout Handling**: When a lock expires, should we automatically try to re-acquire it, or fail the operation and force the client to retry? Answer: We should be extending locks before they expire, if a lock is expired or revoked for some reason we should fail the operation to the client.
 
-5. **Inode Cache Invalidation**: How should we invalidate inode cache entries when metadata changes? Polling, TTL-based, or event-driven?
+5. **Inode Cache Invalidation**: How should we invalidate inode cache entries when metadata changes? Polling, TTL-based, or event-driven? Answer: We should be notified of changes via StorageRaftMember. Lets update the design of StorageRaftMember to reflect this requirement if it isn't already present. 
 
-6. **Sparse Files**: Should we support sparse files by only writing non-zero stripes? This could save significant storage for large sparse files.
+6. **Sparse Files**: Should we support sparse files by only writing non-zero stripes? This could save significant storage for large sparse files. Answer: For now we can skip this optimization.
 
-7. **Permissions Caching**: Should we cache permission checks, or always query MetadataStore? Caching improves performance but may serve stale permissions.
+7. **Permissions Caching**: Should we cache permission checks, or always query MetadataStore? Caching improves performance but may serve stale permissions. Answer: Yes, lets cache permissions.
 
-8. **Directory Listing Order**: Should readdir() return entries in inode order, name order, or creation order? Different orders have different performance characteristics.
+8. **Directory Listing Order**: Should readdir() return entries in inode order, name order, or creation order? Different orders have different performance characteristics. Answer: Lets return them in whichever order is the most performant for the StorageNode
 
-9. **Symlink Support**: Do we need to support symbolic links? If so, how should symlink targets be stored in metadata?
+9. **Symlink Support**: Do we need to support symbolic links? If so, how should symlink targets be stored in metadata? Answer: Yes, they should be stored as a special type of File and include a redirect path for their target.
 
-10. **Extended Attributes**: Should we support extended attributes (xattrs) for user metadata? This is commonly used by backup tools and OS features.
+10. **Extended Attributes**: Should we support extended attributes (xattrs) for user metadata? This is commonly used by backup tools and OS features. Answer: Yes
 
-11. **Hard Links**: Should we support hard links? This requires reference counting and complicates unlink operations.
+11. **Hard Links**: Should we support hard links? This requires reference counting and complicates unlink operations. Answer: No, lets not support hard links for now.
 
-12. **File Locking Semantics**: Should we support POSIX file locking (flock, fcntl locks) in addition to our custom lock system?
+12. **File Locking Semantics**: Should we support POSIX file locking (flock, fcntl locks) in addition to our custom lock system? Answer: Yes but lets map these onto our custom lock system.
 
-13. **Concurrent Write Handling**: How should we handle concurrent writes to the same stripe from different clients? Currently undefined behavior.
+13. **Concurrent Write Handling**: How should we handle concurrent writes to the same stripe from different clients? Currently undefined behavior. Answer: We should disallow concurrent writes. If two clients attempt to open a file for writing, at the same time, one should get an error. It might be simplest to accomplish this with locks but there may be other ways to accomplish this. We can allow concurrent readers which a file is being written and leave it up to the client application to handle any data irregularities.
 
-14. **Write Amplification**: Read-modify-write for small writes causes write amplification. Should we implement write combining or log-structured updates?
+14. **Write Amplification**: Read-modify-write for small writes causes write amplification. Should we implement write combining or log-structured updates? Answer: We can skip these optimizations for now as we do not expect this to be a common use-case.
 
-15. **Metadata Refresh**: How frequently should we refresh cached metadata to detect external changes from other nodes?
+15. **Metadata Refresh**: How frequently should we refresh cached metadata to detect external changes from other nodes? Answer: we expect these changes to be pushed to us via StorageRaftMember as FileSystemService participates in preparing and voting to accept Metadata update proposals.
