@@ -28,8 +28,8 @@
 //! }
 //! ```
 
-pub mod cluster_manager;
 pub mod client_simulator;
+pub mod cluster_manager;
 pub mod report;
 pub mod scenario_runner;
 pub mod scenarios;

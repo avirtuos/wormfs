@@ -25,28 +25,31 @@ impl ReportGenerator {
     /// Returns a formatted text report.
     pub fn generate_text_report(&self, results: &TestResults) -> String {
         let mut report = String::new();
-        
+
         report.push_str("=====================================\n");
         report.push_str("      WormFS Validator Report\n");
         report.push_str("=====================================\n\n");
-        
+
         report.push_str(&format!("Total Scenarios: {}\n", results.total_scenarios));
         report.push_str(&format!("Passed: {}\n", results.passed));
         report.push_str(&format!("Failed: {}\n", results.failed));
         report.push_str(&format!("Skipped: {}\n", results.skipped));
         report.push_str(&format!("Success Rate: {:.2}%\n", results.success_rate()));
-        report.push_str(&format!("Duration: {:.2}s\n\n", results.duration.as_secs_f64()));
-        
+        report.push_str(&format!(
+            "Duration: {:.2}s\n\n",
+            results.duration.as_secs_f64()
+        ));
+
         report.push_str("Scenario Results:\n");
         report.push_str("-------------------------------------\n");
-        
+
         for result in &results.scenario_results {
             let status_str = match result.status {
                 TestStatus::Passed => "✓ PASS",
                 TestStatus::Failed => "✗ FAIL",
                 TestStatus::Skipped => "- SKIP",
             };
-            
+
             report.push_str(&format!(
                 "{} | {} | {} | {:.2}s\n",
                 status_str,
@@ -54,14 +57,14 @@ impl ReportGenerator {
                 result.name,
                 result.duration.as_secs_f64()
             ));
-            
+
             if let Some(error) = &result.error {
                 report.push_str(&format!("      Error: {}\n", error));
             }
         }
-        
+
         report.push_str("\n=====================================\n");
-        
+
         report
     }
 

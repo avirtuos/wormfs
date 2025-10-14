@@ -41,7 +41,11 @@ impl ValidationEngine {
     ///
     /// * `data` - Data to validate
     /// * `expected_checksum` - Expected CRC32 checksum
-    pub fn validate_checksum(&self, data: &[u8], expected_checksum: u32) -> Result<(), ValidatorError> {
+    pub fn validate_checksum(
+        &self,
+        data: &[u8],
+        expected_checksum: u32,
+    ) -> Result<(), ValidatorError> {
         let checksum = crc32fast::hash(data);
         if checksum == expected_checksum {
             Ok(())

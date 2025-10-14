@@ -48,7 +48,11 @@ impl FuseClientSimulator {
     /// # Returns
     ///
     /// Returns a file handle on success.
-    pub async fn create_file(&mut self, path: &str, mode: u32) -> Result<FileHandle, ValidatorError> {
+    pub async fn create_file(
+        &mut self,
+        path: &str,
+        mode: u32,
+    ) -> Result<FileHandle, ValidatorError> {
         // TODO: Implement file creation via gRPC
         unimplemented!("FuseClientSimulator::create_file")
     }

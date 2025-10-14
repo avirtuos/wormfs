@@ -139,5 +139,8 @@ pub trait TestScenario: Send + Sync {
     /// # Returns
     ///
     /// Returns Ok(()) if the scenario passes, or an error describing the failure.
-    async fn execute(&self, client: &mut FuseClientSimulator) -> Result<(), Box<dyn std::error::Error>>;
+    async fn execute(
+        &self,
+        client: &mut FuseClientSimulator,
+    ) -> Result<(), Box<dyn std::error::Error>>;
 }
