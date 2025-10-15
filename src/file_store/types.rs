@@ -10,9 +10,28 @@ use thiserror::Error;
 pub struct FileId(pub u64);
 
 impl FileId {
-    /// Create a new FileId.
+    /// Create a new FileId from a u64.
     pub fn new(id: u64) -> Self {
         Self(id)
+    }
+
+    /// Generate a new unique FileId using UUID v4.
+    ///
+    /// Uses UUID v4 for globally unique, collision-resistant IDs.
+    /// The 128-bit UUID is truncated to 64 bits, which provides
+    /// sufficient uniqueness for non-cryptographic purposes.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use wormfs::file_store::types::FileId;
+    ///
+    /// let id1 = FileId::generate();
+    /// let id2 = FileId::generate();
+    /// assert_ne!(id1, id2); // Extremely unlikely to collide
+    /// ```
+    pub fn generate() -> Self {
+        Self::new(uuid::Uuid::new_v4().as_u128() as u64)
     }
 
     /// Get the inner u64 value.
@@ -26,9 +45,16 @@ impl FileId {
 pub struct StripeId(pub u64);
 
 impl StripeId {
-    /// Create a new StripeId.
+    /// Create a new StripeId from a u64.
     pub fn new(id: u64) -> Self {
         Self(id)
+    }
+
+    /// Generate a new unique StripeId using UUID v4.
+    ///
+    /// See [`FileId::generate()`] for details on UUID-based ID generation.
+    pub fn generate() -> Self {
+        Self::new(uuid::Uuid::new_v4().as_u128() as u64)
     }
 
     /// Get the inner u64 value.
@@ -42,9 +68,16 @@ impl StripeId {
 pub struct ChunkId(pub u64);
 
 impl ChunkId {
-    /// Create a new ChunkId.
+    /// Create a new ChunkId from a u64.
     pub fn new(id: u64) -> Self {
         Self(id)
+    }
+
+    /// Generate a new unique ChunkId using UUID v4.
+    ///
+    /// See [`FileId::generate()`] for details on UUID-based ID generation.
+    pub fn generate() -> Self {
+        Self::new(uuid::Uuid::new_v4().as_u128() as u64)
     }
 
     /// Get the inner u64 value.

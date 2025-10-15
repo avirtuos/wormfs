@@ -1,33 +1,49 @@
-//! Concrete implementation of MetadataStore.
+//! Concrete implementation of MetadataStore using tokio-rusqlite for async operations.
 
 use super::{
-    ChunkId, ChunkRecord, ClientId, Config, DiskId, Error, FileId, FileMetadata, FileRecord,
-    LockRecord, MetadataStore, NodeId, StripeId, StripeRecord,
+    ChunkId, ChunkRecord, ChunkStatus, ClientId, Config, DiskId, Error, FileId, FileMetadata,
+    FileRecord, LockRecord, LockType, MetadataStore, NodeId, StripeId, StripeRecord,
 };
 use async_trait::async_trait;
+use rusqlite::{params, OptionalExtension};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_rusqlite::Connection;
+
+/// Convert SystemTime to Unix timestamp (seconds since epoch).
+fn system_time_to_unix(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// Convert Unix timestamp to SystemTime.
+fn unix_to_system_time(unix: i64) -> SystemTime {
+    UNIX_EPOCH + std::time::Duration::from_secs(unix as u64)
+}
 
 /// Inner state for MetadataStore implementation.
 ///
-/// This structure is wrapped in Arc to allow cheap cloning.
+/// With tokio-rusqlite, the Connection is cloneable and thread-safe.
+/// Each clone shares the same underlying database connection managed
+/// by a background thread.
 struct MetadataStoreInner {
+    /// Async SQLite connection (cloneable, thread-safe)
+    conn: Connection,
+
+    /// Configuration
     #[allow(dead_code)]
     config: Config,
-    // TODO: Add actual implementation fields:
-    // - write_conn: Mutex<rusqlite::Connection>
-    // - read_pool: Pool<SqliteConnectionManager>
-    // - cache: RwLock<LruCache<CacheKey, CachedValue>>
 }
 
 /// Concrete implementation of MetadataStore.
 ///
-/// This is the default SQLite-based implementation that uses a Read Pool + Single Writer
-/// pattern for optimal concurrent performance.
+/// This implementation uses tokio-rusqlite for true async SQLite operations.
+/// The Connection handle is cheap to clone and all operations are executed
+/// in a dedicated background thread, allowing non-blocking async access.
 #[derive(Clone)]
 pub struct MetadataStoreImpl {
-    #[allow(dead_code)]
     inner: Arc<MetadataStoreInner>,
 }
 
@@ -47,208 +63,1131 @@ impl MetadataStoreImpl {
     /// # Errors
     ///
     /// Returns an error if database initialization fails.
-    pub(super) fn new(config: Config) -> Result<Self, Error> {
-        let inner = MetadataStoreInner {
-            config,
-            // TODO: Initialize actual database connections
-        };
+    pub(super) async fn new(config: Config) -> Result<Self, Error> {
+        // Create database directory if it doesn't exist
+        if let Some(parent) = config.database_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                Error::ConfigError(format!("Failed to create database directory: {}", e))
+            })?;
+        }
+
+        // Open async connection
+        let conn = Connection::open(&config.database_path)
+            .await
+            .map_err(|e| Error::ConnectionError(format!("Failed to open connection: {}", e)))?;
+
+        // Configure connection with optimal settings
+        Self::configure_connection(&conn, &config).await?;
+
+        let inner = MetadataStoreInner { conn, config };
 
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// Configure a SQLite connection with optimal settings.
+    async fn configure_connection(conn: &Connection, config: &Config) -> Result<(), Error> {
+        let enable_wal = config.enable_wal;
+        let synchronous = config.synchronous;
+        let enable_foreign_keys = config.enable_foreign_keys;
+        let cache_size_mb = config.cache_size_mb;
+
+        conn.call(move |conn| {
+            // Build PRAGMA statements and execute them as a batch
+            let mut pragmas = Vec::new();
+
+            // Enable WAL mode for concurrent reads
+            if enable_wal {
+                pragmas.push("PRAGMA journal_mode=WAL;".to_string());
+            }
+
+            // Set synchronous mode
+            let sync_mode = match synchronous {
+                super::types::SynchronousMode::Off => "OFF",
+                super::types::SynchronousMode::Normal => "NORMAL",
+                super::types::SynchronousMode::Full => "FULL",
+            };
+            pragmas.push(format!("PRAGMA synchronous={};", sync_mode));
+
+            // Enable foreign keys
+            if enable_foreign_keys {
+                pragmas.push("PRAGMA foreign_keys=ON;".to_string());
+            }
+
+            // Set cache size (negative value means KB)
+            let cache_size = -(cache_size_mb as i32 * 1024);
+            pragmas.push(format!("PRAGMA cache_size={};", cache_size));
+
+            // Execute all PRAGMAs as a batch
+            conn.execute_batch(&pragmas.join(" "))?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| Error::ConfigError(format!("Failed to configure connection: {}", e)))
+    }
+
+    /// Run migrations to initialize or update the schema.
+    async fn run_migrations(&self) -> Result<(), Error> {
+        let migrations = vec![
+            include_str!("migrations/001_initial_schema.sql").to_string(),
+            include_str!("migrations/002_indexes.sql").to_string(),
+            include_str!("migrations/003_inode_management.sql").to_string(),
+        ];
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+
+                for (idx, migration) in migrations.iter().enumerate() {
+                    tx.execute_batch(migration).map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Migration {} failed: {}", idx + 1, e),
+                        )))
+                    })?;
+                }
+
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| Error::SchemaInitFailed(format!("{}", e)))
+    }
+
+    /// Test-only helper to insert nodes and disks directly.
+    #[cfg(test)]
+    pub async fn test_insert_node_and_disk(
+        &self,
+        node_id: NodeId,
+        disk_id: DiskId,
+    ) -> Result<(), Error> {
+        let node_id_val = node_id.as_u64() as i64;
+        let disk_id_val = disk_id.as_u64() as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.inner.conn.call(move |conn| {
+            // Insert node
+            conn.execute(
+                "INSERT OR IGNORE INTO nodes (node_id, address, status, last_seen, created_at)
+                 VALUES (?1, ?2, 0, ?3, ?3)",
+                rusqlite::params![node_id_val, "127.0.0.1:8080", now],
+            )?;
+
+            // Insert disk
+            conn.execute(
+                "INSERT OR IGNORE INTO disks (disk_id, node_id, path, total_space, free_space, status, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 1099511627776, 1099511627776, 0, ?4, ?4)",
+                rusqlite::params![disk_id_val, node_id_val, "/tmp/test_disk", now],
+            )?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| Error::QueryError(format!("Failed to insert test node/disk: {}", e)))
     }
 }
 
 #[async_trait]
 impl MetadataStore for MetadataStoreImpl {
     async fn initialize_schema(&self) -> Result<(), Error> {
-        // TODO: Implement schema initialization
-        todo!("Initialize SQLite schema")
+        self.run_migrations().await
     }
 
     async fn create_file(
         &self,
-        _path: &Path,
-        _inode: u64,
-        _metadata: FileMetadata,
-    ) -> Result<FileId, Error> {
-        // TODO: Implement file creation
-        todo!("Create file")
+        file_id: FileId,
+        path: &Path,
+        inode: u64,
+        metadata: FileMetadata,
+    ) -> Result<(), Error> {
+        let file_id_val = file_id.as_u64();
+        let path_str = path.to_string_lossy().to_string();
+        let parent_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_string_lossy()
+            .to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO files (file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1)",
+                    params![
+                        file_id_val as i64,
+                        inode as i64,
+                        path_str,
+                        parent_path,
+                        name,
+                        metadata.size as i64,
+                        metadata.permissions as i64,
+                        metadata.uid as i64,
+                        metadata.gid as i64,
+                        system_time_to_unix(metadata.created_at),
+                        system_time_to_unix(metadata.modified_at),
+                        system_time_to_unix(metadata.accessed_at),
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE constraint failed") {
+                    Error::FileAlreadyExists(path.to_path_buf())
+                } else {
+                    Error::QueryError(format!("Failed to create file: {}", e))
+                }
+            })
     }
 
-    async fn get_file_by_path(&self, _path: &Path) -> Result<FileRecord, Error> {
-        // TODO: Implement file lookup by path
-        todo!("Get file by path")
+    async fn get_file_by_path(&self, path: &Path) -> Result<FileRecord, Error> {
+        let path_str = path.to_string_lossy().to_string();
+        let path_clone = path.to_path_buf();
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                     FROM files WHERE path = ?1",
+                    params![path_str],
+                    |row| {
+                        Ok(FileRecord {
+                            file_id: FileId::new(row.get::<_, i64>(0)? as u64),
+                            inode: row.get::<_, i64>(1)? as u64,
+                            path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
+                            parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
+                            name: row.get(4)?,
+                            size: row.get::<_, i64>(5)? as u64,
+                            permissions: row.get::<_, i64>(6)? as u32,
+                            uid: row.get::<_, i64>(7)? as u32,
+                            gid: row.get::<_, i64>(8)? as u32,
+                            created_at: unix_to_system_time(row.get(9)?),
+                            modified_at: unix_to_system_time(row.get(10)?),
+                            accessed_at: unix_to_system_time(row.get(11)?),
+                            storage_policy_id: row.get::<_, i64>(12)? as u32,
+                        })
+                    },
+                )?)
+            })
+            .await
+            .map_err(|e| match e {
+                tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    Error::FileNotFound(path_clone.to_string_lossy().to_string())
+                }
+                _ => Error::QueryError(format!("Failed to query file by path: {}", e))
+            })
     }
 
-    async fn get_file_by_inode(&self, _inode: u64) -> Result<FileRecord, Error> {
-        // TODO: Implement file lookup by inode
-        todo!("Get file by inode")
+    async fn get_file_by_inode(&self, inode: u64) -> Result<FileRecord, Error> {
+        self.inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                     FROM files WHERE inode = ?1",
+                    params![inode as i64],
+                    |row| {
+                        Ok(FileRecord {
+                            file_id: FileId::new(row.get::<_, i64>(0)? as u64),
+                            inode: row.get::<_, i64>(1)? as u64,
+                            path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
+                            parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
+                            name: row.get(4)?,
+                            size: row.get::<_, i64>(5)? as u64,
+                            permissions: row.get::<_, i64>(6)? as u32,
+                            uid: row.get::<_, i64>(7)? as u32,
+                            gid: row.get::<_, i64>(8)? as u32,
+                            created_at: unix_to_system_time(row.get(9)?),
+                            modified_at: unix_to_system_time(row.get(10)?),
+                            accessed_at: unix_to_system_time(row.get(11)?),
+                            storage_policy_id: row.get::<_, i64>(12)? as u32,
+                        })
+                    },
+                )?)
+            })
+            .await
+            .map_err(|e| match e {
+                tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    Error::FileNotFound(format!("inode {}", inode))
+                }
+                _ => Error::QueryError(format!("Failed to query file by inode: {}", e))
+            })
     }
 
-    async fn get_file(&self, _file_id: FileId) -> Result<FileRecord, Error> {
-        // TODO: Implement file lookup by ID
-        todo!("Get file")
+    async fn get_file(&self, file_id: FileId) -> Result<FileRecord, Error> {
+        let file_id_val = file_id.as_u64();
+        let file_id_clone = file_id;
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                     FROM files WHERE file_id = ?1",
+                    params![file_id_val as i64],
+                    |row| {
+                        Ok(FileRecord {
+                            file_id: FileId::new(row.get::<_, i64>(0)? as u64),
+                            inode: row.get::<_, i64>(1)? as u64,
+                            path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
+                            parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
+                            name: row.get(4)?,
+                            size: row.get::<_, i64>(5)? as u64,
+                            permissions: row.get::<_, i64>(6)? as u32,
+                            uid: row.get::<_, i64>(7)? as u32,
+                            gid: row.get::<_, i64>(8)? as u32,
+                            created_at: unix_to_system_time(row.get(9)?),
+                            modified_at: unix_to_system_time(row.get(10)?),
+                            accessed_at: unix_to_system_time(row.get(11)?),
+                            storage_policy_id: row.get::<_, i64>(12)? as u32,
+                        })
+                    },
+                )?)
+            })
+            .await
+            .map_err(|e| match e {
+                tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    Error::FileNotFound(format!("file_id {:?}", file_id_clone))
+                }
+                _ => Error::QueryError(format!("Failed to query file by ID: {}", e))
+            })
     }
 
-    async fn update_file(&self, _file_id: FileId, _metadata: FileMetadata) -> Result<(), Error> {
-        // TODO: Implement file update
-        todo!("Update file")
+    async fn update_file(&self, file_id: FileId, metadata: FileMetadata) -> Result<(), Error> {
+        let file_id_val = file_id.as_u64();
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "UPDATE files SET size = ?1, permissions = ?2, uid = ?3, gid = ?4, modified_at = ?5, accessed_at = ?6
+                     WHERE file_id = ?7",
+                    params![
+                        metadata.size as i64,
+                        metadata.permissions as i64,
+                        metadata.uid as i64,
+                        metadata.gid as i64,
+                        system_time_to_unix(metadata.modified_at),
+                        system_time_to_unix(metadata.accessed_at),
+                        file_id_val as i64,
+                    ],
+                )?)
+            })
+            .await
+            .map_err(|e| {
+                Error::QueryError(format!("Failed to update file: {}", e))
+            })?;
+
+        if rows_affected == 0 {
+            return Err(Error::FileNotFound(format!("file_id {:?}", file_id)));
+        }
+
+        Ok(())
     }
 
-    async fn delete_file(&self, _file_id: FileId) -> Result<(), Error> {
-        // TODO: Implement file deletion
-        todo!("Delete file")
+    async fn delete_file(&self, file_id: FileId) -> Result<(), Error> {
+        let file_id_val = file_id.as_u64();
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "DELETE FROM files WHERE file_id = ?1",
+                    params![file_id_val as i64],
+                )?)
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to delete file: {}", e)))?;
+
+        if rows_affected == 0 {
+            return Err(Error::FileNotFound(format!("file_id {:?}", file_id)));
+        }
+
+        Ok(())
     }
 
-    async fn list_directory(&self, _path: &Path) -> Result<Vec<FileRecord>, Error> {
-        // TODO: Implement directory listing
-        todo!("List directory")
+    async fn list_directory(&self, path: &Path) -> Result<Vec<FileRecord>, Error> {
+        let path_str = path.to_string_lossy().to_string();
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                     FROM files WHERE parent_path = ?1 ORDER BY name",
+                )?;
+
+                let files = stmt
+                    .query_map(params![path_str], |row| {
+                        Ok(FileRecord {
+                            file_id: FileId::new(row.get::<_, i64>(0)? as u64),
+                            inode: row.get::<_, i64>(1)? as u64,
+                            path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
+                            parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
+                            name: row.get(4)?,
+                            size: row.get::<_, i64>(5)? as u64,
+                            permissions: row.get::<_, i64>(6)? as u32,
+                            uid: row.get::<_, i64>(7)? as u32,
+                            gid: row.get::<_, i64>(8)? as u32,
+                            created_at: unix_to_system_time(row.get(9)?),
+                            modified_at: unix_to_system_time(row.get(10)?),
+                            accessed_at: unix_to_system_time(row.get(11)?),
+                            storage_policy_id: row.get::<_, i64>(12)? as u32,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(files)
+            })
+            .await
+            .map_err(|e| {
+                Error::QueryError(format!("Failed to list directory: {}", e))
+            })
     }
 
     async fn allocate_stripes(
         &self,
-        _file_id: FileId,
-        _stripes: Vec<StripeRecord>,
+        file_id: FileId,
+        stripes: Vec<StripeRecord>,
     ) -> Result<(), Error> {
-        // TODO: Implement stripe allocation
-        todo!("Allocate stripes")
+        let file_id_val = file_id.as_u64();
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+
+                for stripe in stripes {
+                    tx.execute(
+                        "INSERT INTO stripes (stripe_id, file_id, stripe_index, offset, size, checksum, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            stripe.stripe_id.as_u64() as i64,
+                            file_id_val as i64,
+                            stripe.stripe_index as i64,
+                            stripe.offset as i64,
+                            stripe.size as i64,
+                            stripe.checksum as i64,
+                            system_time_to_unix(stripe.created_at),
+                        ],
+                    )?;
+                }
+
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| {
+                Error::QueryError(format!("Failed to allocate stripes: {}", e))
+            })
     }
 
-    async fn get_stripe(&self, _stripe_id: StripeId) -> Result<StripeRecord, Error> {
-        // TODO: Implement stripe lookup
-        todo!("Get stripe")
+    async fn get_stripe(&self, stripe_id: StripeId) -> Result<StripeRecord, Error> {
+        let stripe_id_val = stripe_id.as_u64();
+        let stripe_id_clone = stripe_id;
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT stripe_id, file_id, stripe_index, offset, size, checksum, created_at
+                     FROM stripes WHERE stripe_id = ?1",
+                    params![stripe_id_val as i64],
+                    |row| {
+                        Ok(StripeRecord {
+                            stripe_id: StripeId::new(row.get::<_, i64>(0)? as u64),
+                            file_id: FileId::new(row.get::<_, i64>(1)? as u64),
+                            stripe_index: row.get::<_, i64>(2)? as u32,
+                            offset: row.get::<_, i64>(3)? as u64,
+                            size: row.get::<_, i64>(4)? as u64,
+                            checksum: row.get::<_, i64>(5)? as u32,
+                            created_at: unix_to_system_time(row.get(6)?),
+                        })
+                    },
+                )?)
+            })
+            .await
+            .map_err(|e| match e {
+                tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    Error::StripeNotFound(stripe_id_clone)
+                }
+                _ => Error::QueryError(format!("Failed to query stripe: {}", e)),
+            })
     }
 
-    async fn get_file_stripes(&self, _file_id: FileId) -> Result<Vec<StripeRecord>, Error> {
-        // TODO: Implement file stripes lookup
-        todo!("Get file stripes")
+    async fn get_file_stripes(&self, file_id: FileId) -> Result<Vec<StripeRecord>, Error> {
+        let file_id_val = file_id.as_u64();
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT stripe_id, file_id, stripe_index, offset, size, checksum, created_at
+                     FROM stripes WHERE file_id = ?1 ORDER BY stripe_index",
+                )?;
+
+                let stripes = stmt
+                    .query_map(params![file_id_val as i64], |row| {
+                        Ok(StripeRecord {
+                            stripe_id: StripeId::new(row.get::<_, i64>(0)? as u64),
+                            file_id: FileId::new(row.get::<_, i64>(1)? as u64),
+                            stripe_index: row.get::<_, i64>(2)? as u32,
+                            offset: row.get::<_, i64>(3)? as u64,
+                            size: row.get::<_, i64>(4)? as u64,
+                            checksum: row.get::<_, i64>(5)? as u32,
+                            created_at: unix_to_system_time(row.get(6)?),
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(stripes)
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to get file stripes: {}", e)))
     }
 
     async fn get_stripe_at_offset(
         &self,
-        _file_id: FileId,
-        _offset: u64,
+        file_id: FileId,
+        offset: u64,
     ) -> Result<StripeRecord, Error> {
-        // TODO: Implement stripe lookup at offset
-        todo!("Get stripe at offset")
+        let file_id_val = file_id.as_u64();
+        let file_id_clone = file_id;
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT stripe_id, file_id, stripe_index, offset, size, checksum, created_at
+                     FROM stripes
+                     WHERE file_id = ?1 AND offset <= ?2 AND (offset + size) > ?2
+                     ORDER BY stripe_index LIMIT 1",
+                    params![file_id_val as i64, offset as i64],
+                    |row| {
+                        Ok(StripeRecord {
+                            stripe_id: StripeId::new(row.get::<_, i64>(0)? as u64),
+                            file_id: FileId::new(row.get::<_, i64>(1)? as u64),
+                            stripe_index: row.get::<_, i64>(2)? as u32,
+                            offset: row.get::<_, i64>(3)? as u64,
+                            size: row.get::<_, i64>(4)? as u64,
+                            checksum: row.get::<_, i64>(5)? as u32,
+                            created_at: unix_to_system_time(row.get(6)?),
+                        })
+                    },
+                )?)
+            })
+            .await
+            .map_err(|e| match e {
+                tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    Error::QueryError(format!(
+                        "No stripe found at offset {} for file {:?}",
+                        offset, file_id_clone
+                    ))
+                }
+                _ => Error::QueryError(format!("Failed to query stripe at offset: {}", e)),
+            })
     }
 
     async fn allocate_chunks(
         &self,
-        _stripe_id: StripeId,
-        _chunks: Vec<ChunkRecord>,
+        stripe_id: StripeId,
+        chunks: Vec<ChunkRecord>,
     ) -> Result<(), Error> {
-        // TODO: Implement chunk allocation
-        todo!("Allocate chunks")
+        let stripe_id_val = stripe_id.as_u64();
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+
+                for chunk in chunks {
+                    let status = match chunk.status {
+                        ChunkStatus::Healthy => 0,
+                        ChunkStatus::Corrupt => 1,
+                        ChunkStatus::Missing => 2,
+                        ChunkStatus::Rebuilding => 3,
+                    };
+
+                    tx.execute(
+                        "INSERT INTO chunks (chunk_id, stripe_id, chunk_index, node_id, disk_id, checksum, status, created_at, last_verified)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            chunk.chunk_id.as_u64() as i64,
+                            stripe_id_val as i64,
+                            chunk.chunk_index as i64,
+                            chunk.node_id.as_u64() as i64,
+                            chunk.disk_id.as_u64() as i64,
+                            chunk.checksum as i64,
+                            status,
+                            system_time_to_unix(chunk.created_at),
+                            chunk.last_verified.map(system_time_to_unix),
+                        ],
+                    )?;
+                }
+
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| {
+                Error::QueryError(format!("Failed to allocate chunks: {}", e))
+            })
     }
 
-    async fn get_chunk(&self, _chunk_id: ChunkId) -> Result<ChunkRecord, Error> {
-        // TODO: Implement chunk lookup
-        todo!("Get chunk")
+    async fn get_chunk(&self, chunk_id: ChunkId) -> Result<ChunkRecord, Error> {
+        let chunk_id_val = chunk_id.as_u64();
+        let chunk_id_clone = chunk_id;
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT chunk_id, stripe_id, chunk_index, node_id, disk_id, checksum, status, created_at, last_verified
+                     FROM chunks WHERE chunk_id = ?1",
+                    params![chunk_id_val as i64],
+                    |row| {
+                        let status_val: i64 = row.get(6)?;
+                        let status = match status_val {
+                            0 => ChunkStatus::Healthy,
+                            1 => ChunkStatus::Corrupt,
+                            2 => ChunkStatus::Missing,
+                            3 => ChunkStatus::Rebuilding,
+                            _ => ChunkStatus::Healthy,
+                        };
+
+                        Ok(ChunkRecord {
+                            chunk_id: ChunkId::new(row.get::<_, i64>(0)? as u64),
+                            stripe_id: StripeId::new(row.get::<_, i64>(1)? as u64),
+                            chunk_index: row.get::<_, i64>(2)? as u8,
+                            node_id: NodeId::new(row.get::<_, i64>(3)? as u64),
+                            disk_id: DiskId::new(row.get::<_, i64>(4)? as u64),
+                            checksum: row.get::<_, i64>(5)? as u32,
+                            status,
+                            created_at: unix_to_system_time(row.get(7)?),
+                            last_verified: row.get::<_, Option<i64>>(8)?.map(unix_to_system_time),
+                        })
+                    },
+                )?)
+            })
+            .await
+            .map_err(|e| match e {
+                tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    Error::ChunkNotFound(chunk_id_clone)
+                }
+                _ => Error::QueryError(format!("Failed to query chunk: {}", e))
+            })
     }
 
-    async fn get_stripe_chunks(&self, _stripe_id: StripeId) -> Result<Vec<ChunkRecord>, Error> {
-        // TODO: Implement stripe chunks lookup
-        todo!("Get stripe chunks")
+    async fn get_stripe_chunks(&self, stripe_id: StripeId) -> Result<Vec<ChunkRecord>, Error> {
+        let stripe_id_val = stripe_id.as_u64();
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT chunk_id, stripe_id, chunk_index, node_id, disk_id, checksum, status, created_at, last_verified
+                     FROM chunks WHERE stripe_id = ?1 ORDER BY chunk_index",
+                )?;
+
+                let chunks = stmt
+                    .query_map(params![stripe_id_val as i64], |row| {
+                        let status_val: i64 = row.get(6)?;
+                        let status = match status_val {
+                            0 => ChunkStatus::Healthy,
+                            1 => ChunkStatus::Corrupt,
+                            2 => ChunkStatus::Missing,
+                            3 => ChunkStatus::Rebuilding,
+                            _ => ChunkStatus::Healthy,
+                        };
+
+                        Ok(ChunkRecord {
+                            chunk_id: ChunkId::new(row.get::<_, i64>(0)? as u64),
+                            stripe_id: StripeId::new(row.get::<_, i64>(1)? as u64),
+                            chunk_index: row.get::<_, i64>(2)? as u8,
+                            node_id: NodeId::new(row.get::<_, i64>(3)? as u64),
+                            disk_id: DiskId::new(row.get::<_, i64>(4)? as u64),
+                            checksum: row.get::<_, i64>(5)? as u32,
+                            status,
+                            created_at: unix_to_system_time(row.get(7)?),
+                            last_verified: row.get::<_, Option<i64>>(8)?.map(unix_to_system_time),
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(chunks)
+            })
+            .await
+            .map_err(|e| {
+                Error::QueryError(format!("Failed to get stripe chunks: {}", e))
+            })
     }
 
     async fn update_chunk_location(
         &self,
-        _chunk_id: ChunkId,
-        _node_id: NodeId,
-        _disk_id: DiskId,
+        chunk_id: ChunkId,
+        node_id: NodeId,
+        disk_id: DiskId,
     ) -> Result<(), Error> {
-        // TODO: Implement chunk location update
-        todo!("Update chunk location")
+        let chunk_id_val = chunk_id.as_u64();
+        let node_id_val = node_id.as_u64();
+        let disk_id_val = disk_id.as_u64();
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "UPDATE chunks SET node_id = ?1, disk_id = ?2 WHERE chunk_id = ?3",
+                    params![node_id_val as i64, disk_id_val as i64, chunk_id_val as i64,],
+                )?)
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to update chunk location: {}", e)))?;
+
+        if rows_affected == 0 {
+            return Err(Error::ChunkNotFound(chunk_id));
+        }
+
+        Ok(())
     }
 
-    async fn mark_chunk_corrupt(&self, _chunk_id: ChunkId) -> Result<(), Error> {
-        // TODO: Implement mark chunk corrupt
-        todo!("Mark chunk corrupt")
+    async fn mark_chunk_corrupt(&self, chunk_id: ChunkId) -> Result<(), Error> {
+        let chunk_id_val = chunk_id.as_u64();
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "UPDATE chunks SET status = 1 WHERE chunk_id = ?1",
+                    params![chunk_id_val as i64],
+                )?)
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to mark chunk corrupt: {}", e)))?;
+
+        if rows_affected == 0 {
+            return Err(Error::ChunkNotFound(chunk_id));
+        }
+
+        Ok(())
     }
 
     async fn update_chunk_verification(
         &self,
-        _chunk_id: ChunkId,
-        _verified_at: SystemTime,
+        chunk_id: ChunkId,
+        verified_at: SystemTime,
     ) -> Result<(), Error> {
-        // TODO: Implement chunk verification update
-        todo!("Update chunk verification")
+        let chunk_id_val = chunk_id.as_u64();
+        let verified_at_unix = system_time_to_unix(verified_at);
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "UPDATE chunks SET last_verified = ?1 WHERE chunk_id = ?2",
+                    params![verified_at_unix, chunk_id_val as i64],
+                )?)
+            })
+            .await
+            .map_err(|e| {
+                Error::QueryError(format!("Failed to update chunk verification: {}", e))
+            })?;
+
+        if rows_affected == 0 {
+            return Err(Error::ChunkNotFound(chunk_id));
+        }
+
+        Ok(())
     }
 
     async fn acquire_read_lock(
         &self,
-        _file_id: FileId,
-        _client_id: ClientId,
-        _expires_at: SystemTime,
+        file_id: FileId,
+        client_id: ClientId,
+        expires_at: SystemTime,
     ) -> Result<u64, Error> {
-        // TODO: Implement read lock acquisition
-        todo!("Acquire read lock")
+        let file_id_val = file_id.as_u64();
+        let client_id_val = client_id.as_u64();
+        let expires_at_unix = system_time_to_unix(expires_at);
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                // Check for conflicting write locks
+                let has_write_lock: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM locks WHERE file_id = ?1 AND lock_type = 1 AND expires_at > ?2)",
+                    params![file_id_val as i64, system_time_to_unix(SystemTime::now())],
+                    |row| row.get(0),
+                )?;
+
+                if has_write_lock {
+                    return Err(tokio_rusqlite::Error::Rusqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                        std::io::Error::new(std::io::ErrorKind::WouldBlock, "Lock conflict"),
+                    ))));
+                }
+
+                // Acquire read lock
+                let now = system_time_to_unix(SystemTime::now());
+                conn.execute(
+                    "INSERT INTO locks (file_id, client_id, lock_type, acquired_at, expires_at)
+                     VALUES (?1, ?2, 0, ?3, ?4)",
+                    params![file_id_val as i64, client_id_val as i64, now, expires_at_unix,],
+                )?;
+
+                Ok(conn.last_insert_rowid() as u64)
+            })
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("Lock conflict") {
+                    Error::LockConflict {
+                        file_id,
+                        lock_type: "read".to_string(),
+                    }
+                } else {
+                    Error::QueryError(format!("Failed to acquire read lock: {}", e))
+                }
+            })
     }
 
     async fn acquire_write_lock(
         &self,
-        _file_id: FileId,
-        _client_id: ClientId,
-        _expires_at: SystemTime,
+        file_id: FileId,
+        client_id: ClientId,
+        expires_at: SystemTime,
     ) -> Result<u64, Error> {
-        // TODO: Implement write lock acquisition
-        todo!("Acquire write lock")
+        let file_id_val = file_id.as_u64();
+        let client_id_val = client_id.as_u64();
+        let expires_at_unix = system_time_to_unix(expires_at);
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                // Check for any existing locks
+                let has_any_lock: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM locks WHERE file_id = ?1 AND expires_at > ?2)",
+                    params![file_id_val as i64, system_time_to_unix(SystemTime::now())],
+                    |row| row.get(0),
+                )?;
+
+                if has_any_lock {
+                    return Err(tokio_rusqlite::Error::Rusqlite(
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "Lock conflict",
+                        ))),
+                    ));
+                }
+
+                // Acquire write lock
+                let now = system_time_to_unix(SystemTime::now());
+                conn.execute(
+                    "INSERT INTO locks (file_id, client_id, lock_type, acquired_at, expires_at)
+                     VALUES (?1, ?2, 1, ?3, ?4)",
+                    params![
+                        file_id_val as i64,
+                        client_id_val as i64,
+                        now,
+                        expires_at_unix,
+                    ],
+                )?;
+
+                Ok(conn.last_insert_rowid() as u64)
+            })
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("Lock conflict") {
+                    Error::LockConflict {
+                        file_id,
+                        lock_type: "write".to_string(),
+                    }
+                } else {
+                    Error::QueryError(format!("Failed to acquire write lock: {}", e))
+                }
+            })
     }
 
-    async fn release_lock(&self, _file_id: FileId, _client_id: ClientId) -> Result<(), Error> {
-        // TODO: Implement lock release
-        todo!("Release lock")
+    async fn release_lock(&self, file_id: FileId, client_id: ClientId) -> Result<(), Error> {
+        let file_id_val = file_id.as_u64();
+        let client_id_val = client_id.as_u64();
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "DELETE FROM locks WHERE file_id = ?1 AND client_id = ?2",
+                    params![file_id_val as i64, client_id_val as i64],
+                )?)
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to release lock: {}", e)))?;
+
+        if rows_affected == 0 {
+            return Err(Error::LockNotFound { file_id, client_id });
+        }
+
+        Ok(())
     }
 
     async fn extend_lock(
         &self,
-        _file_id: FileId,
-        _client_id: ClientId,
-        _new_expiry: SystemTime,
+        file_id: FileId,
+        client_id: ClientId,
+        new_expiry: SystemTime,
     ) -> Result<(), Error> {
-        // TODO: Implement lock extension
-        todo!("Extend lock")
+        let file_id_val = file_id.as_u64();
+        let client_id_val = client_id.as_u64();
+        let new_expiry_unix = system_time_to_unix(new_expiry);
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "UPDATE locks SET expires_at = ?1 WHERE file_id = ?2 AND client_id = ?3",
+                    params![new_expiry_unix, file_id_val as i64, client_id_val as i64,],
+                )?)
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to extend lock: {}", e)))?;
+
+        if rows_affected == 0 {
+            return Err(Error::LockNotFound { file_id, client_id });
+        }
+
+        Ok(())
     }
 
-    async fn get_file_locks(&self, _file_id: FileId) -> Result<Vec<LockRecord>, Error> {
-        // TODO: Implement get file locks
-        todo!("Get file locks")
+    async fn get_file_locks(&self, file_id: FileId) -> Result<Vec<LockRecord>, Error> {
+        let file_id_val = file_id.as_u64();
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT lock_id, file_id, client_id, lock_type, acquired_at, expires_at
+                     FROM locks WHERE file_id = ?1",
+                )?;
+
+                let locks = stmt
+                    .query_map(params![file_id_val as i64], |row| {
+                        let lock_type_val: i64 = row.get(3)?;
+                        let lock_type = match lock_type_val {
+                            0 => LockType::Read,
+                            1 => LockType::Write,
+                            _ => LockType::Read,
+                        };
+
+                        Ok(LockRecord {
+                            lock_id: row.get::<_, i64>(0)? as u64,
+                            file_id: FileId::new(row.get::<_, i64>(1)? as u64),
+                            client_id: ClientId::new(row.get::<_, i64>(2)? as u64),
+                            lock_type,
+                            acquired_at: unix_to_system_time(row.get(4)?),
+                            expires_at: unix_to_system_time(row.get(5)?),
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(locks)
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to get file locks: {}", e)))
     }
 
     async fn cleanup_expired_locks(&self) -> Result<u64, Error> {
-        // TODO: Implement expired lock cleanup
-        todo!("Cleanup expired locks")
+        let now = system_time_to_unix(SystemTime::now());
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute("DELETE FROM locks WHERE expires_at <= ?1", params![now])?)
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to cleanup expired locks: {}", e)))?;
+
+        Ok(rows_affected as u64)
     }
 
     async fn reserve_inode(&self) -> Result<u64, Error> {
-        // TODO: Implement inode reservation
-        todo!("Reserve inode")
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+
+                // Get next inode
+                let inode: i64 =
+                    tx.query_row("SELECT next_inode FROM inode_pool WHERE id = 1", [], |row| {
+                        row.get(0)
+                    })?;
+
+                // Increment next_inode
+                tx.execute(
+                    "UPDATE inode_pool SET next_inode = next_inode + 1 WHERE id = 1",
+                    [],
+                )?;
+
+                // Create reservation (1 hour expiration)
+                let now = system_time_to_unix(SystemTime::now());
+                let expires_at = now + 3600; // 1 hour
+                tx.execute(
+                    "INSERT INTO inode_reservations (inode, reserved_at, expires_at) VALUES (?1, ?2, ?3)",
+                    params![inode, now, expires_at],
+                )?;
+
+                tx.commit()?;
+                Ok(inode as u64)
+            })
+            .await
+            .map_err(|e| {
+                Error::QueryError(format!("Failed to reserve inode: {}", e))
+            })
     }
 
-    async fn confirm_inode(&self, _inode: u64) -> Result<(), Error> {
-        // TODO: Implement inode confirmation
-        todo!("Confirm inode")
+    async fn confirm_inode(&self, inode: u64) -> Result<(), Error> {
+        let now = system_time_to_unix(SystemTime::now());
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                // Check if inode is reserved and not expired
+                let is_valid: Option<i64> = conn
+                    .query_row(
+                        "SELECT inode FROM inode_reservations WHERE inode = ?1 AND expires_at > ?2",
+                        params![inode as i64, now],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+
+                if is_valid.is_none() {
+                    return Err(tokio_rusqlite::Error::Rusqlite(
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "Inode not reserved",
+                        ))),
+                    ));
+                }
+
+                // Remove reservation (inode is now in use via files table)
+                conn.execute(
+                    "DELETE FROM inode_reservations WHERE inode = ?1",
+                    params![inode as i64],
+                )?;
+
+                Ok(())
+            })
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("Inode not reserved") {
+                    Error::InodeNotReserved(inode)
+                } else {
+                    Error::QueryError(format!("Failed to confirm inode: {}", e))
+                }
+            })
     }
 
-    async fn release_inode(&self, _inode: u64) -> Result<(), Error> {
-        // TODO: Implement inode release
-        todo!("Release inode")
+    async fn release_inode(&self, inode: u64) -> Result<(), Error> {
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "DELETE FROM inode_reservations WHERE inode = ?1",
+                    params![inode as i64],
+                )?)
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to release inode: {}", e)))?;
+
+        if rows_affected == 0 {
+            return Err(Error::InodeNotReserved(inode));
+        }
+
+        Ok(())
     }
 
     async fn cleanup_expired_inode_reservations(&self) -> Result<u64, Error> {
-        // TODO: Implement expired inode reservation cleanup
-        todo!("Cleanup expired inode reservations")
+        let now = system_time_to_unix(SystemTime::now());
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "DELETE FROM inode_reservations WHERE expires_at <= ?1",
+                    params![now],
+                )?)
+            })
+            .await
+            .map_err(|e| {
+                Error::QueryError(format!(
+                    "Failed to cleanup expired inode reservations: {}",
+                    e
+                ))
+            })?;
+
+        Ok(rows_affected as u64)
     }
 
-    async fn create_snapshot(&self, _snapshot_path: &Path) -> Result<(), Error> {
-        // TODO: Implement snapshot creation
-        todo!("Create snapshot")
+    async fn create_snapshot(&self, snapshot_path: &Path) -> Result<(), Error> {
+        let snapshot_path_buf = snapshot_path.to_path_buf();
+
+        // Create parent directory if needed
+        if let Some(parent) = snapshot_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                Error::SnapshotFailed(format!("Failed to create snapshot directory: {}", e))
+            })?;
+        }
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                // Use SQLite backup API
+                let mut snapshot_conn = rusqlite::Connection::open(&snapshot_path_buf)?;
+
+                let backup = rusqlite::backup::Backup::new(conn, &mut snapshot_conn)?;
+                backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+
+                Ok(())
+            })
+            .await
+            .map_err(|e| Error::SnapshotFailed(format!("Snapshot creation failed: {}", e)))
     }
 
-    async fn restore_from_snapshot(&self, _snapshot_path: &Path) -> Result<(), Error> {
-        // TODO: Implement snapshot restoration
-        todo!("Restore from snapshot")
+    async fn restore_from_snapshot(&self, snapshot_path: &Path) -> Result<(), Error> {
+        let snapshot_path_buf = snapshot_path.to_path_buf();
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                // Open snapshot database
+                let mut snapshot_conn = rusqlite::Connection::open(&snapshot_path_buf)?;
+
+                // Restore from snapshot to main database
+                let backup = rusqlite::backup::Backup::new(&mut snapshot_conn, conn)?;
+                backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+
+                Ok(())
+            })
+            .await
+            .map_err(|e| Error::RestoreFailed(format!("Snapshot restoration failed: {}", e)))
     }
 }

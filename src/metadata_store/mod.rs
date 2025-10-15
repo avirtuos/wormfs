@@ -105,6 +105,9 @@ pub mod factory;
 pub mod implementation;
 pub mod types;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export the concrete implementation
 pub use implementation::MetadataStoreImpl;
 
@@ -152,18 +155,26 @@ pub trait MetadataStore: Send + Sync + Clone {
     ///
     /// The newly created file's identifier.
     ///
+    /// # Parameters
+    ///
+    /// * `file_id` - Caller-provided unique identifier (use `FileId::generate()`)
+    /// * `path` - File path
+    /// * `inode` - Inode number (from inode reservation system)
+    /// * `metadata` - File metadata
+    ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - File already exists at path
+    /// - File already exists at path or file_id
     /// - Parent directory doesn't exist
     /// - Database constraint violation
     async fn create_file(
         &self,
+        file_id: FileId,
         path: &Path,
         inode: u64,
         metadata: FileMetadata,
-    ) -> Result<FileId, Error>;
+    ) -> Result<(), Error>;
 
     /// Get file metadata by path.
     async fn get_file_by_path(&self, path: &Path) -> Result<FileRecord, Error>;
