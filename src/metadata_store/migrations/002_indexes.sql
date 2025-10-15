@@ -34,6 +34,10 @@ CREATE INDEX IF NOT EXISTS idx_chunks_status ON chunks(status);
 -- Speeds up get_file_locks() and lock conflict detection
 CREATE INDEX IF NOT EXISTS idx_locks_file ON locks(file_id);
 
+-- Composite index on locks(file_id, client_id) for lock operations
+-- Optimizes release_lock() and extend_lock() queries
+CREATE INDEX IF NOT EXISTS idx_locks_file_client ON locks(file_id, client_id);
+
 -- Index on locks(expires_at) for cleanup operations
 -- Critical for cleanup_expired_locks() performance
 CREATE INDEX IF NOT EXISTS idx_locks_expires ON locks(expires_at);

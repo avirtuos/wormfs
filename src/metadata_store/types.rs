@@ -35,7 +35,10 @@ pub struct Config {
     /// Enable WAL mode for better concurrent access
     pub enable_wal: bool,
 
-    /// SQLite page cache size in MB (default: 10MB)
+    /// SQLite page cache size in MB (default: 10MB, maximum: 2047MB)
+    ///
+    /// Values above 2047 will cause initialization to fail with `Error::ConfigInvalid`
+    /// to prevent integer overflow when converting to KB.
     pub cache_size_mb: usize,
 
     /// Enable foreign key constraints
@@ -151,6 +154,14 @@ pub enum Error {
     /// Database connection error
     #[error("Database connection error: {0}")]
     ConnectionError(String),
+
+    /// Inode space exhausted (reached maximum safe inode value)
+    #[error("Inode space exhausted: cannot allocate more inodes (max: 2^63-1)")]
+    InodeSpaceExhausted,
+
+    /// Configuration validation error
+    #[error("Invalid configuration: {0}")]
+    ConfigInvalid(String),
 
     /// Configuration error
     #[error("Configuration error: {0}")]

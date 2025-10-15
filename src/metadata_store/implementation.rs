@@ -11,6 +11,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rusqlite::Connection;
 
+/// Maximum safe inode value (SQLite INTEGER is signed i64).
+/// While the API uses u64 for consistency with filesystem conventions,
+/// SQLite's INTEGER type can only safely store values up to 2^63-1.
+/// This is still 9,223,372,036,854,775,807 inodes - effectively unlimited.
+const MAX_SAFE_INODE: u64 = i64::MAX as u64;
+
+/// Maximum cache size in MB to prevent i32 overflow when converting to KB.
+const MAX_CACHE_SIZE_MB: usize = 2047;
+
 /// Convert SystemTime to Unix timestamp (seconds since epoch).
 fn system_time_to_unix(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
@@ -64,6 +73,14 @@ impl MetadataStoreImpl {
     ///
     /// Returns an error if database initialization fails.
     pub(super) async fn new(config: Config) -> Result<Self, Error> {
+        // Validate configuration
+        if config.cache_size_mb > MAX_CACHE_SIZE_MB {
+            return Err(Error::ConfigInvalid(format!(
+                "cache_size_mb ({}) exceeds maximum of {} MB to prevent integer overflow",
+                config.cache_size_mb, MAX_CACHE_SIZE_MB
+            )));
+        }
+
         // Create database directory if it doesn't exist
         if let Some(parent) = config.database_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -116,6 +133,7 @@ impl MetadataStoreImpl {
             }
 
             // Set cache size (negative value means KB)
+            // Safe to cast after validation in new(): cache_size_mb <= MAX_CACHE_SIZE_MB
             let cache_size = -(cache_size_mb as i32 * 1024);
             pragmas.push(format!("PRAGMA cache_size={};", cache_size));
 
@@ -830,28 +848,37 @@ impl MetadataStore for MetadataStoreImpl {
         self.inner
             .conn
             .call(move |conn| {
-                // Check for conflicting write locks
-                let has_write_lock: bool = conn.query_row(
+                // Use IMMEDIATE transaction to prevent race conditions
+                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+                // Capture time inside transaction for consistency
+                let now = system_time_to_unix(SystemTime::now());
+
+                // Check for conflicting write locks within the transaction
+                let has_write_lock: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM locks WHERE file_id = ?1 AND lock_type = 1 AND expires_at > ?2)",
-                    params![file_id_val as i64, system_time_to_unix(SystemTime::now())],
+                    params![file_id_val as i64, now],
                     |row| row.get(0),
                 )?;
 
                 if has_write_lock {
-                    return Err(tokio_rusqlite::Error::Rusqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(
-                        std::io::Error::new(std::io::ErrorKind::WouldBlock, "Lock conflict"),
-                    ))));
+                    return Err(tokio_rusqlite::Error::Rusqlite(
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            std::io::Error::new(std::io::ErrorKind::WouldBlock, "Lock conflict: write lock exists")
+                        ))
+                    ));
                 }
 
                 // Acquire read lock
-                let now = system_time_to_unix(SystemTime::now());
-                conn.execute(
+                tx.execute(
                     "INSERT INTO locks (file_id, client_id, lock_type, acquired_at, expires_at)
                      VALUES (?1, ?2, 0, ?3, ?4)",
-                    params![file_id_val as i64, client_id_val as i64, now, expires_at_unix,],
+                    params![file_id_val as i64, client_id_val as i64, now, expires_at_unix],
                 )?;
 
-                Ok(conn.last_insert_rowid() as u64)
+                let lock_id = tx.last_insert_rowid() as u64;
+                tx.commit()?;
+                Ok(lock_id)
             })
             .await
             .map_err(|e| {
@@ -879,10 +906,17 @@ impl MetadataStore for MetadataStoreImpl {
         self.inner
             .conn
             .call(move |conn| {
-                // Check for any existing locks
-                let has_any_lock: bool = conn.query_row(
+                // Use IMMEDIATE transaction to prevent race conditions
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+                // Capture time inside transaction for consistency
+                let now = system_time_to_unix(SystemTime::now());
+
+                // Check for any existing locks within the transaction
+                let has_any_lock: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM locks WHERE file_id = ?1 AND expires_at > ?2)",
-                    params![file_id_val as i64, system_time_to_unix(SystemTime::now())],
+                    params![file_id_val as i64, now],
                     |row| row.get(0),
                 )?;
 
@@ -890,25 +924,26 @@ impl MetadataStore for MetadataStoreImpl {
                     return Err(tokio_rusqlite::Error::Rusqlite(
                         rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
                             std::io::ErrorKind::WouldBlock,
-                            "Lock conflict",
+                            "Lock conflict: existing lock(s)",
                         ))),
                     ));
                 }
 
                 // Acquire write lock
-                let now = system_time_to_unix(SystemTime::now());
-                conn.execute(
+                tx.execute(
                     "INSERT INTO locks (file_id, client_id, lock_type, acquired_at, expires_at)
                      VALUES (?1, ?2, 1, ?3, ?4)",
                     params![
                         file_id_val as i64,
                         client_id_val as i64,
                         now,
-                        expires_at_unix,
+                        expires_at_unix
                     ],
                 )?;
 
-                Ok(conn.last_insert_rowid() as u64)
+                let lock_id = tx.last_insert_rowid() as u64;
+                tx.commit()?;
+                Ok(lock_id)
             })
             .await
             .map_err(|e| {
@@ -1013,12 +1048,12 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn cleanup_expired_locks(&self) -> Result<u64, Error> {
-        let now = system_time_to_unix(SystemTime::now());
-
         let rows_affected = self
             .inner
             .conn
             .call(move |conn| {
+                // Capture time inside the call to ensure consistency
+                let now = system_time_to_unix(SystemTime::now());
                 Ok(conn.execute("DELETE FROM locks WHERE expires_at <= ?1", params![now])?)
             })
             .await
@@ -1039,6 +1074,17 @@ impl MetadataStore for MetadataStoreImpl {
                         row.get(0)
                     })?;
 
+                // Check for overflow before incrementing
+                // SQLite INTEGER is signed i64, so we can't exceed i64::MAX
+                if inode >= i64::MAX {
+                    return Err(tokio_rusqlite::Error::Other(Box::new(
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "Inode space exhausted"
+                        )
+                    )));
+                }
+
                 // Increment next_inode
                 tx.execute(
                     "UPDATE inode_pool SET next_inode = next_inode + 1 WHERE id = 1",
@@ -1058,7 +1104,11 @@ impl MetadataStore for MetadataStoreImpl {
             })
             .await
             .map_err(|e| {
-                Error::QueryError(format!("Failed to reserve inode: {}", e))
+                if e.to_string().contains("Inode space exhausted") {
+                    Error::InodeSpaceExhausted
+                } else {
+                    Error::QueryError(format!("Failed to reserve inode: {}", e))
+                }
             })
     }
 

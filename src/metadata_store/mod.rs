@@ -282,6 +282,13 @@ pub trait MetadataStore: Send + Sync + Clone {
     async fn get_file_locks(&self, file_id: FileId) -> Result<Vec<LockRecord>, Error>;
 
     /// Clean up expired locks.
+    ///
+    /// **IMPORTANT**: This method must be called periodically by the application to prevent
+    /// unbounded growth of the locks table. Expired locks are not automatically removed.
+    ///
+    /// Recommended frequency: Every 5-60 minutes depending on lock duration and system load.
+    ///
+    /// Returns the number of locks removed.
     async fn cleanup_expired_locks(&self) -> Result<u64, Error>;
 
     // ===== Inode Reservation Operations =====
@@ -300,10 +307,16 @@ pub trait MetadataStore: Send + Sync + Clone {
     ///
     /// The reserved inode number.
     ///
+    /// # Inode Limits
+    ///
+    /// While the API uses u64 for inodes, SQLite's INTEGER type is signed i64.
+    /// The practical maximum is 2^63-1 (9,223,372,036,854,775,807) inodes.
+    /// This is effectively unlimited for any real-world filesystem.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - No inodes are available (`Error::NoAvailableInodes`)
+    /// - Inode space is exhausted (`Error::InodeSpaceExhausted`)
     /// - Database operation fails
     async fn reserve_inode(&self) -> Result<u64, Error>;
 

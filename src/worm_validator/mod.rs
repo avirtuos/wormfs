@@ -15,13 +15,14 @@
 //!
 //! ## Usage
 //!
-//! ```no_run
-//! use wormfs::worm_validator::{WormValidator, ValidatorConfig};
+//! ```ignore
+//! use wormfs::worm_validator::{WormValidator, ValidatorConfig, TestResults};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let config = ValidatorConfig::default();
-//!     let mut validator = WormValidator::new(config).await?;
+//!     // Create a concrete implementation of WormValidator
+//!     let mut validator = create_validator(config).await?;
 //!     let results = validator.run_all_tests().await;
 //!     validator.cleanup().await?;
 //!     Ok(())
