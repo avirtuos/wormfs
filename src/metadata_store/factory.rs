@@ -33,10 +33,10 @@ impl MetadataStoreFactory {
     /// use wormfs::metadata_store::{MetadataStoreFactory, Config};
     ///
     /// let config = Config::default();
-    /// let store = MetadataStoreFactory::create(config)?;
+    /// let store = MetadataStoreFactory::create(config).await?;
     /// store.initialize_schema().await?;
     /// ```
-    pub fn create(config: Config) -> Result<impl MetadataStore, Error> {
-        MetadataStoreImpl::new(config)
+    pub async fn create(config: Config) -> Result<impl MetadataStore, Error> {
+        MetadataStoreImpl::new(config).await
     }
 }

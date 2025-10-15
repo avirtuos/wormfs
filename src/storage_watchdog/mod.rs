@@ -69,6 +69,7 @@ pub use types::{
 /// - Shallow checks: Fast verification of chunk presence
 /// - Deep checks: Thorough validation including checksums and stripe reconstruction
 /// - Repair coordination: Managing the repair queue and executing repairs
+#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait StorageWatchdog: Send + Sync {
     /// Create a new StorageWatchdog.
