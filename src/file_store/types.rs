@@ -226,6 +226,22 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
+    /// Erasure coding operation failed
+    #[error("Erasure coding failed: {0}")]
+    ErasureCodingFailed(String),
+
+    /// Insufficient shards available for reconstruction
+    #[error("Insufficient shards: need {required}, have {available}")]
+    InsufficientShards { required: usize, available: usize },
+
+    /// Chunk corrupt
+    #[error("Chunk {0:?} is corrupt: {1}")]
+    ChunkCorrupt(ChunkId, String),
+
+    /// Feature not yet implemented
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
+
     /// I/O error
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

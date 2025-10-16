@@ -93,7 +93,7 @@ mockall = "0.12"
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 [features]
-default = ["rusqlite", "tokio-rusqlite"]
+default = ["rusqlite", "tokio-rusqlite", "reed-solomon-erasure"]
 test-utils = ["mockall"]
 # Note: sqlx and rusqlite cannot be used together due to libsqlite3-sys version conflicts
 full = ["libp2p", "openraft", "rusqlite", "tokio-rusqlite", "redb", "reed-solomon-erasure", "tonic", "prost"]

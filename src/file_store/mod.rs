@@ -71,9 +71,12 @@
 //!   └── ...
 //! ```
 
+pub mod erasure_coding;
+pub mod implementation;
 pub mod types;
 
 use async_trait::async_trait;
+pub use implementation::FileStoreImpl;
 use std::path::PathBuf;
 pub use types::{
     ChunkCacheEntry, ChunkData, ChunkHeader, ChunkId, ChunkMetadata, CompressionAlgorithm, Config,
