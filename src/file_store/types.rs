@@ -140,8 +140,17 @@ pub struct Config {
     /// Paths to disk mount points for chunk storage
     pub disk_paths: Vec<PathBuf>,
 
-    /// Default stripe size in bytes
-    pub default_stripe_size: u64,
+    /// Maximum chunk size in bytes
+    ///
+    /// This controls the target size of each chunk/shard after erasure encoding.
+    /// Actual stripe size will be chunk_size × data_shards.
+    ///
+    /// Affects:
+    /// - Disk I/O granularity (larger = more sequential, fewer seeks)
+    /// - Memory usage during encoding/decoding
+    /// - Network transfer sizes (Phase 2+)
+    /// - Rebuild granularity
+    pub max_chunk_size: u64,
 
     /// Default number of data shards for erasure coding
     pub default_data_shards: u8,
@@ -333,8 +342,11 @@ pub struct StoragePolicy {
     /// Number of parity shards for erasure coding
     pub parity_shards: u8,
 
-    /// Stripe size in bytes
-    pub stripe_size: u64,
+    /// Target chunk size in bytes
+    ///
+    /// This is the target size for each chunk/shard after erasure encoding.
+    /// The actual stripe size will be chunk_size × data_shards.
+    pub chunk_size: u64,
 
     /// Compression algorithm to use
     pub compression: CompressionAlgorithm,
@@ -345,13 +357,13 @@ impl StoragePolicy {
     pub fn new(
         data_shards: u8,
         parity_shards: u8,
-        stripe_size: u64,
+        chunk_size: u64,
         compression: CompressionAlgorithm,
     ) -> Self {
         Self {
             data_shards,
             parity_shards,
-            stripe_size,
+            chunk_size,
             compression,
         }
     }
@@ -369,6 +381,15 @@ impl StoragePolicy {
     /// Get the maximum number of failures that can be tolerated.
     pub fn max_failures(&self) -> u8 {
         self.parity_shards
+    }
+
+    /// Calculate the stripe size (chunk_size × data_shards).
+    ///
+    /// The stripe size is the maximum amount of original data that will be
+    /// encoded into a single stripe. Each stripe is divided into data_shards
+    /// chunks, each of size chunk_size (approximately).
+    pub fn stripe_size(&self) -> u64 {
+        self.chunk_size * self.data_shards as u64
     }
 }
 

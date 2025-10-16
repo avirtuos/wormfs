@@ -113,6 +113,7 @@ pub trait FileStore: Send + Sync {
     ///
     /// * `file_id` - File this stripe belongs to
     /// * `stripe_id` - Unique stripe identifier
+    /// * `stripe_offset` - Byte offset where this stripe starts in the file
     /// * `data` - Raw stripe data (up to stripe_size bytes)
     /// * `policy` - Storage policy (data shards, parity shards, stripe size)
     ///
@@ -130,6 +131,7 @@ pub trait FileStore: Send + Sync {
         &self,
         file_id: FileId,
         stripe_id: StripeId,
+        stripe_offset: u64,
         data: Vec<u8>,
         policy: StoragePolicy,
     ) -> Result<StripeMetadata, Error>;
@@ -179,8 +181,9 @@ pub trait FileStore: Send + Sync {
     ///
     /// * `file_id` - File this stripe belongs to
     /// * `stripe_id` - Stripe identifier (reused for new version)
+    /// * `stripe_offset` - Byte offset where this stripe starts in the file
     /// * `existing_chunks` - Current chunk locations from metadata
-    /// * `offset` - Byte offset within stripe where update begins
+    /// * `offset` - Byte offset **within the stripe** where update begins
     /// * `new_data` - Data to write at offset
     /// * `policy` - Storage policy for re-encoding
     ///
@@ -198,6 +201,7 @@ pub trait FileStore: Send + Sync {
         &self,
         file_id: FileId,
         stripe_id: StripeId,
+        stripe_offset: u64,
         existing_chunks: Vec<ChunkMetadata>,
         offset: u64,
         new_data: Vec<u8>,

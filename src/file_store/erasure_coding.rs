@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn test_encode_decode_simple() {
         let policy = StoragePolicy {
-            stripe_size: 1024,
+            chunk_size: 341,  // 1024 / 3 data shards ≈ 341 bytes per chunk
             data_shards: 3,
             parity_shards: 2,
             compression: CompressionAlgorithm::None,
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn test_decode_with_missing_shards() {
         let policy = StoragePolicy {
-            stripe_size: 1024,
+            chunk_size: 256,  // 1024 / 4 data shards = 256 bytes per chunk
             data_shards: 4,
             parity_shards: 2,
             compression: CompressionAlgorithm::None,
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn test_decode_insufficient_shards() {
         let policy = StoragePolicy {
-            stripe_size: 1024,
+            chunk_size: 341,  // 1024 / 3 data shards ≈ 341 bytes per chunk
             data_shards: 3,
             parity_shards: 2,
             compression: CompressionAlgorithm::None,
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn test_verify_shards() {
         let policy = StoragePolicy {
-            stripe_size: 1024,
+            chunk_size: 341,  // 1024 / 3 data shards ≈ 341 bytes per chunk
             data_shards: 3,
             parity_shards: 2,
             compression: CompressionAlgorithm::None,
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn test_large_data() {
         let policy = StoragePolicy {
-            stripe_size: 1024 * 1024, // 1MB
+            chunk_size: 128 * 1024,  // 128KB per chunk, stripe = 128KB × 8 = 1MB
             data_shards: 8,
             parity_shards: 4,
             compression: CompressionAlgorithm::None,

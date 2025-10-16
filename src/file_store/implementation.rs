@@ -222,6 +222,7 @@ impl FileStore for FileStoreImpl {
         &self,
         file_id: FileId,
         stripe_id: StripeId,
+        stripe_offset: u64,
         data: Vec<u8>,
         policy: StoragePolicy,
     ) -> Result<StripeMetadata, Error> {
@@ -260,8 +261,8 @@ impl FileStore for FileStoreImpl {
                 chunk_id,
                 stripe_id,
                 file_id,
-                0, // stripe_start_offset - will be set when integrated with MetadataStore
-                original_size as u64, // stripe_end_offset
+                stripe_offset, // stripe_start_offset - where stripe starts in file
+                stripe_offset + original_size as u64, // stripe_end_offset - where stripe ends in file
                 chunk_index as u8,
                 policy.data_shards,
                 policy.parity_shards,
@@ -334,10 +335,12 @@ impl FileStore for FileStoreImpl {
                     } else {
                         // Extract policy from first valid chunk
                         if policy.is_none() {
+                            // Derive chunk_size from actual shard size
+                            let chunk_size = chunk_data.data.len() as u64;
                             policy = Some(StoragePolicy {
                                 data_shards: chunk_data.header.data_shards,
                                 parity_shards: chunk_data.header.parity_shards,
-                                stripe_size: chunk_data.header.stripe_end_offset,
+                                chunk_size,
                                 compression: chunk_data.header.compression_algorithm,
                             });
                             original_size = chunk_data.header.stripe_end_offset as usize;
@@ -369,6 +372,7 @@ impl FileStore for FileStoreImpl {
         &self,
         file_id: FileId,
         stripe_id: StripeId,
+        stripe_offset: u64,
         existing_chunks: Vec<ChunkMetadata>,
         offset: u64,
         new_data: Vec<u8>,
@@ -388,7 +392,7 @@ impl FileStore for FileStoreImpl {
 
         // 3. Write as new stripe (generates NEW ChunkIds)
         // Note: This creates NEW chunks without deleting old ones
-        self.write_stripe(file_id, stripe_id, stripe_data, policy)
+        self.write_stripe(file_id, stripe_id, stripe_offset, stripe_data, policy)
             .await
     }
 
@@ -560,7 +564,7 @@ mod tests {
 
         let config = Config {
             disk_paths: vec![disk_path.clone()],
-            default_stripe_size: 1024,
+            max_chunk_size: 512,  // 512 bytes per chunk
             default_data_shards: 2,
             default_parity_shards: 1,
             max_concurrent_operations: 10,
@@ -627,11 +631,11 @@ mod tests {
         let stripe_id = StripeId::generate();
         let original_data = b"Hello, WormFS! This is test data for stripe operations.".to_vec();
 
-        let policy = StoragePolicy::new(2, 1, 1024, CompressionAlgorithm::None);
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None); // chunk_size=512, stripe=1024
 
         // Write stripe
         let metadata = store
-            .write_stripe(file_id, stripe_id, original_data.clone(), policy)
+            .write_stripe(file_id, stripe_id, 0, original_data.clone(), policy)
             .await
             .unwrap();
 
@@ -656,11 +660,11 @@ mod tests {
         let file_id = FileId::generate();
         let stripe_id = StripeId::generate();
         let original = vec![0u8; 1024];
-        let policy = StoragePolicy::new(2, 1, 1024, CompressionAlgorithm::None);
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None); // chunk_size=512, stripe=1024
 
         // Write initial stripe
         let metadata1 = store
-            .write_stripe(file_id, stripe_id, original, policy.clone())
+            .write_stripe(file_id, stripe_id, 0, original, policy.clone())
             .await
             .unwrap();
 
@@ -672,6 +676,7 @@ mod tests {
             .update_stripe_partial(
                 file_id,
                 stripe_id,
+                0,
                 metadata1.chunks.clone(),
                 100,
                 new_data,
@@ -709,11 +714,11 @@ mod tests {
         let file_id = FileId::generate();
         let stripe_id = StripeId::generate();
         let original = vec![0u8; 1024];
-        let policy = StoragePolicy::new(2, 1, 1024, CompressionAlgorithm::None);
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None); // chunk_size=512, stripe=1024
 
         // Write initial stripe
         let metadata1 = store
-            .write_stripe(file_id, stripe_id, original, policy.clone())
+            .write_stripe(file_id, stripe_id, 0, original, policy.clone())
             .await
             .unwrap();
 
@@ -723,6 +728,7 @@ mod tests {
             .update_stripe_partial(
                 file_id,
                 stripe_id,
+                0,
                 metadata1.chunks.clone(),
                 100,
                 new_data,
@@ -759,7 +765,7 @@ mod tests {
         let (store, _temp_dir, _disk_id) = create_test_store().await;
 
         let mut all_chunk_ids = HashSet::new();
-        let policy = StoragePolicy::new(2, 1, 1024, CompressionAlgorithm::None);
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None); // chunk_size=512, stripe=1024
 
         // Write 20 stripes, collect all chunk IDs
         for i in 0..20 {
@@ -768,7 +774,7 @@ mod tests {
             let data = vec![i as u8; 512];
 
             let metadata = store
-                .write_stripe(file_id, stripe_id, data, policy.clone())
+                .write_stripe(file_id, stripe_id, 0, data, policy.clone())
                 .await
                 .unwrap();
 
@@ -792,11 +798,11 @@ mod tests {
         let file_id = FileId::generate();
         let stripe_id = StripeId::generate();
         let original_data = vec![42u8; 512];
-        let policy = StoragePolicy::new(2, 1, 1024, CompressionAlgorithm::None);
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None); // chunk_size=512, stripe=1024
 
         // Write stripe
         let metadata = store
-            .write_stripe(file_id, stripe_id, original_data.clone(), policy)
+            .write_stripe(file_id, stripe_id, 0, original_data.clone(), policy)
             .await
             .unwrap();
 
@@ -833,11 +839,11 @@ mod tests {
         let file_id = FileId::generate();
         let stripe_id = StripeId::generate();
         let original_data = vec![99u8; 512];
-        let policy = StoragePolicy::new(2, 1, 1024, CompressionAlgorithm::None);
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None); // chunk_size=512, stripe=1024
 
         // Write stripe
         let metadata = store
-            .write_stripe(file_id, stripe_id, original_data.clone(), policy)
+            .write_stripe(file_id, stripe_id, 0, original_data.clone(), policy)
             .await
             .unwrap();
 
@@ -874,10 +880,10 @@ mod tests {
         let file_id = FileId::generate();
         let stripe_id = StripeId::generate();
         let data = vec![77u8; 256];
-        let policy = StoragePolicy::new(2, 1, 1024, CompressionAlgorithm::None);
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None); // chunk_size=512, stripe=1024
 
         let metadata = store
-            .write_stripe(file_id, stripe_id, data, policy)
+            .write_stripe(file_id, stripe_id, 0, data, policy)
             .await
             .unwrap();
 
