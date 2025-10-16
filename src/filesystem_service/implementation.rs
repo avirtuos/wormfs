@@ -42,12 +42,16 @@ pub struct FileSystemServiceImpl {
 impl FileSystemServiceImpl {
     /// Create a new FileSystemServiceImpl.
     ///
+    /// This constructor is crate-private and should only be called via
+    /// `FileSystemServiceImplFactory::create()`. This ensures consistent
+    /// initialization and proper dependency injection.
+    ///
     /// # Arguments
     ///
     /// * `config` - FileSystemService configuration
     /// * `metadata_store` - MetadataStore instance for metadata operations
     /// * `file_store` - FileStore instance for chunk operations
-    pub fn new(
+    pub(crate) fn new(
         config: Config,
         metadata_store: MetadataStoreImpl,
         file_store: Arc<FileStoreImpl>,
@@ -78,6 +82,7 @@ impl FileSystemServiceImpl {
 
         // Create root directory
         let root_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Directory,
             size: 0,
             permissions: 0o755,
             uid: self.config.uid,
@@ -118,16 +123,11 @@ impl FileSystemServiceImpl {
 
     /// Convert FileRecord to FileAttr for FUSE.
     fn file_record_to_attr(&self, record: &FileRecord) -> FileAttr {
-        let kind = if record.path.to_str() == Some("/")
-            || record
-                .path
-                .to_str()
-                .map(|s| s.ends_with('/'))
-                .unwrap_or(false)
-        {
-            FileType::Directory
-        } else {
-            FileType::RegularFile
+        // Convert MetadataStore FileType to FileSystemService FileType
+        let kind = match record.file_type {
+            crate::metadata_store::FileType::Directory => FileType::Directory,
+            crate::metadata_store::FileType::RegularFile => FileType::RegularFile,
+            crate::metadata_store::FileType::Symlink => FileType::Symlink,
         };
 
         FileAttr {
@@ -149,17 +149,72 @@ impl FileSystemServiceImpl {
         }
     }
 
+    /// Convert cached metadata to FileAttr for FUSE (cache-hit path).
+    ///
+    /// This method constructs a FileAttr directly from cached metadata without
+    /// querying the database, providing significant performance benefits for hot files.
+    fn cached_metadata_to_attr(&self, inode: u64, cached: &super::inode::CachedInode) -> FileAttr {
+        // Convert MetadataStore FileType to FileSystemService FileType
+        let kind = match cached.metadata.file_type {
+            crate::metadata_store::FileType::Directory => FileType::Directory,
+            crate::metadata_store::FileType::RegularFile => FileType::RegularFile,
+            crate::metadata_store::FileType::Symlink => FileType::Symlink,
+        };
+
+        FileAttr {
+            ino: inode,
+            size: cached.metadata.size,
+            blocks: (cached.metadata.size + 4095) / 4096, // 4KB blocks
+            atime: cached.metadata.accessed_at,
+            mtime: cached.metadata.modified_at,
+            ctime: cached.metadata.modified_at, // Use mtime as ctime
+            crtime: cached.metadata.created_at,
+            kind,
+            perm: cached.metadata.permissions as u16,
+            nlink: 1,
+            uid: cached.metadata.uid,
+            gid: cached.metadata.gid,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        }
+    }
+
     /// Helper to convert MetadataStore errors to FileSystemService errors.
     fn convert_metadata_error(&self, error: crate::metadata_store::Error) -> Error {
         match error {
-            crate::metadata_store::Error::FileNotFound(msg) => {
-                Error::NotFound(0) // We don't have inode in this error
+            crate::metadata_store::Error::FileNotFoundByPath(path) => {
+                // We don't have the inode for a path-based lookup failure
+                Error::MetadataError(format!("File not found at path: {}", path))
+            }
+            crate::metadata_store::Error::FileNotFoundByInode(inode) => {
+                // We have the inode - preserve it for better debugging
+                Error::NotFound(inode)
+            }
+            crate::metadata_store::Error::FileNotFoundByFileId(file_id) => {
+                // File ID is internal - convert to generic metadata error with context
+                Error::MetadataError(format!("File not found with file_id: {:?}", file_id))
             }
             crate::metadata_store::Error::FileAlreadyExists(path) => {
                 Error::AlreadyExists(path.to_string_lossy().to_string())
             }
             crate::metadata_store::Error::ParentNotFound(path) => {
-                Error::NotFound(0) // Parent directory
+                // Parent not found - provide path context
+                Error::MetadataError(format!("Parent directory not found: {:?}", path))
+            }
+            crate::metadata_store::Error::LockConflict { file_id, lock_type } => {
+                // Convert to simple lock conflict with context
+                Error::LockConflictSimple(format!(
+                    "Cannot acquire {} lock on file_id {:?}",
+                    lock_type, file_id
+                ))
+            }
+            crate::metadata_store::Error::LockNotFound { file_id, client_id } => {
+                // Convert to simple lock not held with context
+                Error::LockNotHeldSimple(format!(
+                    "Lock not found for file_id {:?} and client {:?}",
+                    file_id, client_id
+                ))
             }
             _ => Error::MetadataError(format!("{}", error)),
         }
@@ -263,6 +318,31 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
             .map_err(|e| self.convert_metadata_error(e))?;
 
+        // Determine parent inode
+        // For root directory ("/"), parent is itself
+        // For all other directories, look up parent by parent_path
+        let parent_inode = if inode == ROOT_INODE {
+            ROOT_INODE
+        } else {
+            // Look up parent directory by parent_path
+            match self
+                .metadata_store
+                .get_file_by_path(&record.parent_path)
+                .await
+            {
+                Ok(parent_record) => parent_record.inode,
+                Err(_) => {
+                    // If parent lookup fails, fall back to root
+                    // This shouldn't happen in a consistent filesystem, but provides safety
+                    tracing::warn!(
+                        "Failed to find parent directory for path {:?}, falling back to root",
+                        record.path
+                    );
+                    ROOT_INODE
+                }
+            }
+        };
+
         // List files in this directory
         let files = self
             .metadata_store
@@ -279,7 +359,7 @@ impl FileSystemService for FileSystemServiceImpl {
                 kind: FileType::Directory,
             },
             DirEntry {
-                ino: inode, // TODO: Get actual parent inode
+                ino: parent_inode,
                 name: "..".to_string(),
                 kind: FileType::Directory,
             },
@@ -293,15 +373,11 @@ impl FileSystemService for FileSystemServiceImpl {
                 .unwrap_or("")
                 .to_string();
 
-            let kind = if file
-                .path
-                .to_str()
-                .map(|s| s.ends_with('/'))
-                .unwrap_or(false)
-            {
-                FileType::Directory
-            } else {
-                FileType::RegularFile
+            // Convert MetadataStore FileType to FileSystemService FileType
+            let kind = match file.file_type {
+                crate::metadata_store::FileType::Directory => FileType::Directory,
+                crate::metadata_store::FileType::RegularFile => FileType::RegularFile,
+                crate::metadata_store::FileType::Symlink => FileType::Symlink,
             };
 
             entries.push(DirEntry {
@@ -317,22 +393,21 @@ impl FileSystemService for FileSystemServiceImpl {
     // ===== Metadata Operations =====
 
     async fn getattr(&self, inode: u64) -> Result<FileAttr, Error> {
-        // Check cache first
+        // Check cache first - use it if available
         if let Some(cached) = self.inode_manager.cache().get(inode) {
-            // Convert cached metadata to FileAttr
-            // We need to query MetadataStore to get full FileRecord for path info
-            // (cache only has FileMetadata, not path)
+            return Ok(self.cached_metadata_to_attr(inode, &cached));
         }
 
-        // Cache miss or need full record - query MetadataStore
+        // Cache miss - query MetadataStore
         let record = self
             .metadata_store
             .get_file_by_inode(inode)
             .await
             .map_err(|e| self.convert_metadata_error(e))?;
 
-        // Update cache
+        // Update cache with fresh data from database
         let metadata = FileMetadata {
+            file_type: record.file_type,
             size: record.size,
             permissions: record.permissions,
             uid: record.uid,

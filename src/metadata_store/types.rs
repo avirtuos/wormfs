@@ -100,9 +100,17 @@ pub enum Error {
     #[error("File already exists at path {0:?}")]
     FileAlreadyExists(PathBuf),
 
-    /// File not found
-    #[error("File not found: {0}")]
-    FileNotFound(String),
+    /// File not found by path
+    #[error("File not found at path: {0}")]
+    FileNotFoundByPath(String),
+
+    /// File not found by inode
+    #[error("File not found with inode: {0}")]
+    FileNotFoundByInode(u64),
+
+    /// File not found by file ID
+    #[error("File not found with file_id: {0:?}")]
+    FileNotFoundByFileId(FileId),
 
     /// Parent directory not found
     #[error("Parent directory not found: {0:?}")]
@@ -191,6 +199,9 @@ pub enum Error {
 /// File metadata structure.
 #[derive(Debug, Clone)]
 pub struct FileMetadata {
+    /// Type of file (regular file, directory, symlink)
+    pub file_type: FileType,
+
     /// File size in bytes
     pub size: u64,
 
@@ -215,6 +226,38 @@ pub struct FileMetadata {
 
 // ===== Database Record Types =====
 
+/// Type of file in the filesystem.
+///
+/// This enum represents the different types of files that can exist in the filesystem.
+/// The integer values match the database representation for efficient storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum FileType {
+    /// Regular file (data file)
+    RegularFile = 0,
+    /// Directory
+    Directory = 1,
+    /// Symbolic link (reserved for future use)
+    Symlink = 2,
+}
+
+impl From<i32> for FileType {
+    fn from(value: i32) -> Self {
+        match value {
+            0 => FileType::RegularFile,
+            1 => FileType::Directory,
+            2 => FileType::Symlink,
+            _ => FileType::RegularFile, // Default to regular file for unknown values
+        }
+    }
+}
+
+impl From<FileType> for i32 {
+    fn from(file_type: FileType) -> Self {
+        file_type as i32
+    }
+}
+
 /// File record from the database.
 #[derive(Debug, Clone)]
 pub struct FileRecord {
@@ -223,6 +266,7 @@ pub struct FileRecord {
     pub path: PathBuf,
     pub parent_path: PathBuf,
     pub name: String,
+    pub file_type: FileType,
     pub size: u64,
     pub permissions: u32,
     pub uid: u32,

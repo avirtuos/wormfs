@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tempfile::TempDir;
 use wormfs::file_store::FileStore;
+use wormfs::filesystem_service::factory::FileSystemServiceImplFactory;
 use wormfs::filesystem_service::implementation::FileSystemServiceImpl;
 use wormfs::filesystem_service::inode::ROOT_INODE;
 use wormfs::filesystem_service::types::{ClientId, Config, FileType};
@@ -21,13 +22,13 @@ async fn create_test_fs() -> (FileSystemServiceImpl, TempDir) {
     let chunk_path = temp_dir.path().join("chunks");
     std::fs::create_dir_all(&chunk_path).expect("Failed to create chunk dir");
 
-    // Create MetadataStore using factory
+    // Create MetadataStore using factory (concrete type for FileSystemServiceImplFactory)
     let metadata_config = wormfs::metadata_store::Config {
         database_path: db_path,
         ..Default::default()
     };
 
-    let metadata_store = MetadataStoreFactory::create(metadata_config)
+    let metadata_store = MetadataStoreFactory::create_concrete(metadata_config)
         .await
         .expect("Failed to create MetadataStore");
 
@@ -35,11 +36,6 @@ async fn create_test_fs() -> (FileSystemServiceImpl, TempDir) {
         .initialize_schema()
         .await
         .expect("Failed to initialize schema");
-
-    // Convert opaque type to concrete type (same workaround as in mount.rs)
-    let metadata_store_impl: wormfs::metadata_store::MetadataStoreImpl =
-        unsafe { std::mem::transmute_copy(&metadata_store) };
-    std::mem::forget(metadata_store);
 
     // Create FileStore
     let file_store_config = wormfs::file_store::types::Config {
@@ -55,14 +51,15 @@ async fn create_test_fs() -> (FileSystemServiceImpl, TempDir) {
     let file_store =
         Arc::new(FileStore::new(file_store_config).expect("Failed to create FileStore"));
 
-    // Create FileSystemService
+    // Create FileSystemService via factory
     let fs_config = Config {
         uid: 1000,
         gid: 1000,
         ..Default::default()
     };
 
-    let service = FileSystemServiceImpl::new(fs_config, metadata_store_impl, file_store);
+    let service = FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store)
+        .expect("Failed to create FileSystemService");
 
     (service, temp_dir)
 }
@@ -144,6 +141,7 @@ async fn test_lookup_file_via_metadata_store() {
     let test_inode = 42;
 
     let file_metadata = FileMetadata {
+        file_type: wormfs::metadata_store::FileType::RegularFile,
         size: 1024,
         permissions: 0o644,
         uid: 1000,
@@ -274,6 +272,7 @@ async fn test_readdir_with_files() {
     let test_inode = 100;
 
     let file_metadata = FileMetadata {
+        file_type: wormfs::metadata_store::FileType::RegularFile,
         size: 512,
         permissions: 0o644,
         uid: 1000,

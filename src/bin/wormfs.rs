@@ -166,8 +166,9 @@ async fn mount_command(
     };
 
     // Setup signal handling for graceful shutdown
+    // Keep the JoinHandle to ensure signal handler completes before exit
     let mount_point_for_signal = mount_config.mount_point.clone();
-    tokio::spawn(async move {
+    let signal_handle = tokio::spawn(async move {
         setup_signal_handler(mount_point_for_signal).await;
     });
 
@@ -176,6 +177,11 @@ async fn mount_command(
     wormfs::filesystem_service::mount::mount_filesystem(mount_config).await?;
 
     tracing::info!("Filesystem unmounted");
+
+    // Wait for signal handler to complete its cleanup/logging
+    // This is a no-op if the signal handler already completed
+    let _ = signal_handle.await;
+
     Ok(())
 }
 

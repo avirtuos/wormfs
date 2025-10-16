@@ -118,8 +118,8 @@ use std::time::SystemTime;
 pub use factory::MetadataStoreFactory;
 pub use types::{
     ChunkId, ChunkRecord, ChunkStatus, ClientId, Config, DiskId, DiskRecord, DiskStatus, Error,
-    FileId, FileMetadata, FileRecord, LockRecord, LockType, NodeId, NodeRecord, NodeStatus,
-    StripeId, StripeRecord,
+    FileId, FileMetadata, FileRecord, FileType, LockRecord, LockType, NodeId, NodeRecord,
+    NodeStatus, StripeId, StripeRecord,
 };
 
 /// MetadataStore trait defines the interface for metadata persistence.

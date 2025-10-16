@@ -3,9 +3,10 @@
 //! Provides high-level functions to mount and unmount the filesystem
 //! with proper configuration and error handling.
 
+use super::factory::FileSystemServiceImplFactory;
 use super::implementation::FileSystemServiceImpl;
 use super::types::{Config, Error};
-use crate::file_store::{FileStore, FileStoreImpl};
+use crate::file_store::FileStore;
 use crate::metadata_store::{MetadataStore, MetadataStoreFactory};
 use std::path::Path;
 use std::sync::Arc;
@@ -109,13 +110,9 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         )));
     }
 
-    // Initialize MetadataStore
+    // Initialize MetadataStore (concrete type for FileSystemServiceImplFactory)
     tracing::info!("Initializing MetadataStore...");
-
-    // For Phase 1, we document that mount() is a convenience function for testing
-    // Production use should construct FileSystemServiceImpl directly with proper setup
-    // TODO: Make this cleaner in Phase 2 by making FileSystemServiceImpl generic
-    let metadata_store = MetadataStoreFactory::create(config.metadata_config)
+    let metadata_store = MetadataStoreFactory::create_concrete(config.metadata_config)
         .await
         .map_err(|e| Error::MetadataError(format!("Failed to create MetadataStore: {}", e)))?;
 
@@ -124,12 +121,6 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         .await
         .map_err(|e| Error::MetadataError(format!("Failed to initialize schema: {}", e)))?;
 
-    // TEMPORARY: Cast the opaque type - this works because we know the factory only returns one type
-    // This will be fixed when FileSystemServiceImpl becomes generic over MetadataStore
-    let metadata_store_impl: crate::metadata_store::MetadataStoreImpl =
-        unsafe { std::mem::transmute_copy(&metadata_store) };
-    std::mem::forget(metadata_store); // Prevent double-free
-
     // Initialize FileStore
     tracing::info!("Initializing FileStore...");
     let file_store = Arc::new(
@@ -137,13 +128,13 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
             .map_err(|e| Error::DataFailed(format!("Failed to create FileStore: {}", e)))?,
     );
 
-    // Create FileSystemService
+    // Create FileSystemService via factory
     tracing::info!("Creating FileSystemService...");
-    let service = Arc::new(FileSystemServiceImpl::new(
+    let service = Arc::new(FileSystemServiceImplFactory::create(
         config.filesystem_config,
-        metadata_store_impl,
+        metadata_store,
         file_store,
-    ));
+    )?);
 
     // Initialize root directory
     tracing::info!("Initializing root directory...");

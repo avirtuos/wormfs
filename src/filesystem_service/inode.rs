@@ -284,6 +284,7 @@ mod tests {
         let cache = InodeCache::new(10, Duration::from_secs(60));
         let file_id = FileId::new(1);
         let metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
             size: 1024,
             permissions: 0o644,
             uid: 1000,
@@ -310,6 +311,7 @@ mod tests {
         let cache = InodeCache::new(10, Duration::from_millis(50));
         let file_id = FileId::new(1);
         let metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
             size: 1024,
             permissions: 0o644,
             uid: 1000,
@@ -335,6 +337,7 @@ mod tests {
     fn test_inode_cache_lru_eviction() {
         let cache = InodeCache::new(3, Duration::from_secs(60));
         let metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
             size: 1024,
             permissions: 0o644,
             uid: 1000,
@@ -365,6 +368,7 @@ mod tests {
     fn test_inode_cache_invalidation() {
         let cache = InodeCache::new(10, Duration::from_secs(60));
         let metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
             size: 1024,
             permissions: 0o644,
             uid: 1000,
@@ -385,6 +389,7 @@ mod tests {
     fn test_inode_cache_cleanup_expired() {
         let cache = InodeCache::new(10, Duration::from_millis(50));
         let metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
             size: 1024,
             permissions: 0o644,
             uid: 1000,

@@ -237,18 +237,21 @@ impl MetadataStore for MetadataStoreImpl {
             .to_string_lossy()
             .to_string();
 
+        let file_type_val: i32 = metadata.file_type.into();
+
         self.inner
             .conn
             .call(move |conn| {
                 conn.execute(
-                    "INSERT INTO files (file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1)",
+                    "INSERT INTO files (file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1)",
                     params![
                         file_id_val as i64,
                         inode as i64,
                         path_str,
                         parent_path,
                         name,
+                        file_type_val,
                         metadata.size as i64,
                         metadata.permissions as i64,
                         metadata.uid as i64,
@@ -278,7 +281,7 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
                      FROM files WHERE path = ?1",
                     params![path_str],
                     |row| {
@@ -288,14 +291,15 @@ impl MetadataStore for MetadataStoreImpl {
                             path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
                             parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
                             name: row.get(4)?,
-                            size: row.get::<_, i64>(5)? as u64,
-                            permissions: row.get::<_, i64>(6)? as u32,
-                            uid: row.get::<_, i64>(7)? as u32,
-                            gid: row.get::<_, i64>(8)? as u32,
-                            created_at: unix_to_system_time(row.get(9)?),
-                            modified_at: unix_to_system_time(row.get(10)?),
-                            accessed_at: unix_to_system_time(row.get(11)?),
-                            storage_policy_id: row.get::<_, i64>(12)? as u32,
+                            file_type: row.get::<_, i32>(5)?.into(),
+                            size: row.get::<_, i64>(6)? as u64,
+                            permissions: row.get::<_, i64>(7)? as u32,
+                            uid: row.get::<_, i64>(8)? as u32,
+                            gid: row.get::<_, i64>(9)? as u32,
+                            created_at: unix_to_system_time(row.get(10)?),
+                            modified_at: unix_to_system_time(row.get(11)?),
+                            accessed_at: unix_to_system_time(row.get(12)?),
+                            storage_policy_id: row.get::<_, i64>(13)? as u32,
                         })
                     },
                 )?)
@@ -303,7 +307,7 @@ impl MetadataStore for MetadataStoreImpl {
             .await
             .map_err(|e| match e {
                 tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                    Error::FileNotFound(path_clone.to_string_lossy().to_string())
+                    Error::FileNotFoundByPath(path_clone.to_string_lossy().to_string())
                 }
                 _ => Error::QueryError(format!("Failed to query file by path: {}", e))
             })
@@ -314,7 +318,7 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
                      FROM files WHERE inode = ?1",
                     params![inode as i64],
                     |row| {
@@ -324,14 +328,15 @@ impl MetadataStore for MetadataStoreImpl {
                             path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
                             parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
                             name: row.get(4)?,
-                            size: row.get::<_, i64>(5)? as u64,
-                            permissions: row.get::<_, i64>(6)? as u32,
-                            uid: row.get::<_, i64>(7)? as u32,
-                            gid: row.get::<_, i64>(8)? as u32,
-                            created_at: unix_to_system_time(row.get(9)?),
-                            modified_at: unix_to_system_time(row.get(10)?),
-                            accessed_at: unix_to_system_time(row.get(11)?),
-                            storage_policy_id: row.get::<_, i64>(12)? as u32,
+                            file_type: row.get::<_, i32>(5)?.into(),
+                            size: row.get::<_, i64>(6)? as u64,
+                            permissions: row.get::<_, i64>(7)? as u32,
+                            uid: row.get::<_, i64>(8)? as u32,
+                            gid: row.get::<_, i64>(9)? as u32,
+                            created_at: unix_to_system_time(row.get(10)?),
+                            modified_at: unix_to_system_time(row.get(11)?),
+                            accessed_at: unix_to_system_time(row.get(12)?),
+                            storage_policy_id: row.get::<_, i64>(13)? as u32,
                         })
                     },
                 )?)
@@ -339,7 +344,7 @@ impl MetadataStore for MetadataStoreImpl {
             .await
             .map_err(|e| match e {
                 tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                    Error::FileNotFound(format!("inode {}", inode))
+                    Error::FileNotFoundByInode(inode)
                 }
                 _ => Error::QueryError(format!("Failed to query file by inode: {}", e))
             })
@@ -353,7 +358,7 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
                      FROM files WHERE file_id = ?1",
                     params![file_id_val as i64],
                     |row| {
@@ -363,14 +368,15 @@ impl MetadataStore for MetadataStoreImpl {
                             path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
                             parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
                             name: row.get(4)?,
-                            size: row.get::<_, i64>(5)? as u64,
-                            permissions: row.get::<_, i64>(6)? as u32,
-                            uid: row.get::<_, i64>(7)? as u32,
-                            gid: row.get::<_, i64>(8)? as u32,
-                            created_at: unix_to_system_time(row.get(9)?),
-                            modified_at: unix_to_system_time(row.get(10)?),
-                            accessed_at: unix_to_system_time(row.get(11)?),
-                            storage_policy_id: row.get::<_, i64>(12)? as u32,
+                            file_type: row.get::<_, i32>(5)?.into(),
+                            size: row.get::<_, i64>(6)? as u64,
+                            permissions: row.get::<_, i64>(7)? as u32,
+                            uid: row.get::<_, i64>(8)? as u32,
+                            gid: row.get::<_, i64>(9)? as u32,
+                            created_at: unix_to_system_time(row.get(10)?),
+                            modified_at: unix_to_system_time(row.get(11)?),
+                            accessed_at: unix_to_system_time(row.get(12)?),
+                            storage_policy_id: row.get::<_, i64>(13)? as u32,
                         })
                     },
                 )?)
@@ -378,7 +384,7 @@ impl MetadataStore for MetadataStoreImpl {
             .await
             .map_err(|e| match e {
                 tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                    Error::FileNotFound(format!("file_id {:?}", file_id_clone))
+                    Error::FileNotFoundByFileId(file_id_clone)
                 }
                 _ => Error::QueryError(format!("Failed to query file by ID: {}", e))
             })
@@ -411,7 +417,7 @@ impl MetadataStore for MetadataStoreImpl {
             })?;
 
         if rows_affected == 0 {
-            return Err(Error::FileNotFound(format!("file_id {:?}", file_id)));
+            return Err(Error::FileNotFoundByFileId(file_id));
         }
 
         Ok(())
@@ -433,7 +439,7 @@ impl MetadataStore for MetadataStoreImpl {
             .map_err(|e| Error::QueryError(format!("Failed to delete file: {}", e)))?;
 
         if rows_affected == 0 {
-            return Err(Error::FileNotFound(format!("file_id {:?}", file_id)));
+            return Err(Error::FileNotFoundByFileId(file_id));
         }
 
         Ok(())
@@ -446,7 +452,7 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT file_id, inode, path, parent_path, name, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
                      FROM files WHERE parent_path = ?1 ORDER BY name",
                 )?;
 
@@ -458,14 +464,15 @@ impl MetadataStore for MetadataStoreImpl {
                             path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
                             parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
                             name: row.get(4)?,
-                            size: row.get::<_, i64>(5)? as u64,
-                            permissions: row.get::<_, i64>(6)? as u32,
-                            uid: row.get::<_, i64>(7)? as u32,
-                            gid: row.get::<_, i64>(8)? as u32,
-                            created_at: unix_to_system_time(row.get(9)?),
-                            modified_at: unix_to_system_time(row.get(10)?),
-                            accessed_at: unix_to_system_time(row.get(11)?),
-                            storage_policy_id: row.get::<_, i64>(12)? as u32,
+                            file_type: row.get::<_, i32>(5)?.into(),
+                            size: row.get::<_, i64>(6)? as u64,
+                            permissions: row.get::<_, i64>(7)? as u32,
+                            uid: row.get::<_, i64>(8)? as u32,
+                            gid: row.get::<_, i64>(9)? as u32,
+                            created_at: unix_to_system_time(row.get(10)?),
+                            modified_at: unix_to_system_time(row.get(11)?),
+                            accessed_at: unix_to_system_time(row.get(12)?),
+                            storage_policy_id: row.get::<_, i64>(13)? as u32,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;

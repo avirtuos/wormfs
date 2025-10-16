@@ -4,69 +4,78 @@
 //! allowing the service trait to remain mockable while still providing type-safe
 //! construction with concrete dependency types.
 
-use super::{Config, Error, FileSystemService};
+use super::implementation::FileSystemServiceImpl;
+use super::raft_commands::StorageRaftMemberStub;
+use super::{Config, Error};
+use crate::file_store::FileStoreImpl;
+use crate::metadata_store::MetadataStoreImpl;
 use std::sync::Arc;
 
-/// Factory trait for creating FileSystemService instances.
+/// Concrete factory for creating FileSystemServiceImpl instances.
 ///
-/// This trait uses associated types to specify the concrete implementations
-/// of dependencies (RaftMember, MetadataStore, FileStore) at compile time.
-pub trait FileSystemServiceFactory {
-    /// StorageRaftMember implementation type
-    type RaftMember: crate::storage_raft_member::StorageRaftMember<
-        Operation = crate::storage_raft_member::types::WormFsOperation,
-        OperationResult = (),
-    >;
+/// This factory handles the construction of FileSystemServiceImpl with all
+/// its dependencies properly initialized.
+///
+/// # Phase 1 Implementation
+///
+/// In Phase 1, this factory uses:
+/// - `StorageRaftMemberStub` - Stub that immediately returns success (no actual Raft consensus)
+/// - `MetadataStoreImpl` - SQLite-based metadata storage
+/// - `FileStoreImpl` - Erasure-coded chunk storage
+///
+/// # Phase 2 Migration
+///
+/// When migrating to Phase 2 with distributed Raft consensus:
+/// 1. Replace `StorageRaftMemberStub` with `StorageRaftMemberImpl`
+/// 2. Update the factory to accept a real Raft member instance
+/// 3. All calling code remains unchanged (factory pattern benefit!)
+pub struct FileSystemServiceImplFactory;
 
-    /// MetadataStore implementation type
-    type MetadataStore: crate::metadata_store::MetadataStore;
-
-    /// FileStore implementation type
-    type FileStore: crate::file_store::FileStore;
-
-    /// FileSystemService implementation type
-    type Service: FileSystemService;
-
-    /// Create a new FileSystemService instance.
+impl FileSystemServiceImplFactory {
+    /// Create a new FileSystemServiceImpl instance.
     ///
     /// # Arguments
     ///
     /// * `config` - Configuration for the filesystem service
-    /// * `raft_member` - StorageRaftMember instance for metadata writes
-    /// * `metadata_store` - MetadataStore instance for metadata reads
+    /// * `metadata_store` - MetadataStore instance for metadata operations
     /// * `file_store` - FileStore instance for chunk I/O operations
     ///
     /// # Returns
     ///
-    /// A fully initialized FileSystemService instance.
+    /// A fully initialized FileSystemServiceImpl instance.
     ///
     /// # Errors
     ///
-    /// Returns an error if initialization fails.
-    fn create(
+    /// Returns an error if initialization fails (currently always succeeds).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = Config::default();
+    /// let metadata_store = MetadataStoreFactory::create(metadata_config).await?;
+    /// let file_store = Arc::new(FileStore::new(file_store_config)?);
+    ///
+    /// let service = FileSystemServiceImplFactory::create(
+    ///     config,
+    ///     metadata_store,
+    ///     file_store,
+    /// )?;
+    /// ```
+    pub fn create(
         config: Config,
-        raft_member: Arc<Self::RaftMember>,
-        metadata_store: Self::MetadataStore,
-        file_store: Arc<Self::FileStore>,
-    ) -> Result<Self::Service, Error>;
-}
+        metadata_store: MetadataStoreImpl,
+        file_store: Arc<FileStoreImpl>,
+    ) -> Result<FileSystemServiceImpl, Error> {
+        // Phase 1: Use stub for Raft (no actual consensus)
+        // Phase 2: This will be passed as a parameter instead
+        let _raft_stub = Arc::new(StorageRaftMemberStub::new());
 
-// Concrete factory implementation will be added when all components are ready
-//
-// pub struct FileSystemServiceImplFactory;
-//
-// impl FileSystemServiceFactory for FileSystemServiceImplFactory {
-//     type RaftMember = crate::storage_raft_member::StorageRaftMemberImpl;
-//     type MetadataStore = crate::metadata_store::MetadataStoreImpl;
-//     type FileStore = crate::file_store::FileStoreImpl;
-//     type Service = crate::filesystem_service::FileSystemServiceImpl;
-//
-//     fn create(
-//         config: Config,
-//         raft_member: Arc<Self::RaftMember>,
-//         metadata_store: Self::MetadataStore,
-//         file_store: Arc<Self::FileStore>,
-//     ) -> Result<Self::Service, Error> {
-//         FileSystemServiceImpl::new(config, raft_member, metadata_store, file_store)
-//     }
-// }
+        // Create the service instance
+        // Note: new() is pub(crate) so only callable from within filesystem_service module
+        Ok(FileSystemServiceImpl::new(
+            config,
+            metadata_store,
+            file_store,
+        ))
+    }
+}
