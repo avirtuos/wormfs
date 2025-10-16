@@ -143,6 +143,7 @@ pub trait FileStore: Send + Sync {
     ///
     /// * `file_id` - File this stripe belongs to
     /// * `stripe_id` - Stripe identifier
+    /// * `chunks` - Chunk location metadata provided by caller (from MetadataStore query)
     ///
     /// # Returns
     ///
@@ -153,8 +154,55 @@ pub trait FileStore: Send + Sync {
     /// Returns an error if:
     /// - Insufficient chunks available for reconstruction
     /// - All chunks are corrupt or missing
-    /// - Metadata lookup fails
-    async fn read_stripe(&self, file_id: FileId, stripe_id: StripeId) -> Result<Vec<u8>, Error>;
+    /// - Disk not found for chunk location
+    async fn read_stripe(
+        &self,
+        file_id: FileId,
+        stripe_id: StripeId,
+        chunks: Vec<ChunkMetadata>,
+    ) -> Result<Vec<u8>, Error>;
+
+    /// Update a portion of an existing stripe.
+    ///
+    /// This performs a read-modify-write operation:
+    /// 1. Read existing stripe data using provided chunk locations
+    /// 2. Apply modifications at specified offset
+    /// 3. Re-encode stripe with new data
+    /// 4. Write NEW chunks with NEW ChunkIds
+    /// 5. Return StripeMetadata with new ChunkIds
+    ///
+    /// The old chunks remain on disk for transaction safety.
+    /// Caller must persist new metadata via Raft, then trigger
+    /// cleanup of orphaned chunks.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - File this stripe belongs to
+    /// * `stripe_id` - Stripe identifier (reused for new version)
+    /// * `existing_chunks` - Current chunk locations from metadata
+    /// * `offset` - Byte offset within stripe where update begins
+    /// * `new_data` - Data to write at offset
+    /// * `policy` - Storage policy for re-encoding
+    ///
+    /// # Returns
+    ///
+    /// StripeMetadata containing NEW ChunkIds for the updated stripe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Reading existing stripe fails
+    /// - Re-encoding fails
+    /// - Writing new chunks fails
+    async fn update_stripe_partial(
+        &self,
+        file_id: FileId,
+        stripe_id: StripeId,
+        existing_chunks: Vec<ChunkMetadata>,
+        offset: u64,
+        new_data: Vec<u8>,
+        policy: StoragePolicy,
+    ) -> Result<StripeMetadata, Error>;
 
     // ===== Two-Phase Commit Operations =====
 
