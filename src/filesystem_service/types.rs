@@ -300,6 +300,9 @@ pub struct OpenFile {
     pub flags: OpenFlags,
     /// Current file offset (for operations that need it)
     pub offset: AtomicU64,
+    /// Reference count for deferred deletion
+    /// When a file is unlinked while still open, this tracks how many handles remain
+    pub refcount: std::sync::atomic::AtomicU32,
 }
 
 /// Open flags parsed from FUSE.
