@@ -4,6 +4,7 @@
 //! Raft consensus to maintain consistency across the cluster.
 
 use crate::file_store::{FileId, StripeId, StripeMetadata};
+use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -163,18 +164,21 @@ pub struct StripeAllocation {
 
 /// Stub implementation of StorageRaftMember for Phase 1
 ///
-/// This stub immediately returns success for all operations without
-/// actually performing consensus. It will be replaced with the real
-/// implementation in Phase 2.
-pub struct StorageRaftMemberStub;
+/// This stub immediately returns success for all operations and handles
+/// metadata persistence directly. In Phase 2, this will be replaced with
+/// a real Raft implementation where the state machine handles persistence.
+pub struct StorageRaftMemberStub {
+    /// Metadata store for persisting Raft commands
+    metadata_store: MetadataStoreImpl,
+}
 
 impl StorageRaftMemberStub {
     /// Create a new stub instance
-    pub fn new() -> Self {
-        Self
+    pub fn new(metadata_store: MetadataStoreImpl) -> Self {
+        Self { metadata_store }
     }
 
-    /// Propose a metadata operation (stub - always succeeds)
+    /// Propose a metadata operation (stub - persists to metadata store)
     pub async fn propose_operation(
         &self,
         command: RaftCommand,
@@ -182,18 +186,31 @@ impl StorageRaftMemberStub {
         // Log the operation for debugging
         tracing::debug!("STUB: Raft operation proposed: {:?}", command);
 
-        // Return appropriate success result based on command type
+        // Handle each command type
         let result = match command {
             RaftCommand::CreateFile { .. } => RaftCommandResult::FileCreated {
                 inode: generate_inode(),
                 file_id: FileId::generate(),
             },
-            RaftCommand::UpdateFile { .. } => RaftCommandResult::FileUpdated,
+            RaftCommand::UpdateFile { inode, updates } => {
+                // Handle file metadata updates
+                self.handle_update_file(inode, updates).await?;
+                RaftCommandResult::FileUpdated
+            }
             RaftCommand::DeleteFile { .. } => RaftCommandResult::FileDeleted,
             RaftCommand::AllocateStripes { .. } => RaftCommandResult::StripesAllocated {
                 stripe_ids: vec![StripeId::generate()],
             },
-            RaftCommand::UpdateStripe { .. } => RaftCommandResult::StripeUpdated,
+            RaftCommand::UpdateStripe {
+                file_id,
+                stripe_id,
+                metadata,
+            } => {
+                // Handle stripe metadata persistence with create-or-update logic
+                self.handle_update_stripe(file_id, stripe_id, metadata)
+                    .await?;
+                RaftCommandResult::StripeUpdated
+            }
             RaftCommand::CommitChunks { .. } => RaftCommandResult::ChunksCommitted,
             RaftCommand::AcquireLock { .. } => RaftCommandResult::LockAcquired {
                 lock_id: generate_lock_id(),
@@ -206,6 +223,178 @@ impl StorageRaftMemberStub {
         };
 
         Ok(result)
+    }
+
+    /// Handle UpdateFile command - update file metadata
+    async fn handle_update_file(
+        &self,
+        inode: u64,
+        updates: FileUpdateFields,
+    ) -> Result<(), RaftError> {
+        // Get current file metadata
+        let file_record = self
+            .metadata_store
+            .get_file_by_inode(inode)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Failed to get file: {}", e)))?;
+
+        // Apply updates to create new metadata
+        let updated_metadata = crate::metadata_store::FileMetadata {
+            file_type: file_record.file_type,
+            size: updates.size.unwrap_or(file_record.size),
+            permissions: updates.mode.unwrap_or(file_record.permissions),
+            uid: updates.uid.unwrap_or(file_record.uid),
+            gid: updates.gid.unwrap_or(file_record.gid),
+            created_at: file_record.created_at,
+            modified_at: updates.mtime.unwrap_or(file_record.modified_at),
+            accessed_at: updates.atime.unwrap_or(file_record.accessed_at),
+        };
+
+        // Write updated metadata back to store
+        self.metadata_store
+            .update_file(file_record.file_id, updated_metadata)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Failed to update file: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Handle UpdateStripe command with create-or-update logic
+    async fn handle_update_stripe(
+        &self,
+        file_id: FileId,
+        stripe_id: StripeId,
+        metadata: StripeMetadata,
+    ) -> Result<(), RaftError> {
+        const STRIPE_SIZE: u64 = 4 * 1024 * 1024; // 4MB stripes
+
+        // metadata.offset is now correctly set by FileStore to the stripe boundary
+        let stripe_index = (metadata.offset / STRIPE_SIZE) as u32;
+
+        // Check if stripe already exists at this offset
+        let stripe_exists = self
+            .metadata_store
+            .get_stripe_at_offset(file_id, metadata.offset)
+            .await
+            .is_ok();
+
+        if !stripe_exists {
+            // Create new stripe record
+            let stripe_record = crate::metadata_store::StripeRecord {
+                stripe_id,
+                file_id,
+                stripe_index,
+                offset: metadata.offset,
+                size: metadata.size,
+                checksum: metadata.checksum,
+                created_at: SystemTime::now(),
+            };
+
+            self.metadata_store
+                .allocate_stripes(file_id, vec![stripe_record])
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to allocate stripe: {}", e))
+                })?;
+
+            // Allocate chunks for new stripe
+            let chunk_records: Vec<_> = metadata
+                .chunks
+                .iter()
+                .map(|chunk| crate::metadata_store::ChunkRecord {
+                    chunk_id: chunk.chunk_id,
+                    stripe_id,
+                    chunk_index: chunk.chunk_index,
+                    node_id: chunk.node_id,
+                    disk_id: chunk.disk_id,
+                    checksum: metadata.checksum, // Use stripe checksum
+                    status: crate::metadata_store::ChunkStatus::Healthy,
+                    created_at: SystemTime::now(),
+                    last_verified: None,
+                })
+                .collect();
+
+            self.metadata_store
+                .allocate_chunks(stripe_id, chunk_records)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to allocate chunks: {}", e))
+                })?;
+        } else {
+            // Stripe exists - need to update it by deleting old and creating new
+            // This handles partial writes after truncation where chunks change
+            tracing::debug!(
+                "Stripe exists at offset {}, updating stripe metadata with new chunks",
+                metadata.offset
+            );
+
+            // Get the old stripe to find its ID
+            let old_stripe = self
+                .metadata_store
+                .get_stripe_at_offset(file_id, metadata.offset)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to get existing stripe: {}", e))
+                })?;
+
+            // Delete old stripe and its chunks
+            self.metadata_store
+                .delete_stripe(old_stripe.stripe_id)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to delete old stripe: {}", e))
+                })?;
+
+            // Create new stripe record with updated data
+            let stripe_record = crate::metadata_store::StripeRecord {
+                stripe_id,
+                file_id,
+                stripe_index,
+                offset: metadata.offset,
+                size: metadata.size,
+                checksum: metadata.checksum,
+                created_at: SystemTime::now(),
+            };
+
+            self.metadata_store
+                .allocate_stripes(file_id, vec![stripe_record])
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to reallocate stripe: {}", e))
+                })?;
+
+            // Allocate new chunks
+            let chunk_records: Vec<_> = metadata
+                .chunks
+                .iter()
+                .map(|chunk| crate::metadata_store::ChunkRecord {
+                    chunk_id: chunk.chunk_id,
+                    stripe_id,
+                    chunk_index: chunk.chunk_index,
+                    node_id: chunk.node_id,
+                    disk_id: chunk.disk_id,
+                    checksum: metadata.checksum,
+                    status: crate::metadata_store::ChunkStatus::Healthy,
+                    created_at: SystemTime::now(),
+                    last_verified: None,
+                })
+                .collect();
+
+            self.metadata_store
+                .allocate_chunks(stripe_id, chunk_records)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to reallocate chunks: {}", e))
+                })?;
+
+            tracing::debug!(
+                "Updated stripe at offset {} with {} chunks",
+                metadata.offset,
+                metadata.chunks.len()
+            );
+        }
+
+        Ok(())
     }
 
     /// Check if this node is the leader (stub - always true)
@@ -246,10 +435,31 @@ fn generate_lock_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata_store::{Config as MetadataConfig, MetadataStoreFactory};
+
+    async fn create_test_metadata_store() -> MetadataStoreImpl {
+        use crate::metadata_store::types::{IsolationLevel, SynchronousMode};
+
+        let config = MetadataConfig {
+            database_path: ":memory:".into(),
+            read_pool_size: 5,
+            enable_wal: false,
+            cache_size_mb: 64,
+            enable_foreign_keys: false,
+            synchronous: SynchronousMode::Normal,
+            transaction_isolation: IsolationLevel::ReadCommitted,
+            enable_prepared_statements: false,
+            read_pool_timeout_secs: 5,
+        };
+        MetadataStoreFactory::create_concrete(config)
+            .await
+            .expect("Failed to create test metadata store")
+    }
 
     #[tokio::test]
     async fn test_stub_create_file() {
-        let stub = StorageRaftMemberStub::new();
+        let metadata_store = create_test_metadata_store().await;
+        let stub = StorageRaftMemberStub::new(metadata_store);
         let command = RaftCommand::CreateFile {
             parent_inode: 1,
             name: "test.txt".to_string(),
@@ -264,7 +474,7 @@ mod tests {
         match result {
             RaftCommandResult::FileCreated { inode, file_id } => {
                 assert!(inode > 0);
-                assert!(file_id.as_u64() > 0);
+                assert!(file_id.as_uuid().as_u128() > 0);
             }
             _ => panic!("Expected FileCreated result"),
         }
@@ -272,7 +482,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_stub_acquire_lock() {
-        let stub = StorageRaftMemberStub::new();
+        let metadata_store = create_test_metadata_store().await;
+        let stub = StorageRaftMemberStub::new(metadata_store);
         let command = RaftCommand::AcquireLock {
             inode: 100,
             lock_type: LockType::Write,

@@ -73,9 +73,9 @@ impl FileSystemServiceImpl {
 
         Self {
             config,
+            raft_stub: Arc::new(StorageRaftMemberStub::new(metadata_store.clone())),
             metadata_store,
             file_store,
-            raft_stub: Arc::new(StorageRaftMemberStub::new()),
             inode_manager,
             open_files: Arc::new(RwLock::new(HashMap::new())),
             next_file_handle: AtomicU64::new(1), // Start file handles at 1
@@ -106,7 +106,7 @@ impl FileSystemServiceImpl {
 
         self.metadata_store
             .create_file(
-                FileId::new(ROOT_INODE),
+                super::inode::ROOT_FILE_ID,
                 Path::new("/"),
                 ROOT_INODE,
                 root_metadata,
@@ -551,6 +551,11 @@ impl FileSystemService for FileSystemServiceImpl {
         let available = record.size - offset;
         let read_size = std::cmp::min(size as u64, available) as usize;
 
+        eprintln!(
+            "read: offset={}, size={}, file_size={}, available={}, read_size={}",
+            offset, size, record.size, available, read_size
+        );
+
         if read_size == 0 {
             return Ok(Vec::new());
         }
@@ -575,32 +580,43 @@ impl FileSystemService for FileSystemServiceImpl {
         for stripe_idx in start_stripe_idx..=end_stripe_idx {
             let stripe_offset = stripe_idx * STRIPE_SIZE;
 
-            // Get stripe metadata from MetadataStore
-            let stripe = self
+            // Try to get stripe metadata from MetadataStore
+            let stripe_result = self
                 .metadata_store
                 .get_stripe_at_offset(record.file_id, stripe_offset)
-                .await
-                .map_err(|e| self.convert_metadata_error(e))?;
+                .await;
 
-            // Get chunk metadata for this stripe
-            let chunk_records = self
-                .metadata_store
-                .get_stripe_chunks(stripe.stripe_id)
-                .await
-                .map_err(|e| self.convert_metadata_error(e))?;
+            let stripe_data = match stripe_result {
+                Ok(stripe) => {
+                    // Stripe exists - read it from storage
+                    let chunk_records = self
+                        .metadata_store
+                        .get_stripe_chunks(stripe.stripe_id)
+                        .await
+                        .map_err(|e| self.convert_metadata_error(e))?;
 
-            // Convert to ChunkMetadata for FileStore
-            let chunks: Vec<_> = chunk_records
-                .iter()
-                .map(|r| self.chunk_record_to_metadata(r))
-                .collect();
+                    // Convert to ChunkMetadata for FileStore
+                    let chunks: Vec<_> = chunk_records
+                        .iter()
+                        .map(|r| self.chunk_record_to_metadata(r))
+                        .collect();
 
-            // Read and decode stripe from FileStore
-            let stripe_data = self
-                .file_store
-                .read_stripe(record.file_id, stripe.stripe_id, chunks)
-                .await
-                .map_err(|e| Error::DataFailed(format!("Failed to read stripe: {}", e)))?;
+                    // Read and decode stripe from FileStore
+                    self.file_store
+                        .read_stripe(record.file_id, stripe.stripe_id, chunks)
+                        .await
+                        .map_err(|e| Error::DataFailed(format!("Failed to read stripe: {}", e)))?
+                }
+                Err(_) => {
+                    // Stripe doesn't exist - this is a sparse region
+                    // Return zeros (POSIX sparse file semantics)
+                    tracing::debug!(
+                        "read: stripe {} doesn't exist, returning zeros (sparse region)",
+                        stripe_idx
+                    );
+                    vec![0u8; STRIPE_SIZE as usize]
+                }
+            };
 
             // Calculate which part of this stripe we need
             let stripe_start = if stripe_idx == start_stripe_idx {
@@ -617,10 +633,33 @@ impl FileSystemService for FileSystemServiceImpl {
                 stripe_data.len()
             };
 
+            eprintln!(
+                "read: stripe {}: stripe_start={}, stripe_end={}, stripe_data.len()={}, result_data.len()={}",
+                stripe_idx,
+                stripe_start,
+                stripe_end,
+                stripe_data.len(),
+                result_data.len()
+            );
+
             // Extract the needed slice
             if stripe_start < stripe_data.len() {
                 let slice_end = std::cmp::min(stripe_end, stripe_data.len());
+                eprintln!(
+                    "read: stripe {}: extracting slice [{}..{}], adding {} bytes",
+                    stripe_idx,
+                    stripe_start,
+                    slice_end,
+                    slice_end - stripe_start
+                );
                 result_data.extend_from_slice(&stripe_data[stripe_start..slice_end]);
+            } else {
+                eprintln!(
+                    "read: stripe {}: stripe_start {} >= stripe_data.len() {}, skipping",
+                    stripe_idx,
+                    stripe_start,
+                    stripe_data.len()
+                );
             }
         }
 
@@ -881,6 +920,7 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         // Step 6: Update stripe metadata via Raft
+        // The Raft stub now handles all metadata persistence (stripes + chunks)
         for stripe_meta in stripe_metadata_updates {
             let command = RaftCommand::UpdateStripe {
                 file_id: record.file_id,
@@ -888,50 +928,10 @@ impl FileSystemService for FileSystemServiceImpl {
                 metadata: stripe_meta.clone(),
             };
 
-            let _result = self
-                .raft_stub
+            self.raft_stub
                 .propose_operation(command)
                 .await
                 .map_err(|e| Error::RaftError(format!("{}", e)))?;
-
-            // [TEMP Phase 1] Update stripes in metadata store
-            let stripe_record = crate::metadata_store::StripeRecord {
-                stripe_id: stripe_meta.stripe_id,
-                file_id: record.file_id,
-                stripe_index: (stripe_meta.offset / STRIPE_SIZE) as u32,
-                offset: stripe_meta.offset,
-                size: stripe_meta.size,
-                checksum: stripe_meta.checksum,
-                created_at: SystemTime::now(),
-            };
-
-            // Allocate stripe if it doesn't exist
-            self.metadata_store
-                .allocate_stripes(record.file_id, vec![stripe_record])
-                .await
-                .map_err(|e| self.convert_metadata_error(e))?;
-
-            // Allocate/update chunks
-            let chunk_records: Vec<_> = stripe_meta
-                .chunks
-                .iter()
-                .map(|chunk| crate::metadata_store::ChunkRecord {
-                    chunk_id: chunk.chunk_id,
-                    stripe_id: stripe_meta.stripe_id,
-                    chunk_index: chunk.chunk_index,
-                    node_id: chunk.node_id,
-                    disk_id: chunk.disk_id,
-                    checksum: stripe_meta.checksum, // Use stripe checksum (individual chunk checksums not exposed)
-                    status: crate::metadata_store::ChunkStatus::Healthy,
-                    created_at: SystemTime::now(),
-                    last_verified: None,
-                })
-                .collect();
-
-            self.metadata_store
-                .allocate_chunks(stripe_meta.stripe_id, chunk_records)
-                .await
-                .map_err(|e| self.convert_metadata_error(e))?;
         }
 
         // Step 7: Invalidate cache
@@ -1279,29 +1279,24 @@ impl FileSystemService for FileSystemServiceImpl {
                     let stripe_idx = stripe.offset / STRIPE_SIZE;
 
                     if stripe_idx > new_last_stripe_idx {
-                        // Delete entire stripe
-                        tracing::debug!("setattr: deleting stripe at index {}", stripe_idx);
+                        // Delete entire stripe (metadata and chunks)
+                        tracing::debug!(
+                            "setattr: deleting stripe at index {} (stripe_id={:?})",
+                            stripe_idx,
+                            stripe.stripe_id
+                        );
 
-                        // Get chunks for this stripe
-                        let chunks = self
-                            .metadata_store
-                            .get_stripe_chunks(stripe.stripe_id)
+                        // Delete stripe metadata and associated chunks from database
+                        // Physical chunk deletion is deferred to StorageWatchdog (Phase 1)
+                        self.metadata_store
+                            .delete_stripe(stripe.stripe_id)
                             .await
                             .map_err(|e| self.convert_metadata_error(e))?;
 
-                        // Delete chunks
-                        // TODO: Implement delete_chunk in FileStore for Phase 2
-                        // For Phase 1, chunks will be orphaned (handled by StorageWatchdog)
                         tracing::debug!(
-                            "Would delete {} chunks for stripe {} (deferred to StorageWatchdog)",
-                            chunks.len(),
+                            "setattr: deleted stripe metadata for stripe {}",
                             stripe_idx
                         );
-                        // for chunk in chunks {
-                        //     if let Err(e) = self.file_store.delete_chunk(chunk.chunk_id).await {
-                        //         tracing::warn!("Failed to delete chunk {:?}: {}", chunk.chunk_id, e);
-                        //     }
-                        // }
                     } else if stripe_idx == new_last_stripe_idx && new_size % STRIPE_SIZE != 0 {
                         // Partial truncation of last stripe - would require read-modify-write
                         // For Phase 1, we'll leave the stripe as-is (wasted space)

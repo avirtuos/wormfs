@@ -256,7 +256,7 @@ mod file_operations {
             "Getting file by nonexistent inode should fail"
         );
 
-        let result = store.get_file(FileId::new(99999)).await;
+        let result = store.get_file(FileId::generate()).await;
         assert!(
             result.is_err(),
             "Getting file by nonexistent ID should fail"

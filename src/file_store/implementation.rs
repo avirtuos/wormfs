@@ -61,11 +61,12 @@ impl FileStoreImpl {
         stripe_id: StripeId,
         chunk_id: ChunkId,
     ) -> PathBuf {
-        // Hash-based bucketing: hash(file_id) % 1000
-        let bucket = (file_id.as_u64() % 1000).to_string();
-        let file_id_str = format!("{:016x}", file_id.as_u64());
-        let stripe_str = format!("stripe_{:016x}", stripe_id.as_u64());
-        let chunk_str = format!("{:016x}.dat", chunk_id.as_u64());
+        // Hash-based bucketing: Use first bytes of UUID for bucketing
+        let uuid_bytes = file_id.as_bytes();
+        let bucket = (u16::from_be_bytes([uuid_bytes[0], uuid_bytes[1]]) % 1000).to_string();
+        let file_id_str = file_id.as_uuid().as_simple().to_string();
+        let stripe_str = format!("stripe_{}", stripe_id.as_uuid().as_simple());
+        let chunk_str = format!("{}.dat", chunk_id.as_uuid().as_simple());
 
         disk_path
             .join(bucket)
@@ -291,7 +292,7 @@ impl FileStore for FileStoreImpl {
         let stripe_metadata = StripeMetadata::new(
             stripe_id,
             file_id,
-            0, // offset - will be managed by higher layers
+            stripe_offset, // Return the actual stripe offset in the file
             original_size as u64,
             stripe_checksum,
             chunk_metadata,
@@ -596,9 +597,9 @@ mod tests {
     async fn test_chunk_path_format() {
         let (store, _temp_dir, disk_id) = create_test_store().await;
 
-        let file_id = FileId::new(12345);
-        let stripe_id = StripeId::new(67890);
-        let chunk_id = ChunkId::new(111222);
+        let file_id = FileId::generate();
+        let stripe_id = StripeId::generate();
+        let chunk_id = ChunkId::generate();
 
         let disks = store.inner.disks.read().await;
         let disk_info = disks.get(&disk_id).unwrap();
@@ -606,18 +607,22 @@ mod tests {
 
         // Verify format: /disk/bucket/file_id/stripe_id/chunk_id.dat
         let path_str = path.to_str().unwrap();
+        let file_id_hex = format!("{:x}", file_id.as_uuid().as_simple());
+        let stripe_id_hex = format!("{:x}", stripe_id.as_uuid().as_simple());
+        let chunk_id_hex = format!("{:x}", chunk_id.as_uuid().as_simple());
+
         assert!(
-            path_str.contains(&format!("{:016x}", file_id.as_u64())),
+            path_str.contains(&file_id_hex[..16]),
             "Path should contain file_id: {}",
             path_str
         );
         assert!(
-            path_str.contains(&format!("stripe_{:016x}", stripe_id.as_u64())),
+            path_str.contains(&stripe_id_hex[..16]),
             "Path should contain stripe_id: {}",
             path_str
         );
         assert!(
-            path_str.contains(&format!("{:016x}.dat", chunk_id.as_u64())),
+            path_str.contains(&chunk_id_hex[..16]),
             "Path should contain chunk_id: {}",
             path_str
         );
@@ -769,8 +774,8 @@ mod tests {
 
         // Write 20 stripes, collect all chunk IDs
         for i in 0..20 {
-            let file_id = FileId::new(i);
-            let stripe_id = StripeId::new(i);
+            let file_id = FileId::generate();
+            let stripe_id = StripeId::generate();
             let data = vec![i as u8; 512];
 
             let metadata = store
@@ -887,14 +892,125 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify all chunks have valid (non-zero) ChunkIds
+        // Verify all chunks have valid ChunkIds (not nil UUID)
         for chunk in &metadata.chunks {
-            assert_ne!(chunk.chunk_id.as_u64(), 0, "ChunkId should not be zero");
+            assert_ne!(
+                chunk.chunk_id.as_uuid().as_u128(),
+                0,
+                "ChunkId should not be nil UUID"
+            );
         }
 
         // Verify chunk_index values are correct
         assert_eq!(metadata.chunks[0].chunk_index, 0);
         assert_eq!(metadata.chunks[1].chunk_index, 1);
         assert_eq!(metadata.chunks[2].chunk_index, 2);
+    }
+
+    #[tokio::test]
+    async fn test_stripe_metadata_offset_correctness() {
+        let (store, _temp_dir, _disk_id) = create_test_store().await;
+
+        let file_id = FileId::generate();
+        let data = vec![42u8; 512];
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None);
+
+        // Write stripes at different offsets
+        let offsets = [0u64, 4 * 1024 * 1024, 8 * 1024 * 1024]; // 0, 4MB, 8MB
+
+        for offset in offsets {
+            let stripe_id = StripeId::generate();
+            let metadata = store
+                .write_stripe(file_id, stripe_id, offset, data.clone(), policy.clone())
+                .await
+                .unwrap();
+
+            // Verify that returned metadata.offset matches the stripe_offset parameter
+            assert_eq!(
+                metadata.offset, offset,
+                "StripeMetadata.offset should match the stripe_offset parameter"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_stripe_write_metadata() {
+        let (store, _temp_dir, _disk_id) = create_test_store().await;
+
+        let file_id = FileId::generate();
+        let data = vec![99u8; 1024];
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None);
+
+        // Write 3 stripes sequentially to same file
+        let stripe_size = 4 * 1024 * 1024u64; // 4MB
+        let mut stripe_metadatas = Vec::new();
+
+        for i in 0..3 {
+            let stripe_id = StripeId::generate();
+            let offset = i * stripe_size;
+
+            let metadata = store
+                .write_stripe(file_id, stripe_id, offset, data.clone(), policy.clone())
+                .await
+                .unwrap();
+
+            stripe_metadatas.push(metadata);
+        }
+
+        // Verify each has unique stripe_id and correct offset
+        assert_eq!(stripe_metadatas[0].offset, 0);
+        assert_eq!(stripe_metadatas[1].offset, stripe_size);
+        assert_eq!(stripe_metadatas[2].offset, 2 * stripe_size);
+
+        // Verify stripe IDs are unique
+        assert_ne!(stripe_metadatas[0].stripe_id, stripe_metadatas[1].stripe_id);
+        assert_ne!(stripe_metadatas[1].stripe_id, stripe_metadatas[2].stripe_id);
+        assert_ne!(stripe_metadatas[0].stripe_id, stripe_metadatas[2].stripe_id);
+    }
+
+    #[tokio::test]
+    async fn test_partial_stripe_update_preserves_offset() {
+        let (store, _temp_dir, _disk_id) = create_test_store().await;
+
+        let file_id = FileId::generate();
+        let stripe_id = StripeId::generate();
+        let initial_data = vec![11u8; 512];
+        let policy = StoragePolicy::new(2, 1, 512, CompressionAlgorithm::None);
+
+        // Write initial stripe at offset 4MB
+        let stripe_offset = 4 * 1024 * 1024u64;
+        let initial_metadata = store
+            .write_stripe(
+                file_id,
+                stripe_id,
+                stripe_offset,
+                initial_data.clone(),
+                policy.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(initial_metadata.offset, stripe_offset);
+
+        // Do partial update
+        let update_data = vec![22u8; 128];
+        let updated_metadata = store
+            .update_stripe_partial(
+                file_id,
+                stripe_id,
+                stripe_offset,
+                initial_metadata.chunks.clone(),
+                100, // offset within stripe
+                update_data,
+                policy,
+            )
+            .await
+            .unwrap();
+
+        // Verify offset is preserved, not reset to 0
+        assert_eq!(
+            updated_metadata.offset, stripe_offset,
+            "Partial update should preserve the stripe offset"
+        );
     }
 }

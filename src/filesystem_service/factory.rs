@@ -66,12 +66,9 @@ impl FileSystemServiceImplFactory {
         metadata_store: MetadataStoreImpl,
         file_store: Arc<FileStoreImpl>,
     ) -> Result<FileSystemServiceImpl, Error> {
-        // Phase 1: Use stub for Raft (no actual consensus)
-        // Phase 2: This will be passed as a parameter instead
-        let _raft_stub = Arc::new(StorageRaftMemberStub::new());
-
         // Create the service instance
         // Note: new() is pub(crate) so only callable from within filesystem_service module
+        // The Raft stub is created internally with metadata_store
         Ok(FileSystemServiceImpl::new(
             config,
             metadata_store,

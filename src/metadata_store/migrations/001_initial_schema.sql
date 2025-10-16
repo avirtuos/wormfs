@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS disks (
 -- Note: file_id is caller-provided (UUID-based), not auto-increment
 -- This design supports distributed operation and deterministic Raft log entries
 CREATE TABLE IF NOT EXISTS files (
-    file_id INTEGER PRIMARY KEY,
+    file_id BLOB PRIMARY KEY,
     inode INTEGER UNIQUE NOT NULL,
     path TEXT UNIQUE NOT NULL,
     parent_path TEXT NOT NULL,
@@ -62,8 +62,8 @@ CREATE TABLE IF NOT EXISTS files (
 -- Stripes are chunks of files that are erasure-coded
 -- Note: stripe_id is caller-provided (UUID-based), not auto-increment
 CREATE TABLE IF NOT EXISTS stripes (
-    stripe_id INTEGER PRIMARY KEY,
-    file_id INTEGER NOT NULL,
+    stripe_id BLOB PRIMARY KEY,
+    file_id BLOB NOT NULL,
     stripe_index INTEGER NOT NULL,
     offset INTEGER NOT NULL,
     size INTEGER NOT NULL,
@@ -76,8 +76,8 @@ CREATE TABLE IF NOT EXISTS stripes (
 -- Chunks are the actual data/parity pieces stored on disks
 -- Note: chunk_id is caller-provided (UUID-based), not auto-increment
 CREATE TABLE IF NOT EXISTS chunks (
-    chunk_id INTEGER PRIMARY KEY,
-    stripe_id INTEGER NOT NULL,
+    chunk_id BLOB PRIMARY KEY,
+    stripe_id BLOB NOT NULL,
     chunk_index INTEGER NOT NULL,
     node_id INTEGER NOT NULL,
     disk_id INTEGER NOT NULL,
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS chunks (
 -- File locks for coordinating concurrent access
 CREATE TABLE IF NOT EXISTS locks (
     lock_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id INTEGER NOT NULL,
+    file_id BLOB NOT NULL,
     client_id INTEGER NOT NULL,
     lock_type INTEGER NOT NULL, -- 0=Read, 1=Write
     acquired_at INTEGER NOT NULL,

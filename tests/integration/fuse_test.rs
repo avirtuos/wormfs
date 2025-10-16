@@ -136,7 +136,7 @@ async fn test_lookup_file_via_metadata_store() {
     service.initialize_root().await.expect("Init failed");
 
     // Pre-populate a test file in MetadataStore (simulates file creation)
-    let file_id = FileId::new(100);
+    let file_id = FileId::generate();
     let test_file_path = Path::new("/test.txt");
     let test_inode = 42;
 
@@ -267,7 +267,7 @@ async fn test_readdir_with_files() {
     service.initialize_root().await.expect("Init failed");
 
     // Create a test file in root directory
-    let file_id = FileId::new(200);
+    let file_id = FileId::generate();
     let test_file_path = Path::new("/file1.txt");
     let test_inode = 100;
 

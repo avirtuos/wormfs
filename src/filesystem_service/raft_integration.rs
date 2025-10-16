@@ -36,7 +36,7 @@ impl RaftIntegratedFileSystemService {
         file_store: Arc<crate::file_store::FileStoreImpl>,
     ) -> Self {
         Self {
-            raft_member: Arc::new(StorageRaftMemberStub::new()),
+            raft_member: Arc::new(StorageRaftMemberStub::new((*metadata_store).clone())),
             metadata_store,
             file_store,
         }
@@ -387,7 +387,9 @@ pub async fn example_write_flow(service: &RaftIntegratedFileSystemService) -> Re
         )
         .await?;
 
-    let file_id = FileId::new(file_attr.ino);
+    // In the real implementation, file_id would come from the Raft result
+    // For this example, we generate a new file_id
+    let file_id = FileId::generate();
 
     // Step 2: Allocate stripes (metadata operation - goes through Raft)
     let stripe_ids = service

@@ -216,6 +216,9 @@ pub trait MetadataStore: Send + Sync + Clone {
         offset: u64,
     ) -> Result<StripeRecord, Error>;
 
+    /// Delete a stripe and all its chunks.
+    async fn delete_stripe(&self, stripe_id: StripeId) -> Result<(), Error>;
+
     // ===== Chunk Operations =====
 
     /// Allocate chunks for a stripe.

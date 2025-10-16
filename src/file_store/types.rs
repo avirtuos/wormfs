@@ -4,22 +4,26 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Unique identifier for a file in the system.
+///
+/// Uses full 128-bit UUID v4 for globally unique, collision-resistant IDs.
+/// Stored as BLOB in SQLite (16 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct FileId(pub u64);
+pub struct FileId(pub Uuid);
 
 impl FileId {
-    /// Create a new FileId from a u64.
-    pub fn new(id: u64) -> Self {
-        Self(id)
+    /// Create a new FileId from a UUID.
+    pub fn new(uuid: Uuid) -> Self {
+        Self(uuid)
     }
 
     /// Generate a new unique FileId using UUID v4.
     ///
-    /// Uses UUID v4 for globally unique, collision-resistant IDs.
-    /// The 128-bit UUID is truncated to 64 bits, which provides
-    /// sufficient uniqueness for non-cryptographic purposes.
+    /// Uses UUID v4 with full 128 bits for globally unique IDs.
+    /// With 122 bits of randomness, collision probability is negligible
+    /// even across billions of IDs in a distributed system.
     ///
     /// # Example
     ///
@@ -28,61 +32,97 @@ impl FileId {
     ///
     /// let id1 = FileId::generate();
     /// let id2 = FileId::generate();
-    /// assert_ne!(id1, id2); // Extremely unlikely to collide
+    /// assert_ne!(id1, id2);
     /// ```
     pub fn generate() -> Self {
-        Self::new(uuid::Uuid::new_v4().as_u128() as u64)
+        Self::new(Uuid::new_v4())
     }
 
-    /// Get the inner u64 value.
-    pub fn as_u64(&self) -> u64 {
-        self.0
+    /// Get the inner UUID value.
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+
+    /// Get the UUID as a byte array (16 bytes).
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
+
+    /// Create a FileId from a byte array (16 bytes).
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self::new(Uuid::from_bytes(bytes))
     }
 }
 
 /// Unique identifier for a stripe within a file.
+///
+/// Uses full 128-bit UUID v4 for globally unique, collision-resistant IDs.
+/// Stored as BLOB in SQLite (16 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct StripeId(pub u64);
+pub struct StripeId(pub Uuid);
 
 impl StripeId {
-    /// Create a new StripeId from a u64.
-    pub fn new(id: u64) -> Self {
-        Self(id)
+    /// Create a new StripeId from a UUID.
+    pub fn new(uuid: Uuid) -> Self {
+        Self(uuid)
     }
 
     /// Generate a new unique StripeId using UUID v4.
     ///
     /// See [`FileId::generate()`] for details on UUID-based ID generation.
     pub fn generate() -> Self {
-        Self::new(uuid::Uuid::new_v4().as_u128() as u64)
+        Self::new(Uuid::new_v4())
     }
 
-    /// Get the inner u64 value.
-    pub fn as_u64(&self) -> u64 {
-        self.0
+    /// Get the inner UUID value.
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+
+    /// Get the UUID as a byte array (16 bytes).
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
+
+    /// Create a StripeId from a byte array (16 bytes).
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self::new(Uuid::from_bytes(bytes))
     }
 }
 
 /// Unique identifier for a chunk.
+///
+/// Uses full 128-bit UUID v4 for globally unique, collision-resistant IDs.
+/// Stored as BLOB in SQLite (16 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ChunkId(pub u64);
+pub struct ChunkId(pub Uuid);
 
 impl ChunkId {
-    /// Create a new ChunkId from a u64.
-    pub fn new(id: u64) -> Self {
-        Self(id)
+    /// Create a new ChunkId from a UUID.
+    pub fn new(uuid: Uuid) -> Self {
+        Self(uuid)
     }
 
     /// Generate a new unique ChunkId using UUID v4.
     ///
     /// See [`FileId::generate()`] for details on UUID-based ID generation.
     pub fn generate() -> Self {
-        Self::new(uuid::Uuid::new_v4().as_u128() as u64)
+        Self::new(Uuid::new_v4())
     }
 
-    /// Get the inner u64 value.
-    pub fn as_u64(&self) -> u64 {
-        self.0
+    /// Get the inner UUID value.
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+
+    /// Get the UUID as a byte array (16 bytes).
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
+
+    /// Create a ChunkId from a byte array (16 bytes).
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self::new(Uuid::from_bytes(bytes))
     }
 }
 
@@ -630,4 +670,89 @@ pub enum PrefetchPolicy {
     NextStripe,
     /// Prefetch N stripes ahead
     Lookahead { count: usize },
+}
+
+// =============================================================================
+// SQLite Serialization
+// =============================================================================
+
+impl rusqlite::ToSql for FileId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::Borrowed(
+            rusqlite::types::ValueRef::Blob(self.0.as_bytes()),
+        ))
+    }
+}
+
+impl rusqlite::types::FromSql for FileId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value {
+            rusqlite::types::ValueRef::Blob(bytes) => {
+                if bytes.len() != 16 {
+                    return Err(rusqlite::types::FromSqlError::InvalidBlobSize {
+                        expected_size: 16,
+                        blob_size: bytes.len(),
+                    });
+                }
+                let mut uuid_bytes = [0u8; 16];
+                uuid_bytes.copy_from_slice(bytes);
+                Ok(FileId::from_bytes(uuid_bytes))
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl rusqlite::ToSql for StripeId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::Borrowed(
+            rusqlite::types::ValueRef::Blob(self.0.as_bytes()),
+        ))
+    }
+}
+
+impl rusqlite::types::FromSql for StripeId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value {
+            rusqlite::types::ValueRef::Blob(bytes) => {
+                if bytes.len() != 16 {
+                    return Err(rusqlite::types::FromSqlError::InvalidBlobSize {
+                        expected_size: 16,
+                        blob_size: bytes.len(),
+                    });
+                }
+                let mut uuid_bytes = [0u8; 16];
+                uuid_bytes.copy_from_slice(bytes);
+                Ok(StripeId::from_bytes(uuid_bytes))
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl rusqlite::ToSql for ChunkId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::Borrowed(
+            rusqlite::types::ValueRef::Blob(self.0.as_bytes()),
+        ))
+    }
+}
+
+impl rusqlite::types::FromSql for ChunkId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value {
+            rusqlite::types::ValueRef::Blob(bytes) => {
+                if bytes.len() != 16 {
+                    return Err(rusqlite::types::FromSqlError::InvalidBlobSize {
+                        expected_size: 16,
+                        blob_size: bytes.len(),
+                    });
+                }
+                let mut uuid_bytes = [0u8; 16];
+                uuid_bytes.copy_from_slice(bytes);
+                Ok(ChunkId::from_bytes(uuid_bytes))
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
 }
