@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS files (
     path TEXT UNIQUE NOT NULL,
     parent_path TEXT NOT NULL,
     name TEXT NOT NULL,
+    file_type INTEGER NOT NULL, -- 0=regular file, 1=directory, 2=symlink
     size INTEGER NOT NULL DEFAULT 0,
     permissions INTEGER NOT NULL DEFAULT 420, -- 0o644 in octal
     uid INTEGER NOT NULL,
@@ -100,3 +101,7 @@ CREATE TABLE IF NOT EXISTS locks (
     expires_at INTEGER NOT NULL,
     FOREIGN KEY (file_id) REFERENCES files(file_id) ON DELETE CASCADE
 );
+
+-- Indexes for performance
+CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type);
+CREATE INDEX IF NOT EXISTS idx_files_parent_path ON files(parent_path);

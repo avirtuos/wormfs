@@ -7,6 +7,10 @@ description = "A distributed, erasure-coded filesystem with strong consistency"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
+name = "wormfs"
+path = "src/bin/wormfs.rs"
+
+[[bin]]
 name = "wormfs-validator"
 path = "src/bin/worm_validator.rs"
 
@@ -73,6 +77,15 @@ mockall = { version = "0.12", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 tracing-subscriber = "0.3"
 
+# FUSE filesystem
+fuser = { version = "0.14", optional = true }
+lru = "0.12"
+
+# Signal handling
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+futures = "0.3"
+
 # Testing utilities (for validator)
 tempfile = "3.8"
 serde_json = "1.0"
@@ -93,7 +106,7 @@ mockall = "0.12"
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 [features]
-default = ["rusqlite", "tokio-rusqlite", "reed-solomon-erasure"]
+default = ["rusqlite", "tokio-rusqlite", "reed-solomon-erasure", "fuser"]
 test-utils = ["mockall"]
 # Note: sqlx and rusqlite cannot be used together due to libsqlite3-sys version conflicts
-full = ["libp2p", "openraft", "rusqlite", "tokio-rusqlite", "redb", "reed-solomon-erasure", "tonic", "prost"]
+full = ["libp2p", "openraft", "rusqlite", "tokio-rusqlite", "redb", "reed-solomon-erasure", "tonic", "prost", "fuser"]

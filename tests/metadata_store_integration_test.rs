@@ -43,6 +43,7 @@ async fn create_test_store() -> (impl MetadataStore, TempDir) {
 /// Helper to create test file metadata.
 fn test_file_metadata() -> FileMetadata {
     FileMetadata {
+        file_type: FileType::RegularFile,
         size: 1024,
         permissions: 0o644,
         uid: 1000,

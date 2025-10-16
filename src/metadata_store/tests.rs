@@ -40,6 +40,7 @@ async fn create_test_store() -> (MetadataStoreImpl, TempDir) {
 /// Helper to create test file metadata.
 fn test_file_metadata() -> FileMetadata {
     FileMetadata {
+        file_type: FileType::RegularFile,
         size: 1024,
         permissions: 0o644,
         uid: 1000,
@@ -166,6 +167,7 @@ mod file_operations {
 
         // Update file metadata
         let new_metadata = FileMetadata {
+            file_type: FileType::RegularFile,
             size: 2048,
             permissions: 0o755,
             uid: 1001,
