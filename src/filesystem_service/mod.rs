@@ -93,6 +93,12 @@
 //! - **Lock extension**: Clients can extend before expiration
 
 pub mod factory;
+pub mod fuse_adapter;
+pub mod implementation;
+pub mod inode;
+pub mod mount;
+pub mod raft_commands;
+pub mod raft_integration;
 pub mod types;
 
 use async_trait::async_trait;

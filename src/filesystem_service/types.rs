@@ -54,6 +54,12 @@ pub struct Config {
 
     /// Enable extended attributes
     pub enable_xattr: bool,
+
+    /// Default UID for filesystem operations
+    pub uid: u32,
+
+    /// Default GID for filesystem operations
+    pub gid: u32,
 }
 
 impl Default for Config {
@@ -72,6 +78,8 @@ impl Default for Config {
             default_dir_mode: 0o755,
             max_file_size: u64::MAX,
             enable_xattr: true,
+            uid: 1000,
+            gid: 1000,
         }
     }
 }
@@ -111,6 +119,14 @@ pub enum Error {
     #[error("Lock not held by client {client_id:?} on inode {inode}")]
     LockNotHeld { inode: u64, client_id: ClientId },
 
+    /// Lock not held (simple version)
+    #[error("Lock not held: {0}")]
+    LockNotHeldSimple(String),
+
+    /// Lock conflict (simple version)
+    #[error("Lock conflict: {0}")]
+    LockConflictSimple(String),
+
     /// Insufficient storage space
     #[error("Insufficient storage space")]
     NoSpace,
@@ -138,6 +154,22 @@ pub enum Error {
     /// I/O error
     #[error("I/O error: {0}")]
     IoError(String),
+
+    /// Raft operation error
+    #[error("Raft error: {0}")]
+    RaftError(String),
+
+    /// Metadata error
+    #[error("Metadata error: {0}")]
+    MetadataError(String),
+
+    /// Internal error
+    #[error("Internal error: {0}")]
+    Internal(String),
+
+    /// Not supported
+    #[error("Not supported: {0}")]
+    NotSupported(String),
 }
 
 impl Error {
@@ -153,12 +185,14 @@ impl Error {
             Self::IsADirectory(_) => libc::EISDIR,
             Self::DirectoryNotEmpty(_) => libc::ENOTEMPTY,
             Self::InvalidFileHandle(_) => libc::EBADF,
-            Self::LockConflict { .. } => libc::ENOLCK,
-            Self::LockNotHeld { .. } => libc::ENOLCK,
+            Self::LockConflict { .. } | Self::LockConflictSimple(_) => libc::ENOLCK,
+            Self::LockNotHeld { .. } | Self::LockNotHeldSimple(_) => libc::ENOLCK,
             Self::NoSpace => libc::ENOSPC,
             Self::InvalidArgument(_) => libc::EINVAL,
             Self::Io(_) | Self::IoError(_) => libc::EIO,
             Self::MetadataFailed(_) | Self::DataFailed(_) => libc::EIO,
+            Self::RaftError(_) | Self::MetadataError(_) | Self::Internal(_) => libc::EIO,
+            Self::NotSupported(_) => libc::ENOSYS,
         }
     }
 }
@@ -196,6 +230,9 @@ pub struct FileAttr {
     /// Creation time
     pub crtime: SystemTime,
 
+    /// File type
+    pub kind: FileType,
+
     /// Permissions
     pub perm: u16,
 
@@ -210,6 +247,9 @@ pub struct FileAttr {
 
     /// Device ID (for special files)
     pub rdev: u32,
+
+    /// Block size for filesystem I/O
+    pub blksize: u32,
 
     /// Flags
     pub flags: u32,
