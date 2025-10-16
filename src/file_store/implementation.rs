@@ -564,7 +564,7 @@ mod tests {
 
         let config = Config {
             disk_paths: vec![disk_path.clone()],
-            max_chunk_size: 512,  // 512 bytes per chunk
+            max_chunk_size: 512, // 512 bytes per chunk
             default_data_shards: 2,
             default_parity_shards: 1,
             max_concurrent_operations: 10,
