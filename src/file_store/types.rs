@@ -175,7 +175,7 @@ impl TxId {
 }
 
 /// Configuration for FileStore.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     /// Paths to disk mount points for chunk storage
     pub disk_paths: Vec<PathBuf>,
@@ -201,11 +201,48 @@ pub struct Config {
     /// Maximum concurrent chunk operations
     pub max_concurrent_operations: usize,
 
-    /// Chunk verification interval
+    /// Chunk verification interval (in seconds when serialized)
+    #[serde(with = "serde_duration_seconds")]
     pub verification_interval: Duration,
 
-    /// Orphan cleanup age threshold
+    /// Orphan cleanup age threshold (in seconds when serialized)
+    #[serde(with = "serde_duration_seconds")]
     pub orphan_cleanup_age: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            disk_paths: vec![],
+            max_chunk_size: 1024 * 1024, // 1MB
+            default_data_shards: 2,
+            default_parity_shards: 1,
+            max_concurrent_operations: 100,
+            verification_interval: Duration::from_secs(3600),
+            orphan_cleanup_age: Duration::from_secs(3600),
+        }
+    }
+}
+
+/// Serde helper module for Duration serialization/deserialization as seconds.
+mod serde_duration_seconds {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(duration.as_secs())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
 }
 
 /// Errors that can occur during FileStore operations.

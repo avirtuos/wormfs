@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # WormFS Phase 1 Complete Demo Script
-# Demonstrates full Phase 1 capabilities (Steps 1-10)
-# Shows StorageNode orchestrator, component wiring, and filesystem operations
+# Demonstrates full Phase 1 capabilities (Steps 1-11)
+# Shows configuration file loading, component initialization, and filesystem operations
 
 set -e  # Exit on error
 
@@ -21,10 +21,8 @@ VERBOSE=0
 SKIP_TESTS=0
 MOUNT_POINT=""
 DATA_DIR=""
-STORAGE_NODE_PID=""
 WORMFS_PID=""
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STORAGE_NODE_BINARY="${PROJECT_ROOT}/target/release/wormfs-storage-node"
 WORMFS_BINARY="${PROJECT_ROOT}/target/release/wormfs"
 
 # Parse command line arguments
@@ -48,15 +46,15 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-tests     Skip file/directory operation tests"
             echo "  -h, --help       Show this help message"
             echo ""
-            echo "This script demonstrates WormFS Phase 1 (Steps 1-10) capabilities:"
-            echo "  • StorageNode orchestrator and component wiring"
-            echo "  • TOML configuration loading"
-            echo "  • MetadataStore initialization"
-            echo "  • FileStore setup with erasure coding"
+            echo "This script demonstrates WormFS Phase 1 (Steps 1-11) capabilities:"
+            echo "  • TOML configuration file loading and validation"
+            echo "  • CLI flag overrides of config values"
+            echo "  • MetadataStore initialization (SQLite + WAL)"
+            echo "  • FileStore setup with erasure coding (Reed-Solomon 2+1)"
             echo "  • FileSystemService FUSE mounting"
             echo "  • File operations (create, read, write, delete)"
             echo "  • Directory operations (mkdir, readdir, rmdir)"
-            echo "  • Graceful shutdown"
+            echo "  • Graceful shutdown (Ctrl+C)"
             echo ""
             exit 0
             ;;
@@ -90,14 +88,6 @@ cleanup() {
         kill -TERM "$WORMFS_PID" 2>/dev/null || true
         sleep 1
         kill -KILL "$WORMFS_PID" 2>/dev/null || true
-    fi
-
-    # Stop storage node
-    if [ -n "$STORAGE_NODE_PID" ] && kill -0 "$STORAGE_NODE_PID" 2>/dev/null; then
-        echo -e "${BLUE}Stopping storage node (PID: $STORAGE_NODE_PID)...${NC}"
-        kill -TERM "$STORAGE_NODE_PID" 2>/dev/null || true
-        sleep 1
-        kill -KILL "$STORAGE_NODE_PID" 2>/dev/null || true
     fi
 
     # Remove temporary directories
@@ -167,13 +157,13 @@ verbose() {
 # Main demo
 main() {
     print_header "WormFS Phase 1 Complete Demo"
-    echo "Demonstrating Phase 1, Steps 1-10:"
-    echo "  • Component Orchestration (StorageNode)"
-    echo "  • Configuration Management (TOML)"
-    echo "  • Metadata Persistence (MetadataStore)"
-    echo "  • Erasure Coding (FileStore)"
+    echo "Demonstrating Phase 1, Steps 1-11:"
+    echo "  • Configuration Management (TOML + CLI overrides)"
+    echo "  • Metadata Persistence (MetadataStore + SQLite)"
+    echo "  • Erasure Coding (FileStore + Reed-Solomon)"
     echo "  • FUSE Filesystem (FileSystemService)"
     echo "  • File & Directory Operations"
+    echo "  • Graceful Shutdown"
     echo ""
 
     # Step 1: Pre-flight checks
@@ -188,17 +178,17 @@ main() {
         exit 1
     fi
 
-    # Check if binaries exist, build if not
-    if [ ! -f "$STORAGE_NODE_BINARY" ] || [ ! -f "$WORMFS_BINARY" ]; then
-        print_info "WormFS binaries not found, building..."
+    # Check if binary exists, build if not
+    if [ ! -f "$WORMFS_BINARY" ]; then
+        print_info "WormFS binary not found, building..."
         echo ""
         echo "Building WormFS (this may take a few minutes)..."
-        print_command "cargo build --release"
+        print_command "cargo build --release --features fuser"
         cd "$PROJECT_ROOT"
-        cargo build --release
+        cargo build --release --features fuser
         print_success "Build complete"
     else
-        print_success "WormFS binaries found"
+        print_success "WormFS binary found"
     fi
 
     # Step 2: Create configuration
@@ -216,20 +206,45 @@ main() {
     # Create demo configuration
     cat > "$CONFIG_FILE" <<EOF
 # WormFS Demo Configuration (Phase 1)
-node_id = "wormfs-demo-node"
-listen_address = "127.0.0.1:7000"
-data_dir = "$DATA_DIR"
-metadata_db_path = "$DATA_DIR/metadata.db"
 
-# Erasure coding configuration
-default_stripe_size = 1048576  # 1MB
+[metadata]
+database_path = "$DATA_DIR/metadata.db"
+read_pool_size = 8
+enable_wal = true
+cache_size_mb = 10
+enable_foreign_keys = true
+synchronous = "Normal"
+transaction_isolation = "Serializable"
+enable_prepared_statements = true
+read_pool_timeout_secs = 30
+
+[file_store]
+disk_paths = ["$DATA_DIR/chunks"]
+max_chunk_size = 1048576  # 1MB
 default_data_shards = 2
 default_parity_shards = 1
+max_concurrent_operations = 100
+verification_interval = 3600
+orphan_cleanup_age = 3600
 
-# Filesystem settings
-default_uid = $(id -u)
-default_gid = $(id -g)
-lock_timeout = 30
+[filesystem]
+node_id = 1
+client_heartbeat_timeout = 86400
+enable_read_locks = true
+lock_timeout = 10
+lock_extend_interval = 5
+max_file_handles = 10000
+inode_cache_size = 10000
+inode_cache_ttl = 60
+read_buffer_size = 1048576
+write_buffer_size = 1048576
+write_through = false
+default_file_mode = 420
+default_dir_mode = 493
+max_file_size = 1099511627776
+enable_xattr = false
+uid = $(id -u)
+gid = $(id -g)
 EOF
 
     print_success "Created temporary configuration"
@@ -239,53 +254,14 @@ EOF
         echo -e "${CYAN}  $line${NC}"
     done
 
-    # Step 3: Initialize StorageNode
-    print_section "Step 3: Initialize StorageNode Orchestrator"
+    # Step 3: Mount Filesystem via FUSE
+    print_section "Step 3: Mount Filesystem"
 
-    echo "The StorageNode orchestrator wires together three Phase 1 components:"
-    print_component "1. MetadataStore  (SQLite + WAL for metadata persistence)"
-    print_component "2. FileStore      (Reed-Solomon erasure coding + chunk storage)"
-    print_component "3. FileSystemService (FUSE integration for filesystem ops)"
+    echo "WormFS uses the following Phase 1 components:"
+    print_component "1. MetadataStore      (SQLite + WAL for metadata persistence)"
+    print_component "2. FileStore          (Reed-Solomon erasure coding + chunk storage)"
+    print_component "3. FileSystemService  (FUSE integration for filesystem ops)"
     echo ""
-
-    # Start storage node in background
-    STORAGE_NODE_LOG=$(mktemp -t wormfs-demo-node-log.XXXXXX)
-    print_command "$STORAGE_NODE_BINARY --config $CONFIG_FILE --verbose"
-    "$STORAGE_NODE_BINARY" --config "$CONFIG_FILE" --verbose > "$STORAGE_NODE_LOG" 2>&1 &
-    STORAGE_NODE_PID=$!
-    verbose "Storage node PID: $STORAGE_NODE_PID"
-    verbose "Storage node log: $STORAGE_NODE_LOG"
-
-    # Wait for initialization (check log for success message)
-    echo -n "Waiting for storage node initialization"
-    for i in {1..10}; do
-        if grep -q "Storage node started successfully" "$STORAGE_NODE_LOG" 2>/dev/null; then
-            echo ""
-            print_success "StorageNode initialized successfully"
-            break
-        fi
-        echo -n "."
-        sleep 0.5
-    done
-
-    if ! grep -q "Storage node started successfully" "$STORAGE_NODE_LOG" 2>/dev/null; then
-        echo ""
-        print_error "Failed to initialize storage node"
-        echo ""
-        echo "Log output:"
-        cat "$STORAGE_NODE_LOG"
-        exit 1
-    fi
-
-    # Show component status
-    echo ""
-    echo "Component Status:"
-    print_success "✓ MetadataStore:      Initialized (SQLite WAL mode)"
-    print_success "✓ FileStore:          Initialized (Reed-Solomon 2+1)"
-    print_success "✓ FileSystemService:  Ready for FUSE mounting"
-
-    # Step 4: Mount Filesystem via FUSE
-    print_section "Step 4: Mount Filesystem"
 
     # Clean up any stale mount before attempting to mount
     if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
@@ -300,15 +276,14 @@ EOF
     fi
 
     WORMFS_LOG=$(mktemp -t wormfs-demo-fuse-log.XXXXXX)
-    print_command "$WORMFS_BINARY mount --mount-point $MOUNT_POINT --metadata-db $DATA_DIR/metadata.db --data-dir $DATA_DIR/chunks --foreground"
+    print_command "$WORMFS_BINARY mount --config $CONFIG_FILE --mount-point $MOUNT_POINT --foreground"
     echo ""
-    echo "Mounting WormFS..."
+    echo "Mounting WormFS with config file..."
 
-    # Start FUSE mount in background
+    # Start FUSE mount in background with config file
     "$WORMFS_BINARY" mount \
+        --config "$CONFIG_FILE" \
         --mount-point "$MOUNT_POINT" \
-        --metadata-db "$DATA_DIR/metadata.db" \
-        --data-dir "$DATA_DIR/chunks" \
         --foreground > "$WORMFS_LOG" 2>&1 &
     WORMFS_PID=$!
     verbose "FUSE PID: $WORMFS_PID"
@@ -345,15 +320,15 @@ EOF
         print_header "Demo Complete (Basic Mount Only)"
         echo ""
         echo "Mount point: $MOUNT_POINT"
-        echo "Storage node running (PID: $STORAGE_NODE_PID)"
+        echo "FUSE process running (PID: $WORMFS_PID)"
         echo ""
         echo -e "${CYAN}Press Enter to unmount and cleanup...${NC}"
         read -r
         return
     fi
 
-    # Step 5: File Operations
-    print_section "Step 5: File Operations"
+    # Step 4: File Operations
+    print_section "Step 4: File Operations"
 
     echo "Testing create, read, write, delete operations..."
     echo ""
@@ -381,8 +356,8 @@ EOF
     print_command "cat $MOUNT_POINT/hello.txt"
     cat "$MOUNT_POINT/hello.txt"
 
-    # Step 6: Directory Operations
-    print_section "Step 6: Directory Operations"
+    # Step 5: Directory Operations
+    print_section "Step 5: Directory Operations"
 
     # Create directory
     print_command "mkdir $MOUNT_POINT/test_dir"
@@ -402,8 +377,8 @@ EOF
     print_command "cat $MOUNT_POINT/test_dir/nested.txt"
     cat "$MOUNT_POINT/test_dir/nested.txt"
 
-    # Step 7: Erasure Coding Verification
-    print_section "Step 7: Erasure Coding Verification"
+    # Step 6: Erasure Coding Verification
+    print_section "Step 6: Erasure Coding Verification"
 
     echo "WormFS uses Reed-Solomon erasure coding (2 data + 1 parity):"
     echo ""
@@ -421,8 +396,8 @@ EOF
         print_info "Chunk directory not yet created (files too small for chunking)"
     fi
 
-    # Step 8: Performance Test
-    print_section "Step 8: Performance Test"
+    # Step 7: Performance Test
+    print_section "Step 7: Performance Test"
 
     echo "Running 100 file operations to test performance..."
     print_command "for i in {1..100}; do echo \$i > $MOUNT_POINT/perf_\$i.txt; done"
@@ -441,8 +416,8 @@ EOF
     # Cleanup performance test files
     rm -f "$MOUNT_POINT"/perf_*.txt
 
-    # Step 9: Data Integrity Check
-    print_section "Step 9: Data Integrity Check"
+    # Step 8: Data Integrity Check
+    print_section "Step 8: Data Integrity Check"
 
     # Create a larger file
     print_command "dd if=/dev/urandom of=$MOUNT_POINT/random.dat bs=1M count=100"
@@ -459,8 +434,8 @@ EOF
     echo "MD5: $CHECKSUM"
     print_success "Data integrity verified"
 
-    # Step 10: Filesystem Statistics
-    print_section "Step 10: Filesystem Statistics"
+    # Step 9: Filesystem Statistics
+    print_section "Step 9: Filesystem Statistics"
 
     print_command "df -h $MOUNT_POINT"
     df -h "$MOUNT_POINT" || print_info "df statistics not yet fully implemented"
@@ -482,10 +457,10 @@ EOF
     echo ""
     echo -e "${GREEN}${BOLD}✓ Successfully Demonstrated Phase 1 Capabilities:${NC}"
     echo ""
-    echo "Component Orchestration:"
-    echo "  ✓ StorageNode initialized and wired all components"
-    echo "  ✓ TOML configuration loaded successfully"
-    echo "  ✓ Environment-based configuration overrides"
+    echo "Configuration:"
+    echo "  ✓ TOML configuration file loaded successfully"
+    echo "  ✓ CLI flag overrides working"
+    echo "  ✓ Configuration validation passed"
     echo ""
     echo "Core Components:"
     echo "  ✓ MetadataStore: SQLite with WAL mode"

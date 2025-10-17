@@ -149,28 +149,38 @@ async fn mount_command(
     metadata_db_override: Option<PathBuf>,
     data_dir_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use wormfs::filesystem_service::mount::{MountConfig, MountOptions};
+    use wormfs::filesystem_service::mount::MountOptions;
 
     tracing::info!("Starting WormFS mount...");
 
     // Load or create default configuration
-    let mount_config = if let Some(config_path) = config_path {
+    let mut mount_config = if let Some(config_path) = config_path {
         load_config_from_file(&config_path)?
     } else {
-        create_default_config(mount_point.clone(), metadata_db_override, data_dir_override)?
+        create_default_config(mount_point.clone(), metadata_db_override.clone(), data_dir_override.clone())?
     };
 
+    // Override mount_point from CLI (always takes precedence)
+    mount_config.mount_point = mount_point;
+
+    // Override metadata_db_path if provided via CLI
+    if let Some(metadata_db) = metadata_db_override {
+        mount_config.metadata_config.database_path = metadata_db;
+    }
+
+    // Override disk_paths if provided via CLI
+    if let Some(data_dir) = data_dir_override {
+        mount_config.file_store_config.disk_paths = vec![data_dir];
+    }
+
     // Override mount options from CLI
-    let mount_config = MountConfig {
-        mount_options: MountOptions {
-            allow_root,
-            allow_other,
-            auto_unmount,
-            foreground,
-            debug: fuse_debug,
-            ..mount_config.mount_options
-        },
-        ..mount_config
+    mount_config.mount_options = MountOptions {
+        allow_root,
+        allow_other,
+        auto_unmount,
+        foreground,
+        debug: fuse_debug,
+        ..mount_config.mount_options
     };
 
     // Setup signal handling for graceful shutdown
@@ -226,13 +236,102 @@ fn unmount_command(_mount_point: PathBuf) -> Result<(), Box<dyn std::error::Erro
     std::process::exit(1);
 }
 
+/// Top-level WormFS configuration structure matching TOML file format.
+#[cfg(feature = "fuser")]
+#[derive(Debug, serde::Deserialize)]
+struct WormFsConfig {
+    /// Metadata store configuration
+    #[serde(default)]
+    metadata: wormfs::metadata_store::Config,
+
+    /// File store configuration
+    #[serde(default)]
+    file_store: wormfs::file_store::types::Config,
+
+    /// Filesystem service configuration
+    #[serde(default)]
+    filesystem: wormfs::filesystem_service::types::Config,
+}
+
 /// Load configuration from TOML file.
 #[cfg(feature = "fuser")]
 fn load_config_from_file(
-    _path: &PathBuf,
+    path: &PathBuf,
 ) -> Result<wormfs::filesystem_service::mount::MountConfig, Box<dyn std::error::Error>> {
-    // TODO: Implement TOML parsing in Phase 1.1
-    Err("Config file loading not yet implemented. Use CLI flags for now.".into())
+    use wormfs::filesystem_service::mount::{MountConfig as FinalMountConfig, MountOptions};
+
+    // Read file
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read config file {:?}: {}", path, e))?;
+
+    // Parse TOML
+    let config: WormFsConfig = toml::from_str(&contents)
+        .map_err(|e| format!("Failed to parse config file: {}", e))?;
+
+    // Validate configuration
+    validate_config(&config)?;
+
+    // Determine mount point (use first disk path parent or fallback)
+    let mount_point = if !config.file_store.disk_paths.is_empty() {
+        config.file_store.disk_paths[0]
+            .parent()
+            .unwrap_or(&config.file_store.disk_paths[0])
+            .to_path_buf()
+    } else {
+        return Err("No disk paths configured in [file_store] section".into());
+    };
+
+    Ok(FinalMountConfig {
+        filesystem_config: config.filesystem,
+        metadata_config: config.metadata,
+        file_store_config: config.file_store,
+        mount_point,
+        mount_options: MountOptions::default(),
+    })
+}
+
+/// Validate configuration values.
+#[cfg(feature = "fuser")]
+fn validate_config(config: &WormFsConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // Validate metadata config
+    if config.metadata.cache_size_mb > 2047 {
+        return Err(format!(
+            "Metadata cache_size_mb ({}) exceeds maximum (2047 MB)",
+            config.metadata.cache_size_mb
+        )
+        .into());
+    }
+
+    // Validate file store config
+    if config.file_store.disk_paths.is_empty() {
+        return Err("At least one disk path must be configured in [file_store] section".into());
+    }
+
+    if config.file_store.default_data_shards == 0 {
+        return Err("default_data_shards must be greater than 0".into());
+    }
+
+    if config.file_store.default_parity_shards == 0 {
+        return Err("default_parity_shards must be greater than 0".into());
+    }
+
+    let total_shards = config.file_store.default_data_shards as usize
+        + config.file_store.default_parity_shards as usize;
+    if total_shards < 2 {
+        return Err("Total erasure coding shards (data + parity) must be at least 2".into());
+    }
+
+    if config.file_store.max_chunk_size == 0 {
+        return Err("max_chunk_size must be greater than 0".into());
+    }
+
+    // Validate filesystem config
+    if config.filesystem.max_file_handles == 0 {
+        return Err("max_file_handles must be greater than 0".into());
+    }
+
+    tracing::info!("Configuration validated successfully");
+    Ok(())
 }
 
 /// Create default configuration.
