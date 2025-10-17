@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(opts.allow_other, false);
         assert_eq!(opts.foreground, true);
         assert_eq!(opts.fsname, "wormfs");
-        assert_eq!(opts.auto_unmount, true);
+        assert_eq!(opts.auto_unmount, false);
         assert_eq!(opts.debug, false);
     }
 }
