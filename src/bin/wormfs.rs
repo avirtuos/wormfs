@@ -31,9 +31,9 @@ enum Commands {
         #[arg(short, long)]
         config: Option<PathBuf>,
 
-        /// Mount point directory
+        /// Mount point directory (overrides config)
         #[arg(short, long)]
-        mount_point: PathBuf,
+        mount_point: Option<PathBuf>,
 
         /// Run in foreground (don't daemonize)
         #[arg(short, long)]
@@ -140,7 +140,7 @@ fn setup_logging(verbose: bool, debug: bool) -> Result<(), Box<dyn std::error::E
 #[cfg(feature = "fuser")]
 async fn mount_command(
     config_path: Option<PathBuf>,
-    mount_point: PathBuf,
+    mount_point: Option<PathBuf>,
     foreground: bool,
     allow_root: bool,
     allow_other: bool,
@@ -157,11 +157,17 @@ async fn mount_command(
     let mut mount_config = if let Some(config_path) = config_path {
         load_config_from_file(&config_path)?
     } else {
-        create_default_config(mount_point.clone(), metadata_db_override.clone(), data_dir_override.clone())?
+        // When no config file, mount_point must be provided via CLI
+        let mp = mount_point.clone().ok_or_else(|| {
+            "mount_point must be specified via --mount-point when not using a config file".to_string()
+        })?;
+        create_default_config(mp, metadata_db_override.clone(), data_dir_override.clone())?
     };
 
-    // Override mount_point from CLI (always takes precedence)
-    mount_config.mount_point = mount_point;
+    // Override mount_point from CLI if provided
+    if let Some(mp) = mount_point {
+        mount_config.mount_point = mp;
+    }
 
     // Override metadata_db_path if provided via CLI
     if let Some(metadata_db) = metadata_db_override {
@@ -207,7 +213,7 @@ async fn mount_command(
 #[cfg(not(feature = "fuser"))]
 async fn mount_command(
     _config_path: Option<PathBuf>,
-    _mount_point: PathBuf,
+    _mount_point: Option<PathBuf>,
     _foreground: bool,
     _allow_root: bool,
     _allow_other: bool,
@@ -240,6 +246,9 @@ fn unmount_command(_mount_point: PathBuf) -> Result<(), Box<dyn std::error::Erro
 #[cfg(feature = "fuser")]
 #[derive(Debug, serde::Deserialize)]
 struct WormFsConfig {
+    /// Mount point for the filesystem
+    mount_point: Option<PathBuf>,
+
     /// Metadata store configuration
     #[serde(default)]
     metadata: wormfs::metadata_store::Config,
@@ -271,15 +280,10 @@ fn load_config_from_file(
     // Validate configuration
     validate_config(&config)?;
 
-    // Determine mount point (use first disk path parent or fallback)
-    let mount_point = if !config.file_store.disk_paths.is_empty() {
-        config.file_store.disk_paths[0]
-            .parent()
-            .unwrap_or(&config.file_store.disk_paths[0])
-            .to_path_buf()
-    } else {
-        return Err("No disk paths configured in [file_store] section".into());
-    };
+    // Get mount point from config
+    let mount_point = config.mount_point.ok_or_else(|| {
+        "mount_point must be specified in config file or via --mount-point CLI flag".to_string()
+    })?;
 
     Ok(FinalMountConfig {
         filesystem_config: config.filesystem,

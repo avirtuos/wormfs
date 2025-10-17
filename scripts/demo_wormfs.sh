@@ -206,6 +206,7 @@ main() {
     # Create demo configuration
     cat > "$CONFIG_FILE" <<EOF
 # WormFS Demo Configuration (Phase 1)
+mount_point = "$MOUNT_POINT"
 
 [metadata]
 database_path = "$DATA_DIR/metadata.db"
@@ -239,8 +240,8 @@ inode_cache_ttl = 60
 read_buffer_size = 1048576
 write_buffer_size = 1048576
 write_through = false
-default_file_mode = 420
-default_dir_mode = 493
+default_file_mode = "0644"
+default_dir_mode = "0755"
 max_file_size = 1099511627776
 enable_xattr = false
 uid = $(id -u)
@@ -419,20 +420,56 @@ EOF
     # Step 8: Data Integrity Check
     print_section "Step 8: Data Integrity Check"
 
-    # Create a larger file
-    print_command "dd if=/dev/urandom of=$MOUNT_POINT/random.dat bs=1M count=100"
-    dd if=/dev/urandom of="$MOUNT_POINT/random.dat" bs=1M count=100 2>&1 | tail -1
-    print_success "Created 100MB file"
+    echo "Testing data integrity through the full write/read pipeline..."
+    echo ""
+
+    # Stage file in /tmp first
+    STAGING_FILE=$(mktemp -t wormfs-demo-staging.XXXXXX.dat)
+    print_command "dd if=/dev/urandom of=$STAGING_FILE bs=1M count=30"
+    dd if=/dev/urandom of="$STAGING_FILE" bs=1M count=30 2>&1 | tail -1
+    print_success "Created 30MB file in staging area"
+
+    # Calculate checksum of original file
+    print_command "md5sum $STAGING_FILE"
+    ORIGINAL_CHECKSUM=$(md5sum "$STAGING_FILE" | awk '{print $1}')
+    echo -e "${CYAN}Original MD5: $ORIGINAL_CHECKSUM${NC}"
+    print_success "Calculated checksum of staged file"
+
+    # Copy file to WormFS
+    print_command "cp $STAGING_FILE $MOUNT_POINT/random.dat"
+    cp "$STAGING_FILE" "$MOUNT_POINT/random.dat"
+    print_success "Copied file to WormFS"
 
     # Verify size
     SIZE=$(stat -f%z "$MOUNT_POINT/random.dat" 2>/dev/null || stat -c%s "$MOUNT_POINT/random.dat" 2>/dev/null)
-    print_info "File size: $(numfmt --to=iec-i --suffix=B $SIZE)"
+    print_info "File size in WormFS: $(numfmt --to=iec-i --suffix=B $SIZE)"
 
-    # Calculate checksum
+    # Calculate checksum of file in WormFS
     print_command "md5sum $MOUNT_POINT/random.dat"
-    CHECKSUM=$(md5sum "$MOUNT_POINT/random.dat" | awk '{print $1}')
-    echo "MD5: $CHECKSUM"
-    print_success "Data integrity verified"
+    WORMFS_CHECKSUM=$(md5sum "$MOUNT_POINT/random.dat" | awk '{print $1}')
+    echo -e "${CYAN}WormFS MD5:  $WORMFS_CHECKSUM${NC}"
+    print_success "Calculated checksum from WormFS"
+
+    # Compare checksums
+    echo ""
+    echo "Comparing checksums..."
+    if [ "$ORIGINAL_CHECKSUM" = "$WORMFS_CHECKSUM" ]; then
+        echo -e "${GREEN}${BOLD}✓ CHECKSUM MATCH!${NC}"
+        echo -e "${GREEN}  Original: $ORIGINAL_CHECKSUM${NC}"
+        echo -e "${GREEN}  WormFS:   $WORMFS_CHECKSUM${NC}"
+        print_success "Data integrity verified - no corruption detected"
+    else
+        echo -e "${RED}${BOLD}✗ CHECKSUM MISMATCH!${NC}"
+        echo -e "${RED}  Original: $ORIGINAL_CHECKSUM${NC}"
+        echo -e "${RED}  WormFS:   $WORMFS_CHECKSUM${NC}"
+        print_error "Data integrity check FAILED - checksums do not match!"
+        rm -f "$STAGING_FILE"
+        exit 1
+    fi
+
+    # Clean up staging file
+    rm -f "$STAGING_FILE"
+    verbose "Cleaned up staging file"
 
     # Step 9: Filesystem Statistics
     print_section "Step 9: Filesystem Statistics"
@@ -475,7 +512,7 @@ EOF
     echo ""
     echo "Performance:"
     echo "  ✓ 100 file creates in ${ELAPSED}s"
-    echo "  ✓ 100MB file write and verify"
+    echo "  ✓ 30MB file write and verify"
     echo ""
 
     echo -e "${YELLOW}${BOLD}Current Limitations (Phase 1 - Single Node):${NC}"

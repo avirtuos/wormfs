@@ -56,9 +56,11 @@ pub struct Config {
     pub write_through: bool,
 
     /// Default file permissions
+    #[serde(with = "serde_file_mode")]
     pub default_file_mode: u32,
 
     /// Default directory permissions
+    #[serde(with = "serde_file_mode")]
     pub default_dir_mode: u32,
 
     /// Maximum file size
@@ -92,6 +94,53 @@ mod serde_duration_seconds {
     {
         let secs = u64::deserialize(deserializer)?;
         Ok(Duration::from_secs(secs))
+    }
+}
+
+/// Serde helper module for file mode serialization/deserialization.
+/// Supports both integer (decimal) and string (octal) formats.
+/// - Integer: 420 (decimal)
+/// - String: "0644" (octal, more intuitive for Unix permissions)
+mod serde_file_mode {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(mode: &u32, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u32(*mode)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u32, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        // Try to deserialize as either a u32 or a string
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum FileMode {
+            Integer(u32),
+            String(String),
+        }
+
+        match FileMode::deserialize(deserializer)? {
+            FileMode::Integer(mode) => Ok(mode),
+            FileMode::String(s) => {
+                let trimmed = s.trim();
+
+                // If the string starts with "0", parse as octal
+                if trimmed.starts_with('0') && trimmed.len() > 1 {
+                    u32::from_str_radix(&trimmed[1..], 8)
+                        .map_err(|e| Error::custom(format!("Invalid octal file mode '{}': {}", s, e)))
+                } else {
+                    // Otherwise parse as decimal
+                    trimmed.parse::<u32>()
+                        .map_err(|e| Error::custom(format!("Invalid file mode '{}': {}", s, e)))
+                }
+            }
+        }
     }
 }
 

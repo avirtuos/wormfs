@@ -4,9 +4,13 @@
 # Phase 2+ features (Raft consensus, distributed storage, etc.) are not included.
 #
 # Usage:
-#   wormfs mount --config config.toml --mount-point /mnt/wormfs
+#   wormfs mount --config config.toml
+#   wormfs mount --config config.toml --mount-point /custom/path  # Override mount point
 #
 # Note: Command-line flags override config file values.
+
+# Mount point for the filesystem
+mount_point = "/mnt/wormfs"
 
 # ===== Metadata Store Configuration =====
 [metadata]
@@ -100,9 +104,10 @@ write_buffer_size = 1048576  # 1 MB
 # Enable write-through (no buffering)
 write_through = false
 
-# Default file and directory permissions (octal in decimal form)
-default_file_mode = 420   # 0644 in octal
-default_dir_mode = 493    # 0755 in octal
+# Default file and directory permissions
+# Can be specified as octal strings (more intuitive) or decimal integers
+default_file_mode = "0644"
+default_dir_mode = "0755"
 
 # Maximum file size (bytes)
 max_file_size = 1099511627776  # 1 TB
