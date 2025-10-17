@@ -102,6 +102,29 @@ Clients will interact with Storage Nodes via gRPC for filesystem meta-data and S
 
 **Security Considerations:** All inter-node communication should be authenticated and encrypted to prevent unauthorized access and ensure data integrity. Inter-StorageNode communication should be protected using libp2ps built in public/private key controls. Client to Storage Node communication should be protected using TLS 1.3 w/PSK. The PSK should be user specific so that it can be used to establish identity. This likely means having a directory of user identity files on the Storage Nodes so that we can support multiple users and eventually unique permissions for those users.
 
+### POSIX Compliance & Design Trade-offs
+
+WormFS aims for **practical POSIX compliance** with deliberate deviations to simplify distributed systems implementation and improve performance:
+
+**Key Deviations:**
+- **Hard links not supported**: All files have exactly one directory entry. The `link()` system call returns `ENOSYS`.
+- **nlink always returns 1**: For both regular files and directories. This follows the Btrfs precedent and eliminates complex distributed reference counting.
+- **atime not tracked**: Access time always returns creation time (like `noatime` mount option).
+- **ctime limited precision**: Change time shares timestamp with modification time.
+
+**Rationale:**
+- Distributed systems complexity: Hard links require atomic cross-directory operations and complicate Raft consensus
+- Erasure coding model: Works best with single-owner files and clear ownership hierarchy
+- Modern alternatives: Symbolic links, CoW reflinks (future), and snapshots (future) provide better solutions
+- Strong precedent: Btrfs (SUSE Linux default, Facebook storage) uses `nlink=1` since 2007
+
+**Application Compatibility:** 99% of applications work without modification. Notable impacts:
+- ✅ **Fully compatible**: rsync, tar, cp, mv, git, build systems, package managers
+- ⚠️ **Performance degraded**: `find` command 5-15% slower (use `find -noleaf`)
+- ❌ **Incompatible**: Dovecot mail server with mailbox prefixes (rare configuration)
+
+For detailed information, see [`docs/posix_compliance.md`](posix_compliance.md).
+
 ### Data Consistency & Concurrency
 
 WormFS takes a simple approach to consistency and concurrency by using basic ReadWriteLock semantics. When a client opens a file for read, it obtains a Read Lock for the file. When a client opens a file for writing, it obtains a Write Lock on the file. These locks expire after 10 seconds if the client does not make a periodic call to 'extend' their ownership of the lock while they have the file open. Concurrent read locks for a single file are allowed but write locks are exclusive of other writes or reads. Read locks can optionally be ignored (client behave as if they succeed) via Storage Node config but write locks can not be disabled. Write locks will ignore read locks if read locks are set to ignore, allowing writers to overwrite files that are being read by others.

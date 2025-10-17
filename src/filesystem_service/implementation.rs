@@ -1629,7 +1629,6 @@ impl FileSystemService for FileSystemServiceImpl {
         }
 
         // Step 9: Create FileAttr for the response
-        // Directories typically have nlink=2 (. and parent's entry)
         let attr = FileAttr {
             ino: inode,
             size: 0,
@@ -1640,7 +1639,7 @@ impl FileSystemService for FileSystemServiceImpl {
             crtime: now,
             kind: FileType::Directory,
             perm: mode as u16,
-            nlink: 2,
+            nlink: 1, // Always 1 for all files/directories (see docs/posix_compliance.md)
             uid,
             gid,
             rdev: 0,

@@ -296,6 +296,18 @@ Phase 1 (single-node) performance targets:
 - **Root only**: Only root directory exists initially
 - **Blocking I/O**: FUSE operations block (acceptable for Phase 1)
 
+## POSIX Compliance
+
+⚠️ **Important:** WormFS has deliberate deviations from strict POSIX compliance:
+
+- **nlink always returns 1** for all files and directories
+- **Hard links are not supported** and will never be supported
+- This design follows the Btrfs precedent and simplifies distributed systems implementation
+- 99% of applications work without modification
+- `find` command may be 5-15% slower (workaround: use `find -noleaf`)
+
+For detailed information about POSIX compliance, rationale, and application compatibility, see [`docs/posix_compliance.md`](posix_compliance.md).
+
 ## References
 
 - [Implementation Plan](../docs/implementation_plan/phase1_minimal_data_path.md)

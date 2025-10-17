@@ -75,6 +75,52 @@ impl FuseAdapter {
     fn get_client_id(&self, req: &Request) -> ClientId {
         ClientId::new(req.unique())
     }
+
+    /// Convert metadata store error to appropriate errno.
+    ///
+    /// This helper provides more granular error mapping than hardcoded errno values,
+    /// distinguishing between "not found" vs "internal error" vs other failure types.
+    fn metadata_error_to_errno(&self, error: &crate::metadata_store::Error) -> i32 {
+        use crate::metadata_store::Error as MError;
+        match error {
+            // Not found errors
+            MError::FileNotFoundByInode(_)
+            | MError::FileNotFoundByPath(_)
+            | MError::FileNotFoundByFileId(_)
+            | MError::ParentNotFound(_) => libc::ENOENT,
+
+            // Already exists
+            MError::FileAlreadyExists(_) => libc::EEXIST,
+
+            // Lock errors
+            MError::LockConflict { .. } | MError::LockNotFound { .. } => libc::ENOLCK,
+
+            // Invalid argument errors
+            MError::ConstraintViolation(_) | MError::ConfigInvalid(_) | MError::ConfigError(_) => {
+                libc::EINVAL
+            }
+
+            // Database/query errors map to EIO
+            MError::QueryError(_)
+            | MError::TransactionError(_)
+            | MError::ConnectionError(_)
+            | MError::SchemaInitFailed(_)
+            | MError::SnapshotFailed(_)
+            | MError::RestoreFailed(_) => libc::EIO,
+
+            // Inode allocation errors
+            MError::InodeSpaceExhausted | MError::NoAvailableInodes => libc::ENOSPC,
+            MError::InodeNotReserved(_)
+            | MError::InodeInUse(_)
+            | MError::InodeReservationExpired(_) => libc::EINVAL,
+
+            // Stripe/chunk not found (internal consistency error)
+            MError::StripeNotFound(_) | MError::ChunkNotFound(_) => libc::EIO,
+
+            // I/O error
+            MError::Io(_) => libc::EIO,
+        }
+    }
 }
 
 #[cfg(feature = "fuser")]
@@ -110,6 +156,7 @@ impl Filesystem for FuseAdapter {
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
+                tracing::debug!("lookup: invalid UTF-8 in filename: {:?}", name);
                 reply.error(libc::EINVAL);
                 return;
             }
@@ -124,8 +171,15 @@ impl Filesystem for FuseAdapter {
                 .await
         }) {
             Ok(record) => record,
-            Err(_) => {
-                reply.error(libc::ENOENT);
+            Err(e) => {
+                let errno = self.metadata_error_to_errno(&e);
+                tracing::debug!(
+                    "lookup: failed to get parent directory inode {}: {} (errno={})",
+                    parent,
+                    e,
+                    errno
+                );
+                reply.error(errno);
                 return;
             }
         };
@@ -133,7 +187,7 @@ impl Filesystem for FuseAdapter {
         // Check execute permission on parent directory for traversal
         let uid = req.uid();
         let gid = req.gid();
-        if let Err(_) = crate::filesystem_service::permissions::check_traverse_permission(
+        if let Err(e) = crate::filesystem_service::permissions::check_traverse_permission(
             uid,
             gid,
             parent_record.uid,
@@ -141,10 +195,11 @@ impl Filesystem for FuseAdapter {
             parent_record.permissions,
         ) {
             tracing::debug!(
-                "lookup: permission denied for user {}:{} to traverse directory inode={}",
+                "lookup: permission denied for user {}:{} to traverse directory inode={}: {}",
                 uid,
                 gid,
-                parent
+                parent,
+                e
             );
             reply.error(libc::EACCES);
             return;
@@ -159,8 +214,16 @@ impl Filesystem for FuseAdapter {
                 .await
         }) {
             Ok(files) => files,
-            Err(_) => {
-                reply.error(libc::EIO);
+            Err(e) => {
+                let errno = self.metadata_error_to_errno(&e);
+                tracing::warn!(
+                    "lookup: failed to list directory inode {} (path {:?}): {} (errno={})",
+                    parent,
+                    parent_record.path,
+                    e,
+                    errno
+                );
+                reply.error(errno);
                 return;
             }
         };
@@ -179,8 +242,10 @@ impl Filesystem for FuseAdapter {
                             reply.entry(&TTL, &fuse_attr, 0);
                             return;
                         }
-                        Err(_) => {
-                            reply.error(libc::EIO);
+                        Err(e) => {
+                            let errno = e.to_errno();
+                            tracing::warn!("lookup: found file '{}' (inode {}) in directory listing but getattr failed: {} (errno={})", name_str, file.inode, e, errno);
+                            reply.error(errno);
                             return;
                         }
                     }

@@ -93,7 +93,7 @@ async fn test_mkdir_basic() {
     assert_eq!(attrs.perm, 0o755);
     assert_eq!(attrs.uid, 1000);
     assert_eq!(attrs.gid, 1000);
-    assert_eq!(attrs.nlink, 2); // . and parent's entry
+    assert_eq!(attrs.nlink, 1); // Always 1 (see docs/posix_compliance.md)
     assert_eq!(attrs.size, 0); // Directories have size 0
 
     println!("✓ Basic mkdir created directory with correct attributes");
