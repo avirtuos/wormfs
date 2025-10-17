@@ -159,7 +159,8 @@ async fn mount_command(
     } else {
         // When no config file, mount_point must be provided via CLI
         let mp = mount_point.clone().ok_or_else(|| {
-            "mount_point must be specified via --mount-point when not using a config file".to_string()
+            "mount_point must be specified via --mount-point when not using a config file"
+                .to_string()
         })?;
         create_default_config(mp, metadata_db_override.clone(), data_dir_override.clone())?
     };
@@ -274,8 +275,8 @@ fn load_config_from_file(
         .map_err(|e| format!("Failed to read config file {:?}: {}", path, e))?;
 
     // Parse TOML
-    let config: WormFsConfig = toml::from_str(&contents)
-        .map_err(|e| format!("Failed to parse config file: {}", e))?;
+    let config: WormFsConfig =
+        toml::from_str(&contents).map_err(|e| format!("Failed to parse config file: {}", e))?;
 
     // Validate configuration
     validate_config(&config)?;
