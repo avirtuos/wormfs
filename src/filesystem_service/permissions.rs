@@ -277,7 +277,8 @@ pub fn check_owner_permission(req_uid: u32, file_uid: u32, inode: u64) -> Result
 
 /// Check if the requesting user can delete a file from a directory.
 ///
-/// To delete a file, the user needs write permission on the parent directory.
+/// To delete a file, the user needs write + execute permission on the parent directory.
+/// Execute permission is required to traverse the directory.
 ///
 /// # Arguments
 ///
@@ -298,7 +299,138 @@ pub fn check_unlink_permission(
     dir_gid: u32,
     dir_mode: u32,
 ) -> Result<(), Error> {
-    check_write_permission(req_uid, req_gid, dir_uid, dir_gid, dir_mode)
+    // Check write permission (needed to remove directory entries)
+    check_write_permission(req_uid, req_gid, dir_uid, dir_gid, dir_mode)?;
+
+    // Check execute permission (needed to traverse the directory)
+    check_execute_permission(req_uid, req_gid, dir_uid, dir_gid, dir_mode)?;
+
+    Ok(())
+}
+
+/// Check if the requesting user can create a file in a directory.
+///
+/// To create a file, the user needs write + execute permission on the parent directory.
+/// Execute permission is required to traverse the directory.
+///
+/// # Arguments
+///
+/// * `req_uid` - User ID of the requesting process
+/// * `req_gid` - Group ID of the requesting process
+/// * `parent_uid` - Owner user ID of the parent directory
+/// * `parent_gid` - Owner group ID of the parent directory
+/// * `parent_mode` - Permission mode of the parent directory
+///
+/// # Returns
+///
+/// * `Ok(())` if the user can create files
+/// * `Err(Error::PermissionDenied)` otherwise
+pub fn check_create_permission(
+    req_uid: u32,
+    req_gid: u32,
+    parent_uid: u32,
+    parent_gid: u32,
+    parent_mode: u32,
+) -> Result<(), Error> {
+    // Check write permission (needed to create new entries)
+    check_write_permission(req_uid, req_gid, parent_uid, parent_gid, parent_mode)?;
+
+    // Check execute permission (needed to traverse the directory)
+    check_execute_permission(req_uid, req_gid, parent_uid, parent_gid, parent_mode)?;
+
+    Ok(())
+}
+
+/// Check if the requesting user can create a directory in a parent directory.
+///
+/// To create a directory, the user needs write + execute permission on the parent directory.
+/// Execute permission is required to traverse the directory.
+///
+/// # Arguments
+///
+/// * `req_uid` - User ID of the requesting process
+/// * `req_gid` - Group ID of the requesting process
+/// * `parent_uid` - Owner user ID of the parent directory
+/// * `parent_gid` - Owner group ID of the parent directory
+/// * `parent_mode` - Permission mode of the parent directory
+///
+/// # Returns
+///
+/// * `Ok(())` if the user can create a directory
+/// * `Err(Error::PermissionDenied)` otherwise
+pub fn check_mkdir_permission(
+    req_uid: u32,
+    req_gid: u32,
+    parent_uid: u32,
+    parent_gid: u32,
+    parent_mode: u32,
+) -> Result<(), Error> {
+    // Check write permission (needed to create new entries)
+    check_write_permission(req_uid, req_gid, parent_uid, parent_gid, parent_mode)?;
+
+    // Check execute permission (needed to traverse the directory)
+    check_execute_permission(req_uid, req_gid, parent_uid, parent_gid, parent_mode)?;
+
+    Ok(())
+}
+
+/// Check if the requesting user can remove a directory.
+///
+/// To remove a directory, the user needs write + execute permission on the parent directory.
+/// The directory must also be empty (checked separately by the caller).
+///
+/// # Arguments
+///
+/// * `req_uid` - User ID of the requesting process
+/// * `req_gid` - Group ID of the requesting process
+/// * `parent_uid` - Owner user ID of the parent directory
+/// * `parent_gid` - Owner group ID of the parent directory
+/// * `parent_mode` - Permission mode of the parent directory
+///
+/// # Returns
+///
+/// * `Ok(())` if the user can remove the directory
+/// * `Err(Error::PermissionDenied)` otherwise
+pub fn check_rmdir_permission(
+    req_uid: u32,
+    req_gid: u32,
+    parent_uid: u32,
+    parent_gid: u32,
+    parent_mode: u32,
+) -> Result<(), Error> {
+    // Check write permission (needed to remove entries)
+    check_write_permission(req_uid, req_gid, parent_uid, parent_gid, parent_mode)?;
+
+    // Check execute permission (needed to traverse the directory)
+    check_execute_permission(req_uid, req_gid, parent_uid, parent_gid, parent_mode)?;
+
+    Ok(())
+}
+
+/// Check if the requesting user can traverse (access) a directory.
+///
+/// Directory traversal requires execute permission on the directory.
+///
+/// # Arguments
+///
+/// * `req_uid` - User ID of the requesting process
+/// * `req_gid` - Group ID of the requesting process
+/// * `dir_uid` - Owner user ID of the directory
+/// * `dir_gid` - Owner group ID of the directory
+/// * `dir_mode` - Permission mode of the directory
+///
+/// # Returns
+///
+/// * `Ok(())` if the user can traverse the directory
+/// * `Err(Error::PermissionDenied)` otherwise
+pub fn check_traverse_permission(
+    req_uid: u32,
+    req_gid: u32,
+    dir_uid: u32,
+    dir_gid: u32,
+    dir_mode: u32,
+) -> Result<(), Error> {
+    check_execute_permission(req_uid, req_gid, dir_uid, dir_gid, dir_mode)
 }
 
 #[cfg(test)]
@@ -507,5 +639,66 @@ mod tests {
         // Directory: uid=1000, gid=1000, mode=0o775 (rwxrwxr-x)
         // Group member CAN delete (has write on directory)
         assert!(check_unlink_permission(1001, 1000, 1000, 1000, 0o775).is_ok());
+    }
+
+    #[test]
+    fn test_check_mkdir_permission() {
+        // Directory: uid=1000, gid=1000, mode=0o755 (rwxr-xr-x)
+        // Owner can create directories (has write + execute)
+        assert!(check_mkdir_permission(1000, 1000, 1000, 1000, 0o755).is_ok());
+
+        // Non-owner cannot create (no write permission)
+        assert!(check_mkdir_permission(1001, 1001, 1000, 1000, 0o755).is_err());
+
+        // Directory: uid=1000, gid=1000, mode=0o775 (rwxrwxr-x)
+        // Group member CAN create (has write + execute)
+        assert!(check_mkdir_permission(1001, 1000, 1000, 1000, 0o775).is_ok());
+
+        // Directory: uid=1000, gid=1000, mode=0o744 (rwxr--r--)
+        // Group member CANNOT create (has no execute permission)
+        assert!(check_mkdir_permission(1001, 1000, 1000, 1000, 0o744).is_err());
+
+        // Directory: uid=1000, gid=1000, mode=0o711 (rwx--x--x)
+        // Other user CANNOT create (has execute but no write)
+        assert!(check_mkdir_permission(1001, 1001, 1000, 1000, 0o711).is_err());
+    }
+
+    #[test]
+    fn test_check_rmdir_permission() {
+        // Directory: uid=1000, gid=1000, mode=0o755 (rwxr-xr-x)
+        // Owner can remove directories (has write + execute)
+        assert!(check_rmdir_permission(1000, 1000, 1000, 1000, 0o755).is_ok());
+
+        // Non-owner cannot remove (no write permission)
+        assert!(check_rmdir_permission(1001, 1001, 1000, 1000, 0o755).is_err());
+
+        // Directory: uid=1000, gid=1000, mode=0o775 (rwxrwxr-x)
+        // Group member CAN remove (has write + execute)
+        assert!(check_rmdir_permission(1001, 1000, 1000, 1000, 0o775).is_ok());
+
+        // Directory: uid=1000, gid=1000, mode=0o644 (rw-r--r--)
+        // Owner CANNOT remove (has write but no execute)
+        assert!(check_rmdir_permission(1000, 1000, 1000, 1000, 0o644).is_err());
+    }
+
+    #[test]
+    fn test_check_traverse_permission() {
+        // Directory: uid=1000, gid=1000, mode=0o755 (rwxr-xr-x)
+        // Everyone can traverse (has execute permission)
+        assert!(check_traverse_permission(1000, 1000, 1000, 1000, 0o755).is_ok());
+        assert!(check_traverse_permission(1001, 1000, 1000, 1000, 0o755).is_ok());
+        assert!(check_traverse_permission(1001, 1001, 1000, 1000, 0o755).is_ok());
+
+        // Directory: uid=1000, gid=1000, mode=0o744 (rwxr--r--)
+        // Owner can traverse, group and other cannot
+        assert!(check_traverse_permission(1000, 1000, 1000, 1000, 0o744).is_ok());
+        assert!(check_traverse_permission(1001, 1000, 1000, 1000, 0o744).is_err());
+        assert!(check_traverse_permission(1001, 1001, 1000, 1000, 0o744).is_err());
+
+        // Directory: uid=1000, gid=1000, mode=0o770 (rwxrwx---)
+        // Owner and group can traverse, other cannot
+        assert!(check_traverse_permission(1000, 1000, 1000, 1000, 0o770).is_ok());
+        assert!(check_traverse_permission(1001, 1000, 1000, 1000, 0o770).is_ok());
+        assert!(check_traverse_permission(1001, 1001, 1000, 1000, 0o770).is_err());
     }
 }

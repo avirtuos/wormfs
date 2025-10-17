@@ -130,6 +130,26 @@ impl Filesystem for FuseAdapter {
             }
         };
 
+        // Check execute permission on parent directory for traversal
+        let uid = req.uid();
+        let gid = req.gid();
+        if let Err(_) = crate::filesystem_service::permissions::check_traverse_permission(
+            uid,
+            gid,
+            parent_record.uid,
+            parent_record.gid,
+            parent_record.permissions,
+        ) {
+            tracing::debug!(
+                "lookup: permission denied for user {}:{} to traverse directory inode={}",
+                uid,
+                gid,
+                parent
+            );
+            reply.error(libc::EACCES);
+            return;
+        }
+
         // List directory and find the file
         let files = match self.runtime.block_on(async {
             use crate::metadata_store::MetadataStore;
@@ -310,6 +330,76 @@ impl Filesystem for FuseAdapter {
             Err(e) => {
                 let errno = e.to_errno();
                 tracing::debug!("FUSE readlink error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn mkdir(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let name_str = name.to_string_lossy();
+        let client_id = self.get_client_id(req);
+        let uid = req.uid();
+        let gid = req.gid();
+
+        tracing::debug!(
+            "FUSE mkdir: parent={}, name={}, mode={:#o}, uid={}, gid={}",
+            parent,
+            name_str,
+            mode,
+            uid,
+            gid
+        );
+
+        match self.runtime.block_on(
+            self.service
+                .mkdir(parent, &name_str, mode, uid, gid, client_id),
+        ) {
+            Ok(attr) => {
+                let fuse_attr = self.to_fuse_attr(&attr);
+                tracing::debug!("FUSE mkdir success: inode={}", attr.ino);
+                reply.entry(&TTL, &fuse_attr, 0);
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE mkdir error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn rmdir(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let name_str = name.to_string_lossy();
+        let client_id = self.get_client_id(req);
+        let uid = req.uid();
+        let gid = req.gid();
+
+        tracing::debug!(
+            "FUSE rmdir: parent={}, name={}, uid={}, gid={}",
+            parent,
+            name_str,
+            uid,
+            gid
+        );
+
+        match self
+            .runtime
+            .block_on(self.service.rmdir(parent, &name_str, uid, gid, client_id))
+        {
+            Ok(()) => {
+                tracing::debug!("FUSE rmdir success");
+                reply.ok();
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE rmdir error: {}, errno={}", e, errno);
                 reply.error(errno);
             }
         }
