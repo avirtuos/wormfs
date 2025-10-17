@@ -132,11 +132,13 @@ mod serde_file_mode {
 
                 // If the string starts with "0", parse as octal
                 if trimmed.starts_with('0') && trimmed.len() > 1 {
-                    u32::from_str_radix(&trimmed[1..], 8)
-                        .map_err(|e| Error::custom(format!("Invalid octal file mode '{}': {}", s, e)))
+                    u32::from_str_radix(&trimmed[1..], 8).map_err(|e| {
+                        Error::custom(format!("Invalid octal file mode '{}': {}", s, e))
+                    })
                 } else {
                     // Otherwise parse as decimal
-                    trimmed.parse::<u32>()
+                    trimmed
+                        .parse::<u32>()
                         .map_err(|e| Error::custom(format!("Invalid file mode '{}': {}", s, e)))
                 }
             }

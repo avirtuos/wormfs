@@ -220,7 +220,10 @@ impl MetadataStore for MetadataStoreImpl {
         self.run_migrations().await
     }
 
-    async fn initialize_node_and_disks(&self, disk_paths: &[std::path::PathBuf]) -> Result<(), Error> {
+    async fn initialize_node_and_disks(
+        &self,
+        disk_paths: &[std::path::PathBuf],
+    ) -> Result<(), Error> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

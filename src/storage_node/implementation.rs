@@ -56,17 +56,18 @@ impl StorageNodeImpl {
         info!("Initializing MetadataStore...");
         let metadata_config = crate::metadata_store::Config {
             database_path: config.metadata_db_path.clone(),
-            cache_size_mb: 100,    // Phase 1 default
-            read_pool_size: 4,     // Phase 1 default
+            cache_size_mb: 100, // Phase 1 default
+            read_pool_size: 4,  // Phase 1 default
             ..Default::default()
         };
 
-        let metadata_store = crate::metadata_store::MetadataStoreFactory::create_concrete(metadata_config)
-            .await
-            .map_err(|e| Error::ComponentInitFailed {
-                component: "MetadataStore".to_string(),
-                reason: e.to_string(),
-            })?;
+        let metadata_store =
+            crate::metadata_store::MetadataStoreFactory::create_concrete(metadata_config)
+                .await
+                .map_err(|e| Error::ComponentInitFailed {
+                    component: "MetadataStore".to_string(),
+                    reason: e.to_string(),
+                })?;
 
         // Initialize database schema
         metadata_store
@@ -83,12 +84,12 @@ impl StorageNodeImpl {
         info!("Initializing FileStore...");
         let file_store_config = crate::file_store::types::Config {
             disk_paths: vec![config.data_dir.join("chunks")],
-            max_chunk_size: 1024 * 1024,                 // 1MB
+            max_chunk_size: 1024 * 1024, // 1MB
             default_data_shards: config.default_data_shards,
             default_parity_shards: config.default_parity_shards,
-            max_concurrent_operations: 100,              // Phase 1 default
+            max_concurrent_operations: 100, // Phase 1 default
             verification_interval: std::time::Duration::from_secs(3600), // 1 hour
-            orphan_cleanup_age: std::time::Duration::from_secs(3600),    // 1 hour
+            orphan_cleanup_age: std::time::Duration::from_secs(3600), // 1 hour
         };
 
         let file_store =

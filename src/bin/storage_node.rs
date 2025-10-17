@@ -131,8 +131,7 @@ fn load_config(args: &Args) -> Result<Config, String> {
     // Start with config from file, or default if no file specified
     let mut config = if let Some(ref config_path) = args.config {
         tracing::info!("Loading configuration from: {}", config_path.display());
-        Config::from_file(config_path)
-            .map_err(|e| format!("Failed to load config file: {}", e))?
+        Config::from_file(config_path).map_err(|e| format!("Failed to load config file: {}", e))?
     } else {
         tracing::info!("No config file specified, using defaults");
         Config::default()

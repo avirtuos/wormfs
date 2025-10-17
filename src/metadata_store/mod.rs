@@ -157,7 +157,10 @@ pub trait MetadataStore: Send + Sync + Clone {
     /// # Errors
     ///
     /// Returns an error if node/disk initialization fails.
-    async fn initialize_node_and_disks(&self, disk_paths: &[std::path::PathBuf]) -> Result<(), Error>;
+    async fn initialize_node_and_disks(
+        &self,
+        disk_paths: &[std::path::PathBuf],
+    ) -> Result<(), Error>;
 
     // ===== File Operations =====
 

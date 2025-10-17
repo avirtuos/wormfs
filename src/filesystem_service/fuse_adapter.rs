@@ -600,10 +600,14 @@ impl Filesystem for FuseAdapter {
             return;
         }
 
-        match self.runtime.block_on(
-            self.service
-                .read(ino, offset as u64, size, uid, gid, client_id),
-        ) {
+        match self.runtime.block_on(self.service.read(
+            ino,
+            offset as u64,
+            size,
+            uid,
+            gid,
+            client_id,
+        )) {
             Ok(data) => {
                 tracing::debug!("FUSE read success: {} bytes", data.len());
                 reply.data(&data);
@@ -647,10 +651,14 @@ impl Filesystem for FuseAdapter {
             return;
         }
 
-        match self.runtime.block_on(
-            self.service
-                .write(ino, offset as u64, data.to_vec(), uid, gid, client_id),
-        ) {
+        match self.runtime.block_on(self.service.write(
+            ino,
+            offset as u64,
+            data.to_vec(),
+            uid,
+            gid,
+            client_id,
+        )) {
             Ok(written) => {
                 tracing::debug!("FUSE write success: {} bytes", written);
                 reply.written(written);

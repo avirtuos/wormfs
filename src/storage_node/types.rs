@@ -73,10 +73,7 @@ pub struct Config {
     pub lock_timeout: Duration,
 
     /// Watchdog shallow check interval in seconds (Phase 4+)
-    #[serde(
-        default = "default_shallow_check_secs",
-        with = "duration_serde"
-    )]
+    #[serde(default = "default_shallow_check_secs", with = "duration_serde")]
     pub shallow_check_interval: Duration,
 
     /// Watchdog deep check interval in seconds (Phase 4+)
@@ -203,13 +200,11 @@ impl Config {
     /// - TOML parsing fails
     /// - Configuration validation fails
     pub fn from_file(path: &std::path::Path) -> Result<Self, Error> {
-        let contents = std::fs::read_to_string(path).map_err(|e| {
-            Error::InvalidConfig(format!("Failed to read config file: {}", e))
-        })?;
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| Error::InvalidConfig(format!("Failed to read config file: {}", e)))?;
 
-        let config: Config = toml::from_str(&contents).map_err(|e| {
-            Error::InvalidConfig(format!("Failed to parse TOML config: {}", e))
-        })?;
+        let config: Config = toml::from_str(&contents)
+            .map_err(|e| Error::InvalidConfig(format!("Failed to parse TOML config: {}", e)))?;
 
         config.validate()?;
 
@@ -223,9 +218,7 @@ impl Config {
     /// Returns an error if any configuration values are invalid.
     pub fn validate(&self) -> Result<(), Error> {
         if self.node_id.is_empty() {
-            return Err(Error::InvalidConfig(
-                "node_id cannot be empty".to_string(),
-            ));
+            return Err(Error::InvalidConfig("node_id cannot be empty".to_string()));
         }
 
         if self.default_data_shards == 0 {

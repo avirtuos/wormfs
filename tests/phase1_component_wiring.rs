@@ -156,10 +156,7 @@ async fn test_invalid_config_rejection() {
         ..Default::default()
     };
 
-    assert!(
-        config.validate().is_err(),
-        "Should reject empty node_id"
-    );
+    assert!(config.validate().is_err(), "Should reject empty node_id");
 
     // Test 2: Zero data shards
     let config = Config {
@@ -170,10 +167,7 @@ async fn test_invalid_config_rejection() {
         ..Default::default()
     };
 
-    assert!(
-        config.validate().is_err(),
-        "Should reject zero data shards"
-    );
+    assert!(config.validate().is_err(), "Should reject zero data shards");
 
     // Test 3: Zero stripe size
     let config = Config {
@@ -184,10 +178,7 @@ async fn test_invalid_config_rejection() {
         ..Default::default()
     };
 
-    assert!(
-        config.validate().is_err(),
-        "Should reject zero stripe size"
-    );
+    assert!(config.validate().is_err(), "Should reject zero stripe size");
 }
 
 /// Test that cluster info returns correct information for Phase 1 (single node)
