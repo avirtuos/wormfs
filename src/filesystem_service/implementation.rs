@@ -1839,6 +1839,11 @@ impl FileSystemService for FileSystemServiceImpl {
                 .unwrap_or("")
                 .to_string();
 
+            // Skip entries with empty names (e.g., root directory "/" in its own listing)
+            if name.is_empty() {
+                continue;
+            }
+
             // Convert MetadataStore FileType to FileSystemService FileType
             let kind = match file.file_type {
                 crate::metadata_store::FileType::Directory => FileType::Directory,
