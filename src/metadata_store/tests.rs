@@ -48,6 +48,7 @@ fn test_file_metadata() -> FileMetadata {
         created_at: std::time::SystemTime::now(),
         modified_at: std::time::SystemTime::now(),
         accessed_at: std::time::SystemTime::now(),
+        target: None, // Test files are not symlinks
     }
 }
 
@@ -175,6 +176,7 @@ mod file_operations {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Regular files don't have targets
         };
 
         store
@@ -256,7 +258,7 @@ mod file_operations {
             "Getting file by nonexistent inode should fail"
         );
 
-        let result = store.get_file(FileId::new(99999)).await;
+        let result = store.get_file(FileId::generate()).await;
         assert!(
             result.is_err(),
             "Getting file by nonexistent ID should fail"
@@ -774,7 +776,7 @@ mod lock_operations {
 
         // Acquire write lock
         let lock_id = store
-            .acquire_write_lock(file_id, client_id, expires_at)
+            .acquire_write_lock(file_id, client_id, 1, expires_at) // node_id = 1
             .await
             .expect("Failed to acquire write lock");
 
@@ -827,7 +829,7 @@ mod lock_operations {
 
         // Acquire write lock
         store
-            .acquire_write_lock(file_id, ClientId::new(1), expires_at)
+            .acquire_write_lock(file_id, ClientId::new(1), 1, expires_at) // node_id = 1
             .await
             .expect("Failed to acquire write lock");
 

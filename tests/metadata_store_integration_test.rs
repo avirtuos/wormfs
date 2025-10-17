@@ -51,6 +51,7 @@ fn test_file_metadata() -> FileMetadata {
         created_at: std::time::SystemTime::now(),
         modified_at: std::time::SystemTime::now(),
         accessed_at: std::time::SystemTime::now(),
+        target: None, // Test files are not symlinks
     }
 }
 

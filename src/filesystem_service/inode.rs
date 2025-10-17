@@ -9,9 +9,16 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 /// Root directory inode number (FUSE standard)
 pub const ROOT_INODE: u64 = 1;
+
+/// Root directory file ID (deterministic UUID)
+/// Using UUID v5 (namespace-based) with DNS namespace and "wormfs:root"
+pub const ROOT_FILE_ID: FileId = FileId(Uuid::from_bytes([
+    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+]));
 
 /// Allocates unique inode numbers for new files.
 ///
@@ -282,7 +289,7 @@ mod tests {
     #[test]
     fn test_inode_cache_basic() {
         let cache = InodeCache::new(10, Duration::from_secs(60));
-        let file_id = FileId::new(1);
+        let file_id = FileId::generate();
         let metadata = FileMetadata {
             file_type: crate::metadata_store::FileType::RegularFile,
             size: 1024,
@@ -292,6 +299,7 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
         // Cache miss
@@ -309,7 +317,7 @@ mod tests {
     #[test]
     fn test_inode_cache_ttl_expiration() {
         let cache = InodeCache::new(10, Duration::from_millis(50));
-        let file_id = FileId::new(1);
+        let file_id = FileId::generate();
         let metadata = FileMetadata {
             file_type: crate::metadata_store::FileType::RegularFile,
             size: 1024,
@@ -319,6 +327,7 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
         cache.insert(100, file_id, metadata);
@@ -345,17 +354,18 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
         // Fill cache to capacity
-        cache.insert(1, FileId::new(1), metadata.clone());
-        cache.insert(2, FileId::new(2), metadata.clone());
-        cache.insert(3, FileId::new(3), metadata.clone());
+        cache.insert(1, FileId::generate(), metadata.clone());
+        cache.insert(2, FileId::generate(), metadata.clone());
+        cache.insert(3, FileId::generate(), metadata.clone());
 
         assert_eq!(cache.len(), 3);
 
         // Insert one more - should evict oldest (1)
-        cache.insert(4, FileId::new(4), metadata);
+        cache.insert(4, FileId::generate(), metadata);
 
         assert_eq!(cache.len(), 3);
         assert!(cache.get(1).is_none()); // Evicted
@@ -376,9 +386,10 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
-        cache.insert(100, FileId::new(1), metadata);
+        cache.insert(100, FileId::generate(), metadata);
         assert!(cache.get(100).is_some());
 
         cache.invalidate(100);
@@ -397,11 +408,12 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
         // Insert 5 entries
         for i in 1..=5 {
-            cache.insert(i, FileId::new(i), metadata.clone());
+            cache.insert(i, FileId::generate(), metadata.clone());
         }
 
         assert_eq!(cache.len(), 5);

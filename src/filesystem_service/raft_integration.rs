@@ -36,7 +36,7 @@ impl RaftIntegratedFileSystemService {
         file_store: Arc<crate::file_store::FileStoreImpl>,
     ) -> Self {
         Self {
-            raft_member: Arc::new(StorageRaftMemberStub::new()),
+            raft_member: Arc::new(StorageRaftMemberStub::new((*metadata_store).clone())),
             metadata_store,
             file_store,
         }
@@ -274,6 +274,7 @@ impl RaftIntegratedFileSystemService {
             inode,
             lock_type: raft_lock_type,
             client_id: client_id.0,
+            node_id: 1, // TODO: Get from config when raft_integration is updated for distributed mode
             expires_at,
         };
 
@@ -285,7 +286,7 @@ impl RaftIntegratedFileSystemService {
 
         match result {
             RaftCommandResult::LockAcquired { lock_id } => Ok(lock_id),
-            RaftCommandResult::Error { message } => Err(Error::LockConflictSimple(message)),
+            RaftCommandResult::Error { message } => Err(Error::LockConflict(message)),
             _ => Err(Error::Internal("Unexpected Raft result".into())),
         }
     }
@@ -309,7 +310,7 @@ impl RaftIntegratedFileSystemService {
 
         match result {
             RaftCommandResult::LockReleased => Ok(()),
-            RaftCommandResult::Error { message } => Err(Error::LockNotHeldSimple(message)),
+            RaftCommandResult::Error { message } => Err(Error::LockNotHeld(message)),
             _ => Err(Error::Internal("Unexpected Raft result".into())),
         }
     }
@@ -335,7 +336,7 @@ impl RaftIntegratedFileSystemService {
 
         match result {
             RaftCommandResult::LockExtended => Ok(()),
-            RaftCommandResult::Error { message } => Err(Error::LockNotHeldSimple(message)),
+            RaftCommandResult::Error { message } => Err(Error::LockNotHeld(message)),
             _ => Err(Error::Internal("Unexpected Raft result".into())),
         }
     }
@@ -387,7 +388,9 @@ pub async fn example_write_flow(service: &RaftIntegratedFileSystemService) -> Re
         )
         .await?;
 
-    let file_id = FileId::new(file_attr.ino);
+    // In the real implementation, file_id would come from the Raft result
+    // For this example, we generate a new file_id
+    let file_id = FileId::generate();
 
     // Step 2: Allocate stripes (metadata operation - goes through Raft)
     let stripe_ids = service

@@ -127,9 +127,11 @@ impl MetadataStoreImpl {
             };
             pragmas.push(format!("PRAGMA synchronous={};", sync_mode));
 
-            // Enable foreign keys
+            // Configure foreign keys
             if enable_foreign_keys {
                 pragmas.push("PRAGMA foreign_keys=ON;".to_string());
+            } else {
+                pragmas.push("PRAGMA foreign_keys=OFF;".to_string());
             }
 
             // Set cache size (negative value means KB)
@@ -152,6 +154,7 @@ impl MetadataStoreImpl {
             include_str!("migrations/001_initial_schema.sql").to_string(),
             include_str!("migrations/002_indexes.sql").to_string(),
             include_str!("migrations/003_inode_management.sql").to_string(),
+            include_str!("migrations/004_uuid_migration.sql").to_string(),
         ];
 
         self.inner
@@ -224,7 +227,6 @@ impl MetadataStore for MetadataStoreImpl {
         inode: u64,
         metadata: FileMetadata,
     ) -> Result<(), Error> {
-        let file_id_val = file_id.as_u64();
         let path_str = path.to_string_lossy().to_string();
         let parent_path = path
             .parent()
@@ -243,10 +245,10 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 conn.execute(
-                    "INSERT INTO files (file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1)",
+                    "INSERT INTO files (file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14)",
                     params![
-                        file_id_val as i64,
+                        file_id,
                         inode as i64,
                         path_str,
                         parent_path,
@@ -259,6 +261,7 @@ impl MetadataStore for MetadataStoreImpl {
                         system_time_to_unix(metadata.created_at),
                         system_time_to_unix(metadata.modified_at),
                         system_time_to_unix(metadata.accessed_at),
+                        metadata.target,
                     ],
                 )?;
                 Ok(())
@@ -281,12 +284,12 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target
                      FROM files WHERE path = ?1",
                     params![path_str],
                     |row| {
                         Ok(FileRecord {
-                            file_id: FileId::new(row.get::<_, i64>(0)? as u64),
+                            file_id: row.get::<_, FileId>(0)?,
                             inode: row.get::<_, i64>(1)? as u64,
                             path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
                             parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
@@ -300,6 +303,7 @@ impl MetadataStore for MetadataStoreImpl {
                             modified_at: unix_to_system_time(row.get(11)?),
                             accessed_at: unix_to_system_time(row.get(12)?),
                             storage_policy_id: row.get::<_, i64>(13)? as u32,
+                            target: row.get::<_, Option<String>>(14)?,
                         })
                     },
                 )?)
@@ -318,12 +322,12 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target
                      FROM files WHERE inode = ?1",
                     params![inode as i64],
                     |row| {
                         Ok(FileRecord {
-                            file_id: FileId::new(row.get::<_, i64>(0)? as u64),
+                            file_id: row.get::<_, FileId>(0)?,
                             inode: row.get::<_, i64>(1)? as u64,
                             path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
                             parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
@@ -337,6 +341,7 @@ impl MetadataStore for MetadataStoreImpl {
                             modified_at: unix_to_system_time(row.get(11)?),
                             accessed_at: unix_to_system_time(row.get(12)?),
                             storage_policy_id: row.get::<_, i64>(13)? as u32,
+                            target: row.get::<_, Option<String>>(14)?,
                         })
                     },
                 )?)
@@ -351,19 +356,18 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn get_file(&self, file_id: FileId) -> Result<FileRecord, Error> {
-        let file_id_val = file_id.as_u64();
         let file_id_clone = file_id;
 
         self.inner
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target
                      FROM files WHERE file_id = ?1",
-                    params![file_id_val as i64],
+                    params![file_id],
                     |row| {
                         Ok(FileRecord {
-                            file_id: FileId::new(row.get::<_, i64>(0)? as u64),
+                            file_id: row.get::<_, FileId>(0)?,
                             inode: row.get::<_, i64>(1)? as u64,
                             path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
                             parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
@@ -377,6 +381,7 @@ impl MetadataStore for MetadataStoreImpl {
                             modified_at: unix_to_system_time(row.get(11)?),
                             accessed_at: unix_to_system_time(row.get(12)?),
                             storage_policy_id: row.get::<_, i64>(13)? as u32,
+                            target: row.get::<_, Option<String>>(14)?,
                         })
                     },
                 )?)
@@ -391,15 +396,13 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn update_file(&self, file_id: FileId, metadata: FileMetadata) -> Result<(), Error> {
-        let file_id_val = file_id.as_u64();
-
         let rows_affected = self
             .inner
             .conn
             .call(move |conn| {
                 Ok(conn.execute(
-                    "UPDATE files SET size = ?1, permissions = ?2, uid = ?3, gid = ?4, modified_at = ?5, accessed_at = ?6
-                     WHERE file_id = ?7",
+                    "UPDATE files SET size = ?1, permissions = ?2, uid = ?3, gid = ?4, modified_at = ?5, accessed_at = ?6, target = ?7
+                     WHERE file_id = ?8",
                     params![
                         metadata.size as i64,
                         metadata.permissions as i64,
@@ -407,7 +410,8 @@ impl MetadataStore for MetadataStoreImpl {
                         metadata.gid as i64,
                         system_time_to_unix(metadata.modified_at),
                         system_time_to_unix(metadata.accessed_at),
-                        file_id_val as i64,
+                        metadata.target,
+                        file_id,
                     ],
                 )?)
             })
@@ -424,16 +428,11 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn delete_file(&self, file_id: FileId) -> Result<(), Error> {
-        let file_id_val = file_id.as_u64();
-
         let rows_affected = self
             .inner
             .conn
             .call(move |conn| {
-                Ok(conn.execute(
-                    "DELETE FROM files WHERE file_id = ?1",
-                    params![file_id_val as i64],
-                )?)
+                Ok(conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?)
             })
             .await
             .map_err(|e| Error::QueryError(format!("Failed to delete file: {}", e)))?;
@@ -452,14 +451,14 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target
                      FROM files WHERE parent_path = ?1 ORDER BY name",
                 )?;
 
                 let files = stmt
                     .query_map(params![path_str], |row| {
                         Ok(FileRecord {
-                            file_id: FileId::new(row.get::<_, i64>(0)? as u64),
+                            file_id: row.get::<_, FileId>(0)?,
                             inode: row.get::<_, i64>(1)? as u64,
                             path: Path::new(&row.get::<_, String>(2)?).to_path_buf(),
                             parent_path: Path::new(&row.get::<_, String>(3)?).to_path_buf(),
@@ -473,6 +472,7 @@ impl MetadataStore for MetadataStoreImpl {
                             modified_at: unix_to_system_time(row.get(11)?),
                             accessed_at: unix_to_system_time(row.get(12)?),
                             storage_policy_id: row.get::<_, i64>(13)? as u32,
+                            target: row.get::<_, Option<String>>(14)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -490,8 +490,6 @@ impl MetadataStore for MetadataStoreImpl {
         file_id: FileId,
         stripes: Vec<StripeRecord>,
     ) -> Result<(), Error> {
-        let file_id_val = file_id.as_u64();
-
         self.inner
             .conn
             .call(move |conn| {
@@ -502,8 +500,8 @@ impl MetadataStore for MetadataStoreImpl {
                         "INSERT INTO stripes (stripe_id, file_id, stripe_index, offset, size, checksum, created_at)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
-                            stripe.stripe_id.as_u64() as i64,
-                            file_id_val as i64,
+                            stripe.stripe_id,
+                            file_id,
                             stripe.stripe_index as i64,
                             stripe.offset as i64,
                             stripe.size as i64,
@@ -523,7 +521,6 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn get_stripe(&self, stripe_id: StripeId) -> Result<StripeRecord, Error> {
-        let stripe_id_val = stripe_id.as_u64();
         let stripe_id_clone = stripe_id;
 
         self.inner
@@ -532,11 +529,11 @@ impl MetadataStore for MetadataStoreImpl {
                 Ok(conn.query_row(
                     "SELECT stripe_id, file_id, stripe_index, offset, size, checksum, created_at
                      FROM stripes WHERE stripe_id = ?1",
-                    params![stripe_id_val as i64],
+                    params![stripe_id],
                     |row| {
                         Ok(StripeRecord {
-                            stripe_id: StripeId::new(row.get::<_, i64>(0)? as u64),
-                            file_id: FileId::new(row.get::<_, i64>(1)? as u64),
+                            stripe_id: row.get::<_, StripeId>(0)?,
+                            file_id: row.get::<_, FileId>(1)?,
                             stripe_index: row.get::<_, i64>(2)? as u32,
                             offset: row.get::<_, i64>(3)? as u64,
                             size: row.get::<_, i64>(4)? as u64,
@@ -556,8 +553,6 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn get_file_stripes(&self, file_id: FileId) -> Result<Vec<StripeRecord>, Error> {
-        let file_id_val = file_id.as_u64();
-
         self.inner
             .conn
             .call(move |conn| {
@@ -567,10 +562,10 @@ impl MetadataStore for MetadataStoreImpl {
                 )?;
 
                 let stripes = stmt
-                    .query_map(params![file_id_val as i64], |row| {
+                    .query_map(params![file_id], |row| {
                         Ok(StripeRecord {
-                            stripe_id: StripeId::new(row.get::<_, i64>(0)? as u64),
-                            file_id: FileId::new(row.get::<_, i64>(1)? as u64),
+                            stripe_id: row.get::<_, StripeId>(0)?,
+                            file_id: row.get::<_, FileId>(1)?,
                             stripe_index: row.get::<_, i64>(2)? as u32,
                             offset: row.get::<_, i64>(3)? as u64,
                             size: row.get::<_, i64>(4)? as u64,
@@ -591,7 +586,6 @@ impl MetadataStore for MetadataStoreImpl {
         file_id: FileId,
         offset: u64,
     ) -> Result<StripeRecord, Error> {
-        let file_id_val = file_id.as_u64();
         let file_id_clone = file_id;
 
         self.inner
@@ -602,11 +596,11 @@ impl MetadataStore for MetadataStoreImpl {
                      FROM stripes
                      WHERE file_id = ?1 AND offset <= ?2 AND (offset + size) > ?2
                      ORDER BY stripe_index LIMIT 1",
-                    params![file_id_val as i64, offset as i64],
+                    params![file_id, offset as i64],
                     |row| {
                         Ok(StripeRecord {
-                            stripe_id: StripeId::new(row.get::<_, i64>(0)? as u64),
-                            file_id: FileId::new(row.get::<_, i64>(1)? as u64),
+                            stripe_id: row.get::<_, StripeId>(0)?,
+                            file_id: row.get::<_, FileId>(1)?,
                             stripe_index: row.get::<_, i64>(2)? as u32,
                             offset: row.get::<_, i64>(3)? as u64,
                             size: row.get::<_, i64>(4)? as u64,
@@ -628,13 +622,47 @@ impl MetadataStore for MetadataStoreImpl {
             })
     }
 
+    async fn delete_stripe(&self, stripe_id: StripeId) -> Result<(), Error> {
+        self.inner
+            .conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+
+                // First delete all chunks for this stripe
+                tx.execute(
+                    "DELETE FROM chunks WHERE stripe_id = ?1",
+                    params![stripe_id],
+                )?;
+
+                // Then delete the stripe itself
+                let rows_deleted = tx.execute(
+                    "DELETE FROM stripes WHERE stripe_id = ?1",
+                    params![stripe_id],
+                )?;
+
+                if rows_deleted == 0 {
+                    return Err(tokio_rusqlite::Error::Rusqlite(
+                        rusqlite::Error::QueryReturnedNoRows,
+                    ));
+                }
+
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| match e {
+                tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    Error::QueryError(format!("Stripe {:?} not found", stripe_id))
+                }
+                _ => Error::QueryError(format!("Failed to delete stripe: {}", e)),
+            })
+    }
+
     async fn allocate_chunks(
         &self,
         stripe_id: StripeId,
         chunks: Vec<ChunkRecord>,
     ) -> Result<(), Error> {
-        let stripe_id_val = stripe_id.as_u64();
-
         self.inner
             .conn
             .call(move |conn| {
@@ -652,8 +680,8 @@ impl MetadataStore for MetadataStoreImpl {
                         "INSERT INTO chunks (chunk_id, stripe_id, chunk_index, node_id, disk_id, checksum, status, created_at, last_verified)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
-                            chunk.chunk_id.as_u64() as i64,
-                            stripe_id_val as i64,
+                            chunk.chunk_id,
+                            stripe_id,
                             chunk.chunk_index as i64,
                             chunk.node_id.as_u64() as i64,
                             chunk.disk_id.as_u64() as i64,
@@ -675,7 +703,6 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn get_chunk(&self, chunk_id: ChunkId) -> Result<ChunkRecord, Error> {
-        let chunk_id_val = chunk_id.as_u64();
         let chunk_id_clone = chunk_id;
 
         self.inner
@@ -684,7 +711,7 @@ impl MetadataStore for MetadataStoreImpl {
                 Ok(conn.query_row(
                     "SELECT chunk_id, stripe_id, chunk_index, node_id, disk_id, checksum, status, created_at, last_verified
                      FROM chunks WHERE chunk_id = ?1",
-                    params![chunk_id_val as i64],
+                    params![chunk_id],
                     |row| {
                         let status_val: i64 = row.get(6)?;
                         let status = match status_val {
@@ -696,8 +723,8 @@ impl MetadataStore for MetadataStoreImpl {
                         };
 
                         Ok(ChunkRecord {
-                            chunk_id: ChunkId::new(row.get::<_, i64>(0)? as u64),
-                            stripe_id: StripeId::new(row.get::<_, i64>(1)? as u64),
+                            chunk_id: row.get::<_, ChunkId>(0)?,
+                            stripe_id: row.get::<_, StripeId>(1)?,
                             chunk_index: row.get::<_, i64>(2)? as u8,
                             node_id: NodeId::new(row.get::<_, i64>(3)? as u64),
                             disk_id: DiskId::new(row.get::<_, i64>(4)? as u64),
@@ -719,8 +746,6 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn get_stripe_chunks(&self, stripe_id: StripeId) -> Result<Vec<ChunkRecord>, Error> {
-        let stripe_id_val = stripe_id.as_u64();
-
         self.inner
             .conn
             .call(move |conn| {
@@ -730,7 +755,7 @@ impl MetadataStore for MetadataStoreImpl {
                 )?;
 
                 let chunks = stmt
-                    .query_map(params![stripe_id_val as i64], |row| {
+                    .query_map(params![stripe_id], |row| {
                         let status_val: i64 = row.get(6)?;
                         let status = match status_val {
                             0 => ChunkStatus::Healthy,
@@ -741,8 +766,8 @@ impl MetadataStore for MetadataStoreImpl {
                         };
 
                         Ok(ChunkRecord {
-                            chunk_id: ChunkId::new(row.get::<_, i64>(0)? as u64),
-                            stripe_id: StripeId::new(row.get::<_, i64>(1)? as u64),
+                            chunk_id: row.get::<_, ChunkId>(0)?,
+                            stripe_id: row.get::<_, StripeId>(1)?,
                             chunk_index: row.get::<_, i64>(2)? as u8,
                             node_id: NodeId::new(row.get::<_, i64>(3)? as u64),
                             disk_id: DiskId::new(row.get::<_, i64>(4)? as u64),
@@ -768,7 +793,6 @@ impl MetadataStore for MetadataStoreImpl {
         node_id: NodeId,
         disk_id: DiskId,
     ) -> Result<(), Error> {
-        let chunk_id_val = chunk_id.as_u64();
         let node_id_val = node_id.as_u64();
         let disk_id_val = disk_id.as_u64();
 
@@ -778,7 +802,7 @@ impl MetadataStore for MetadataStoreImpl {
             .call(move |conn| {
                 Ok(conn.execute(
                     "UPDATE chunks SET node_id = ?1, disk_id = ?2 WHERE chunk_id = ?3",
-                    params![node_id_val as i64, disk_id_val as i64, chunk_id_val as i64,],
+                    params![node_id_val as i64, disk_id_val as i64, chunk_id,],
                 )?)
             })
             .await
@@ -792,15 +816,13 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn mark_chunk_corrupt(&self, chunk_id: ChunkId) -> Result<(), Error> {
-        let chunk_id_val = chunk_id.as_u64();
-
         let rows_affected = self
             .inner
             .conn
             .call(move |conn| {
                 Ok(conn.execute(
                     "UPDATE chunks SET status = 1 WHERE chunk_id = ?1",
-                    params![chunk_id_val as i64],
+                    params![chunk_id],
                 )?)
             })
             .await
@@ -818,7 +840,6 @@ impl MetadataStore for MetadataStoreImpl {
         chunk_id: ChunkId,
         verified_at: SystemTime,
     ) -> Result<(), Error> {
-        let chunk_id_val = chunk_id.as_u64();
         let verified_at_unix = system_time_to_unix(verified_at);
 
         let rows_affected = self
@@ -827,7 +848,7 @@ impl MetadataStore for MetadataStoreImpl {
             .call(move |conn| {
                 Ok(conn.execute(
                     "UPDATE chunks SET last_verified = ?1 WHERE chunk_id = ?2",
-                    params![verified_at_unix, chunk_id_val as i64],
+                    params![verified_at_unix, chunk_id],
                 )?)
             })
             .await
@@ -848,7 +869,6 @@ impl MetadataStore for MetadataStoreImpl {
         client_id: ClientId,
         expires_at: SystemTime,
     ) -> Result<u64, Error> {
-        let file_id_val = file_id.as_u64();
         let client_id_val = client_id.as_u64();
         let expires_at_unix = system_time_to_unix(expires_at);
 
@@ -864,7 +884,7 @@ impl MetadataStore for MetadataStoreImpl {
                 // Check for conflicting write locks within the transaction
                 let has_write_lock: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM locks WHERE file_id = ?1 AND lock_type = 1 AND expires_at > ?2)",
-                    params![file_id_val as i64, now],
+                    params![file_id, now],
                     |row| row.get(0),
                 )?;
 
@@ -880,7 +900,7 @@ impl MetadataStore for MetadataStoreImpl {
                 tx.execute(
                     "INSERT INTO locks (file_id, client_id, lock_type, acquired_at, expires_at)
                      VALUES (?1, ?2, 0, ?3, ?4)",
-                    params![file_id_val as i64, client_id_val as i64, now, expires_at_unix],
+                    params![file_id, client_id_val as i64, now, expires_at_unix],
                 )?;
 
                 let lock_id = tx.last_insert_rowid() as u64;
@@ -904,10 +924,11 @@ impl MetadataStore for MetadataStoreImpl {
         &self,
         file_id: FileId,
         client_id: ClientId,
+        node_id: u64,
         expires_at: SystemTime,
     ) -> Result<u64, Error> {
-        let file_id_val = file_id.as_u64();
         let client_id_val = client_id.as_u64();
+        let node_id_val = node_id;
         let expires_at_unix = system_time_to_unix(expires_at);
 
         self.inner
@@ -923,7 +944,7 @@ impl MetadataStore for MetadataStoreImpl {
                 // Check for any existing locks within the transaction
                 let has_any_lock: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM locks WHERE file_id = ?1 AND expires_at > ?2)",
-                    params![file_id_val as i64, now],
+                    params![file_id, now],
                     |row| row.get(0),
                 )?;
 
@@ -936,16 +957,11 @@ impl MetadataStore for MetadataStoreImpl {
                     ));
                 }
 
-                // Acquire write lock
+                // Acquire write lock with node_id
                 tx.execute(
-                    "INSERT INTO locks (file_id, client_id, lock_type, acquired_at, expires_at)
-                     VALUES (?1, ?2, 1, ?3, ?4)",
-                    params![
-                        file_id_val as i64,
-                        client_id_val as i64,
-                        now,
-                        expires_at_unix
-                    ],
+                    "INSERT INTO locks (file_id, client_id, lock_type, node_id, acquired_at, expires_at)
+                     VALUES (?1, ?2, 1, ?3, ?4, ?5)",
+                    params![file_id, client_id_val as i64, node_id_val as i64, now, expires_at_unix],
                 )?;
 
                 let lock_id = tx.last_insert_rowid() as u64;
@@ -966,7 +982,6 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn release_lock(&self, file_id: FileId, client_id: ClientId) -> Result<(), Error> {
-        let file_id_val = file_id.as_u64();
         let client_id_val = client_id.as_u64();
 
         let rows_affected = self
@@ -975,7 +990,7 @@ impl MetadataStore for MetadataStoreImpl {
             .call(move |conn| {
                 Ok(conn.execute(
                     "DELETE FROM locks WHERE file_id = ?1 AND client_id = ?2",
-                    params![file_id_val as i64, client_id_val as i64],
+                    params![file_id, client_id_val as i64],
                 )?)
             })
             .await
@@ -994,7 +1009,6 @@ impl MetadataStore for MetadataStoreImpl {
         client_id: ClientId,
         new_expiry: SystemTime,
     ) -> Result<(), Error> {
-        let file_id_val = file_id.as_u64();
         let client_id_val = client_id.as_u64();
         let new_expiry_unix = system_time_to_unix(new_expiry);
 
@@ -1004,7 +1018,7 @@ impl MetadataStore for MetadataStoreImpl {
             .call(move |conn| {
                 Ok(conn.execute(
                     "UPDATE locks SET expires_at = ?1 WHERE file_id = ?2 AND client_id = ?3",
-                    params![new_expiry_unix, file_id_val as i64, client_id_val as i64,],
+                    params![new_expiry_unix, file_id, client_id_val as i64,],
                 )?)
             })
             .await
@@ -1018,8 +1032,6 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn get_file_locks(&self, file_id: FileId) -> Result<Vec<LockRecord>, Error> {
-        let file_id_val = file_id.as_u64();
-
         self.inner
             .conn
             .call(move |conn| {
@@ -1029,7 +1041,7 @@ impl MetadataStore for MetadataStoreImpl {
                 )?;
 
                 let locks = stmt
-                    .query_map(params![file_id_val as i64], |row| {
+                    .query_map(params![file_id], |row| {
                         let lock_type_val: i64 = row.get(3)?;
                         let lock_type = match lock_type_val {
                             0 => LockType::Read,
@@ -1039,7 +1051,7 @@ impl MetadataStore for MetadataStoreImpl {
 
                         Ok(LockRecord {
                             lock_id: row.get::<_, i64>(0)? as u64,
-                            file_id: FileId::new(row.get::<_, i64>(1)? as u64),
+                            file_id: row.get::<_, FileId>(1)?,
                             client_id: ClientId::new(row.get::<_, i64>(2)? as u64),
                             lock_type,
                             acquired_at: unix_to_system_time(row.get(4)?),
@@ -1182,6 +1194,12 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn cleanup_expired_inode_reservations(&self) -> Result<u64, Error> {
+        // TODO: This method should be called periodically by a background maintenance task.
+        // Currently, expired reservations (1-hour TTL) remain in the database until:
+        // 1. Explicitly released on error paths in FileSystemService
+        // 2. This cleanup method is manually invoked (only happens in tests currently)
+        // 3. Phase 2: Implement periodic background task to call this every 10-15 minutes
+
         let now = system_time_to_unix(SystemTime::now());
 
         let rows_affected = self

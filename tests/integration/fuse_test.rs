@@ -136,7 +136,7 @@ async fn test_lookup_file_via_metadata_store() {
     service.initialize_root().await.expect("Init failed");
 
     // Pre-populate a test file in MetadataStore (simulates file creation)
-    let file_id = FileId::new(100);
+    let file_id = FileId::generate();
     let test_file_path = Path::new("/test.txt");
     let test_inode = 42;
 
@@ -149,6 +149,7 @@ async fn test_lookup_file_via_metadata_store() {
         created_at: SystemTime::now(),
         modified_at: SystemTime::now(),
         accessed_at: SystemTime::now(),
+        target: None, // Regular files/directories don't have targets
     };
 
     service
@@ -267,7 +268,7 @@ async fn test_readdir_with_files() {
     service.initialize_root().await.expect("Init failed");
 
     // Create a test file in root directory
-    let file_id = FileId::new(200);
+    let file_id = FileId::generate();
     let test_file_path = Path::new("/file1.txt");
     let test_inode = 100;
 
@@ -280,6 +281,7 @@ async fn test_readdir_with_files() {
         created_at: SystemTime::now(),
         modified_at: SystemTime::now(),
         accessed_at: SystemTime::now(),
+        target: None, // Regular files/directories don't have targets
     };
 
     service
@@ -375,4 +377,191 @@ async fn test_concurrent_getattr_operations() {
     }
 
     println!("✓ Concurrent getattr operations successful");
+}
+
+#[tokio::test]
+async fn test_unlink_regular_file() {
+    let (service, _temp_dir) = create_test_fs().await;
+    service.initialize_root().await.expect("Init failed");
+
+    // Create a regular file
+    let file_id = FileId::generate();
+    let test_file_path = Path::new("/test.txt");
+    let test_inode = 42;
+
+    let file_metadata = FileMetadata {
+        file_type: wormfs::metadata_store::FileType::RegularFile,
+        size: 1024,
+        permissions: 0o644,
+        uid: 1000,
+        gid: 1000,
+        created_at: SystemTime::now(),
+        modified_at: SystemTime::now(),
+        accessed_at: SystemTime::now(),
+        target: None, // Regular files/directories don't have targets
+    };
+
+    service
+        .metadata_store()
+        .create_file(file_id, test_file_path, test_inode, file_metadata)
+        .await
+        .expect("Failed to create test file");
+
+    // Verify file exists
+    let file_attr = service.getattr(test_inode).await.expect("getattr failed");
+    assert_eq!(file_attr.ino, test_inode);
+    assert_eq!(file_attr.kind, FileType::RegularFile);
+
+    // Unlink the file
+    let client_id = ClientId::new(1);
+    service
+        .unlink(ROOT_INODE, "test.txt", 1000, 1000, client_id)
+        .await
+        .expect("unlink failed");
+
+    // Verify file no longer exists
+    let result = service.getattr(test_inode).await;
+    assert!(result.is_err(), "File should not exist after unlink");
+
+    println!("✓ Regular file unlink successful");
+}
+
+#[tokio::test]
+async fn test_unlink_symlink() {
+    let (service, _temp_dir) = create_test_fs().await;
+    service.initialize_root().await.expect("Init failed");
+
+    // Create a symlink
+    let symlink_id = FileId::generate();
+    let symlink_path = Path::new("/link");
+    let symlink_inode = 43;
+
+    let symlink_metadata = FileMetadata {
+        file_type: wormfs::metadata_store::FileType::Symlink,
+        size: 0,            // Symlinks typically have size 0
+        permissions: 0o777, // Symlinks usually have full permissions
+        uid: 1000,
+        gid: 1000,
+        created_at: SystemTime::now(),
+        modified_at: SystemTime::now(),
+        accessed_at: SystemTime::now(),
+        target: Some("/test.txt".to_string()), // Symlink target
+    };
+
+    service
+        .metadata_store()
+        .create_file(symlink_id, symlink_path, symlink_inode, symlink_metadata)
+        .await
+        .expect("Failed to create symlink");
+
+    // Verify symlink exists
+    let symlink_attr = service
+        .getattr(symlink_inode)
+        .await
+        .expect("getattr failed");
+    assert_eq!(symlink_attr.ino, symlink_inode);
+    assert_eq!(symlink_attr.kind, FileType::Symlink);
+
+    // Unlink the symlink
+    let client_id = ClientId::new(1);
+    service
+        .unlink(ROOT_INODE, "link", 1000, 1000, client_id)
+        .await
+        .expect("unlink symlink failed");
+
+    // Verify symlink no longer exists
+    let result = service.getattr(symlink_inode).await;
+    assert!(result.is_err(), "Symlink should not exist after unlink");
+
+    println!("✓ Symlink unlink successful");
+}
+
+#[tokio::test]
+async fn test_unlink_rejects_directory() {
+    let (service, _temp_dir) = create_test_fs().await;
+    service.initialize_root().await.expect("Init failed");
+
+    // Create a directory
+    let dir_id = FileId::generate();
+    let dir_path = Path::new("/testdir");
+    let dir_inode = 44;
+
+    let dir_metadata = FileMetadata {
+        file_type: wormfs::metadata_store::FileType::Directory,
+        size: 0,
+        permissions: 0o755,
+        uid: 1000,
+        gid: 1000,
+        created_at: SystemTime::now(),
+        modified_at: SystemTime::now(),
+        accessed_at: SystemTime::now(),
+        target: None, // Regular files/directories don't have targets
+    };
+
+    service
+        .metadata_store()
+        .create_file(dir_id, dir_path, dir_inode, dir_metadata)
+        .await
+        .expect("Failed to create directory");
+
+    // Verify directory exists
+    let dir_attr = service.getattr(dir_inode).await.expect("getattr failed");
+    assert_eq!(dir_attr.ino, dir_inode);
+    assert_eq!(dir_attr.kind, FileType::Directory);
+
+    // Try to unlink the directory (should fail)
+    let client_id = ClientId::new(1);
+    let result = service
+        .unlink(ROOT_INODE, "testdir", 1000, 1000, client_id)
+        .await;
+
+    // Should fail with IsADirectory error
+    assert!(result.is_err(), "unlink should fail for directories");
+    match result {
+        Err(e) => {
+            let errno = e.to_errno();
+            assert_eq!(
+                errno,
+                libc::EISDIR,
+                "Error should be EISDIR for directory unlink"
+            );
+            println!("✓ unlink correctly rejects directories with EISDIR");
+        }
+        Ok(_) => panic!("unlink should not succeed for directories"),
+    }
+
+    // Verify directory still exists
+    let dir_attr = service.getattr(dir_inode).await.expect("getattr failed");
+    assert_eq!(dir_attr.ino, dir_inode);
+    assert_eq!(dir_attr.kind, FileType::Directory);
+}
+
+#[tokio::test]
+async fn test_unlink_nonexistent_file() {
+    let (service, _temp_dir) = create_test_fs().await;
+    service.initialize_root().await.expect("Init failed");
+
+    // Try to unlink a non-existent file
+    let client_id = ClientId::new(1);
+    let result = service
+        .unlink(ROOT_INODE, "nonexistent.txt", 1000, 1000, client_id)
+        .await;
+
+    // Should fail with an error (EIO due to metadata error in current implementation)
+    assert!(result.is_err(), "unlink should fail for non-existent file");
+    match result {
+        Err(e) => {
+            let errno = e.to_errno();
+            // In the current implementation, "File not found" from Raft is converted
+            // to MetadataError which maps to EIO. This could be improved in the future
+            // to map to ENOENT by tracking the specific error type.
+            assert!(
+                errno == libc::EIO || errno == libc::ENOENT,
+                "Error should be EIO or ENOENT for non-existent file, got {}",
+                errno
+            );
+            println!("✓ unlink correctly fails for non-existent file");
+        }
+        Ok(_) => panic!("unlink should not succeed for non-existent file"),
+    }
 }

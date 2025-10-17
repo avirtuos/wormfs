@@ -216,6 +216,9 @@ pub trait MetadataStore: Send + Sync + Clone {
         offset: u64,
     ) -> Result<StripeRecord, Error>;
 
+    /// Delete a stripe and all its chunks.
+    async fn delete_stripe(&self, stripe_id: StripeId) -> Result<(), Error>;
+
     // ===== Chunk Operations =====
 
     /// Allocate chunks for a stripe.
@@ -264,6 +267,7 @@ pub trait MetadataStore: Send + Sync + Clone {
         &self,
         file_id: FileId,
         client_id: ClientId,
+        node_id: u64,
         expires_at: SystemTime,
     ) -> Result<u64, Error>;
 
@@ -367,6 +371,16 @@ pub trait MetadataStore: Send + Sync + Clone {
     /// # Errors
     ///
     /// Returns an error if database operation fails.
+    ///
+    /// # TODO: Background Maintenance Task (Phase 2)
+    ///
+    /// This method needs to be called periodically by a background maintenance task.
+    /// The task should:
+    /// - Run every 10-15 minutes
+    /// - Call `cleanup_expired_inode_reservations()` to release stale inode reservations
+    /// - Call `cleanup_expired_locks()` to release expired file locks
+    /// - Log statistics about cleaned up resources
+    /// - Be implemented as part of StorageWatchdog or a dedicated MaintenanceService
     async fn cleanup_expired_inode_reservations(&self) -> Result<u64, Error>;
 
     // ===== Snapshot Operations =====
