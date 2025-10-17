@@ -498,17 +498,27 @@ impl FileSystemService for FileSystemServiceImpl {
             return Err(Error::NotADirectory(parent));
         }
 
-        // Step 2: Reserve inode before Raft operation
+        // Step 2: Check create permission on parent directory (write + execute)
+        crate::filesystem_service::permissions::check_create_permission(
+            uid,
+            gid,
+            parent_record.uid,
+            parent_record.gid,
+            parent_record.permissions,
+        )
+        .map_err(|_| Error::PermissionDenied(parent))?;
+
+        // Step 3: Reserve inode before Raft operation
         let inode = self
             .metadata_store
             .reserve_inode()
             .await
             .map_err(|e| self.convert_metadata_error(e))?;
 
-        // Step 3: Construct path
+        // Step 4: Construct path
         let path = parent_record.path.join(name);
 
-        // Step 4: Propose file creation through Raft stub
+        // Step 5: Propose file creation through Raft stub
         use crate::filesystem_service::raft_commands::{FileType as RaftFileType, RaftCommand};
         let command = RaftCommand::CreateFile {
             parent_inode: parent,
@@ -1498,32 +1508,267 @@ impl FileSystemService for FileSystemServiceImpl {
 
     async fn mkdir(
         &self,
-        _parent: u64,
-        _name: &str,
-        _mode: u32,
-        _uid: u32,
-        _gid: u32,
+        parent: u64,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
         _client_id: ClientId,
     ) -> Result<FileAttr, Error> {
-        // Phase 1: Stub - will be implemented in Step 9
-        Err(Error::NotSupported(
-            "mkdir not implemented in Step 7".into(),
-        ))
+        tracing::debug!(
+            "mkdir: parent={}, name={}, mode={:o}, uid={}, gid={}",
+            parent,
+            name,
+            mode,
+            uid,
+            gid
+        );
+
+        // Step 1: Validate parent exists and is a directory
+        let parent_record = self
+            .metadata_store
+            .get_file_by_inode(parent)
+            .await
+            .map_err(|e| self.convert_metadata_error(e))?;
+
+        if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            return Err(Error::NotADirectory(parent));
+        }
+
+        // Step 2: Check mkdir permission on parent directory (write + execute)
+        crate::filesystem_service::permissions::check_mkdir_permission(
+            uid,
+            gid,
+            parent_record.uid,
+            parent_record.gid,
+            parent_record.permissions,
+        )
+        .map_err(|_| Error::PermissionDenied(parent))?;
+
+        // Step 3: Check if directory already exists
+        let path = parent_record.path.join(name);
+        if let Ok(_existing) = self.metadata_store.get_file_by_path(&path).await {
+            return Err(Error::AlreadyExists(path.to_string_lossy().into_owned()));
+        }
+
+        // Step 4: Reserve inode before Raft operation
+        let inode = self
+            .metadata_store
+            .reserve_inode()
+            .await
+            .map_err(|e| self.convert_metadata_error(e))?;
+
+        // Step 5: Create directory through Raft for consistency
+        use crate::filesystem_service::raft_commands::{FileType as RaftFileType, RaftCommand};
+        let command = RaftCommand::CreateFile {
+            parent_inode: parent,
+            name: name.to_string(),
+            file_type: RaftFileType::Directory,
+            mode,
+            uid,
+            gid,
+        };
+
+        let result = self
+            .raft_stub
+            .propose_operation(command)
+            .await
+            .map_err(|e| {
+                // Release reserved inode on error
+                let _ = self.metadata_store.release_inode(inode);
+                Error::RaftError(format!("Failed to create directory: {}", e))
+            })?;
+
+        // Step 6: Extract file_id from result (inode already reserved)
+        let file_id = match result {
+            crate::filesystem_service::raft_commands::RaftCommandResult::FileCreated {
+                file_id,
+                ..
+            } => file_id,
+            crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
+                let _ = self.metadata_store.release_inode(inode).await;
+                return Err(Error::MetadataError(message));
+            }
+            _ => {
+                let _ = self.metadata_store.release_inode(inode).await;
+                return Err(Error::Internal(
+                    "Unexpected Raft result for directory creation".into(),
+                ));
+            }
+        };
+
+        // Step 7: [TEMP Phase 1] Write directly to MetadataStore
+        // In Phase 2+, this will be handled by the Raft state machine
+        let now = SystemTime::now();
+        let metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Directory,
+            size: 0, // Directories have size 0
+            permissions: mode,
+            uid,
+            gid,
+            created_at: now,
+            modified_at: now,
+            accessed_at: now,
+            target: None, // Directories don't have targets
+        };
+
+        // Create the directory in metadata store - release inode on error
+        if let Err(e) = self
+            .metadata_store
+            .create_file(file_id, &path, inode, metadata.clone())
+            .await
+        {
+            let _ = self.metadata_store.release_inode(inode).await;
+            return Err(self.convert_metadata_error(e));
+        }
+
+        // Step 8: Confirm inode reservation - release inode on error
+        if let Err(e) = self.metadata_store.confirm_inode(inode).await {
+            let _ = self.metadata_store.release_inode(inode).await;
+            return Err(self.convert_metadata_error(e));
+        }
+
+        // Step 9: Create FileAttr for the response
+        let attr = FileAttr {
+            ino: inode,
+            size: 0,
+            blocks: 0,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FileType::Directory,
+            perm: mode as u16,
+            nlink: 1, // Always 1 for all files/directories (see docs/posix_compliance.md)
+            uid,
+            gid,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        };
+
+        // Step 10: Cache the new directory
+        self.inode_manager.cache().insert(inode, file_id, metadata);
+
+        tracing::info!(
+            "Created directory: path={:?}, inode={}, file_id={:?}",
+            path,
+            inode,
+            file_id
+        );
+
+        Ok(attr)
     }
 
     async fn rmdir(
         &self,
-        _parent: u64,
-        _name: &str,
-        _uid: u32,
-        _gid: u32,
+        parent: u64,
+        name: &str,
+        uid: u32,
+        gid: u32,
         _client_id: ClientId,
     ) -> Result<(), Error> {
-        // Phase 1: Stub - will be implemented in Step 9
-        // Note: When implemented, will need to check write permission on parent directory
-        Err(Error::NotSupported(
-            "rmdir not implemented in Step 7".into(),
-        ))
+        tracing::debug!(
+            "rmdir: parent={}, name={}, uid={}, gid={}",
+            parent,
+            name,
+            uid,
+            gid
+        );
+
+        // Step 1: Validate parent exists and is a directory
+        let parent_record = self
+            .metadata_store
+            .get_file_by_inode(parent)
+            .await
+            .map_err(|e| self.convert_metadata_error(e))?;
+
+        if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            return Err(Error::NotADirectory(parent));
+        }
+
+        // Step 2: Check rmdir permission on parent directory (write + execute)
+        crate::filesystem_service::permissions::check_rmdir_permission(
+            uid,
+            gid,
+            parent_record.uid,
+            parent_record.gid,
+            parent_record.permissions,
+        )
+        .map_err(|_| Error::PermissionDenied(parent))?;
+
+        // Step 3: Construct path and lookup target directory
+        let path = parent_record.path.join(name);
+        let dir_record = self
+            .metadata_store
+            .get_file_by_path(&path)
+            .await
+            .map_err(|e| self.convert_metadata_error(e))?;
+
+        // Step 4: Verify target is a directory (not a file or symlink)
+        if dir_record.file_type != crate::metadata_store::FileType::Directory {
+            return Err(Error::NotADirectory(dir_record.inode));
+        }
+
+        // Step 5: Check if directory is empty
+        // A directory is empty if it contains no entries (list_directory returns empty)
+        let children = self
+            .metadata_store
+            .list_directory(&path)
+            .await
+            .map_err(|e| self.convert_metadata_error(e))?;
+
+        if !children.is_empty() {
+            return Err(Error::DirectoryNotEmpty(dir_record.inode));
+        }
+
+        // Step 6: Propose directory deletion through Raft (handles metadata cleanup)
+        use crate::filesystem_service::raft_commands::RaftCommand;
+        let command = RaftCommand::DeleteFile {
+            parent_inode: parent,
+            name: name.to_string(),
+        };
+
+        let result = self
+            .raft_stub
+            .propose_operation(command)
+            .await
+            .map_err(|e| {
+                let error_msg = format!("{}", e);
+                // Convert specific Raft errors to appropriate FileSystemService errors
+                if error_msg.contains("File not found") || error_msg.contains("not found") {
+                    Error::MetadataError(format!("Directory not found: {}", name))
+                } else {
+                    Error::RaftError(error_msg)
+                }
+            })?;
+
+        // Step 7: Check Raft result
+        match result {
+            crate::filesystem_service::raft_commands::RaftCommandResult::FileDeleted => {
+                // Success - file already deleted by Raft stub
+            }
+            crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
+                return Err(Error::MetadataError(message));
+            }
+            _ => {
+                return Err(Error::Internal(
+                    "Unexpected Raft result for directory deletion".into(),
+                ));
+            }
+        }
+
+        // Step 8: Invalidate cache
+        // Note: File is already deleted from metadata store by Raft stub
+        self.inode_manager.cache().invalidate(dir_record.inode);
+
+        tracing::info!(
+            "Removed directory: path={:?}, inode={}",
+            path,
+            dir_record.inode
+        );
+
+        Ok(())
     }
 
     async fn readdir(

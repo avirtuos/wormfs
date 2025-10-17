@@ -37,6 +37,8 @@ MetadataStore is the SQLite-based metadata persistence layer that stores the mat
 │  │ modified_at (INTEGER)                            │   │
 │  │ accessed_at (INTEGER)                            │   │
 │  │ storage_policy_id (INTEGER, FK)                  │   │
+│  │                                                  │   │
+│  │ ⚠️  NOTE: nlink NOT stored (computed as 1)      │   │
 │  └─────────────────────────────────────────────────┘   │
 │                                                           │
 │  Stripes Table:                                          │

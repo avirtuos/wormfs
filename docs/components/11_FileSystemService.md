@@ -13,6 +13,43 @@ FileSystemService provides the FUSE-compatible API layer that translates filesys
 - Managing file handles and operation contexts
 - Providing inode-to-path mapping and directory traversal
 - Handling file permissions and access control
+- Maintaining POSIX-compatible semantics (with documented deviations - see [POSIX Compliance](../posix_compliance.md))
+
+## POSIX Compliance Notes
+
+WormFS aims for practical POSIX compliance with some deliberate simplifications. Key deviations:
+
+### Link Count (`nlink`) Always Returns 1
+
+**All files and directories report `nlink = 1`**, regardless of actual subdirectory count. This simplifies distributed metadata management and aligns with modern filesystems like Btrfs.
+
+**Implications**:
+- No hard link support (will never be supported)
+- `find` command is ~5-15% slower (cannot optimize leaf directory detection)
+- 99% of applications unaffected (rsync, tar, cp, mv, git, etc. all work)
+- See [docs/posix_compliance.md](../posix_compliance.md) for comprehensive details
+
+### FileAttr Structure
+
+When converting metadata to FUSE `FileAttr`, the following fields are computed:
+
+```rust
+FileAttr {
+    ino: record.inode,              // Unique inode number
+    size: record.size,               // File size in bytes
+    nlink: 1,                        // ⚠️ Always 1 for all files/directories
+    perm: record.permissions as u16, // POSIX permission bits
+    uid: record.uid,                 // Owner user ID
+    gid: record.gid,                 // Owner group ID
+    atime: record.created_at,        // ⚠️ Returns ctime (not tracked)
+    mtime: record.modified_at,       // Modification time
+    ctime: record.modified_at,       // Change time (shares mtime)
+    crtime: record.created_at,       // Creation time (birth time)
+    // ... other fields
+}
+```
+
+**Note**: `nlink` is **not stored** in the database - it's always computed as `1` at runtime.
 
 ## Architecture: Client Pattern with Interior Mutability
 

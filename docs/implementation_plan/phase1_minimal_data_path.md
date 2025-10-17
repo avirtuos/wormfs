@@ -241,10 +241,16 @@ impl MetadataStore for MetadataStoreImpl {
 
 4. Handle file truncation and size changes
 
+**POSIX Compliance Notes**:
+- ⚠️ **nlink always returns 1** for all files (regular files and directories)
+- This simplified approach follows the Btrfs precedent and simplifies distributed systems implementation
+- See `docs/posix_compliance.md` for detailed rationale and application compatibility
+
 **Deliverables**:
 - Can create and delete files
 - Can read and write file contents
 - Proper size tracking
+- Consistent nlink=1 behavior across all operations
 
 #### Step 9: Directory Operations
 **Tasks**:
@@ -396,6 +402,7 @@ kill $PID
 | Data Integrity | 100% | Files match after write/read |
 | Performance | <100ms | Small file operations latency |
 | Test Coverage | >80% | Unit and integration tests |
+| POSIX Compliance | Practical | nlink=1 for all files/directories (see docs/posix_compliance.md) |
 
 ## Risk Mitigation
 
@@ -435,3 +442,4 @@ Once Phase 1 is complete and tested:
 - No concurrency/locking needed yet
 - Focus on correctness over performance
 - Document all TODOs for later phases
+- **POSIX Compliance**: WormFS uses `nlink=1` for all files and directories (no hard link support). See `docs/posix_compliance.md` for detailed rationale.
