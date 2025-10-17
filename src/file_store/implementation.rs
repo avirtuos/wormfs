@@ -209,9 +209,38 @@ impl FileStoreImpl {
 #[async_trait]
 impl FileStore for FileStoreImpl {
     fn new(config: Config) -> Result<Self, Error> {
+        // Initialize disks map from config
+        let mut disks = HashMap::new();
+
+        for (index, disk_path) in config.disk_paths.iter().enumerate() {
+            // Create directory if it doesn't exist
+            std::fs::create_dir_all(disk_path).map_err(|e| Error::DiskInitFailed {
+                path: disk_path.clone(),
+                reason: format!("Failed to create directory: {}", e),
+            })?;
+
+            // Verify path exists
+            std::fs::metadata(disk_path).map_err(|e| Error::DiskInitFailed {
+                path: disk_path.clone(),
+                reason: format!("Failed to get disk metadata: {}", e),
+            })?;
+
+            // Create disk info
+            let disk_id = DiskId::new(index as u64);
+            let disk_info = DiskInfo {
+                disk_id,
+                path: disk_path.clone(),
+                total_space: 1_000_000_000_000, // 1TB default
+                free_space: 500_000_000_000,    // 500GB default
+                chunk_count: 0,
+            };
+
+            disks.insert(disk_id, disk_info);
+        }
+
         let inner = FileStoreInner {
             config,
-            disks: RwLock::new(HashMap::new()),
+            disks: RwLock::new(disks),
         };
 
         Ok(Self {

@@ -220,6 +220,54 @@ impl MetadataStore for MetadataStoreImpl {
         self.run_migrations().await
     }
 
+    async fn initialize_node_and_disks(&self, disk_paths: &[std::path::PathBuf]) -> Result<(), Error> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Insert node with ID 0 for Phase 1 single-node operation
+        self.inner
+            .conn
+            .call(move |conn| {
+                // Use INSERT OR IGNORE to make it idempotent
+                conn.execute(
+                    "INSERT OR IGNORE INTO nodes (node_id, address, status, last_seen, created_at)
+                     VALUES (0, 'localhost:7000', 0, ?1, ?2)",
+                    rusqlite::params![now, now],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| Error::QueryError(format!("Failed to insert node: {}", e)))?;
+
+        // Insert disk records for each configured path
+        for (index, disk_path) in disk_paths.iter().enumerate() {
+            let path_str = disk_path.to_string_lossy().to_string();
+            let disk_id = index as i64;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+
+            self.inner
+                .conn
+                .call(move |conn| {
+                    // Use INSERT OR IGNORE to make it idempotent
+                    conn.execute(
+                        "INSERT OR IGNORE INTO disks (disk_id, node_id, path, total_space, free_space, status, created_at, updated_at)
+                         VALUES (?1, 0, ?2, 1000000000000, 500000000000, 0, ?3, ?4)",
+                        rusqlite::params![disk_id, path_str, now, now],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .map_err(|e| Error::QueryError(format!("Failed to insert disk: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
     async fn create_file(
         &self,
         file_id: FileId,

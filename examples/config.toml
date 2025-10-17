@@ -1,0 +1,85 @@
+# WormFS StorageNode Configuration (Phase 1)
+#
+# This configuration file demonstrates all available Phase 1 settings.
+# Phase 2+ settings (Raft, libp2p) can be omitted in Phase 1.
+
+# === Node Identity ===
+
+# Unique identifier for this storage node (required)
+node_id = "wormfs-node-001"
+
+# Network address to bind for client connections (default: "127.0.0.1:7000")
+listen_address = "127.0.0.1:7000"
+
+# === Storage Paths ===
+
+# Root directory for all WormFS data (required)
+data_dir = "/var/lib/wormfs"
+
+# Path to SQLite metadata database (required)
+# Stores file metadata, chunk locations, and lock state
+metadata_db_path = "/var/lib/wormfs/metadata.db"
+
+# Path to transaction log (Phase 2+ - can be omitted in Phase 1)
+transaction_log_path = "/var/lib/wormfs/transaction_log"
+
+# Directory for metadata snapshots (Phase 2+ - can be omitted in Phase 1)
+snapshot_dir = "/var/lib/wormfs/snapshots"
+
+# === Erasure Coding Configuration ===
+
+# Default stripe size in bytes (default: 1048576 = 1MB)
+# Files are split into stripes of this size before erasure coding
+default_stripe_size = 1048576
+
+# Number of data shards per stripe (default: 2)
+# With k=2 data shards and m=1 parity shard, we can reconstruct from any 2 of 3 shards
+default_data_shards = 2
+
+# Number of parity shards per stripe (default: 1)
+# This allows up to m failures per stripe
+default_parity_shards = 1
+
+# === Filesystem Settings ===
+
+# Default UID for new files (default: 1000)
+default_uid = 1000
+
+# Default GID for new files (default: 1000)
+default_gid = 1000
+
+# Enable read lock optimization (default: true)
+# Allows concurrent reads without blocking
+enable_read_locks = true
+
+# Lock timeout in seconds (default: 30)
+# Locks are automatically released after this duration
+lock_timeout = 30
+
+# === Phase 2+ Settings (Cluster Configuration) ===
+
+# libp2p listening port for peer-to-peer communication (Phase 2+)
+libp2p_listen_port = 7001
+
+# Peer node addresses for cluster membership (Phase 2+)
+# Example:
+# peer_addresses = [
+#     "192.168.1.10:7000",
+#     "192.168.1.11:7000",
+#     "192.168.1.12:7000"
+# ]
+peer_addresses = []
+
+# === Phase 4+ Settings (Storage Watchdog) ===
+
+# Shallow check interval in seconds (default: 300 = 5 minutes)
+# Quick verification of chunk existence
+shallow_check_interval = 300
+
+# Deep check interval in seconds (default: 3600 = 1 hour)
+# Full checksum verification of chunks
+deep_check_interval = 3600
+
+# Snapshot creation interval in seconds (default: 1800 = 30 minutes)
+# How often to create metadata snapshots
+snapshot_interval = 1800

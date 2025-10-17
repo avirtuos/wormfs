@@ -300,8 +300,11 @@ impl Filesystem for FuseAdapter {
                         FileType::Socket => FuseFileType::Socket,
                     };
 
+                    // Calculate the next offset (must account for skipped entries)
+                    let next_offset = offset + i as i64 + 1;
+
                     // buffer_full means the buffer is full, should stop adding more entries
-                    if reply.add(entry.ino, (i + 1) as i64, kind, &entry.name) {
+                    if reply.add(entry.ino, next_offset, kind, &entry.name) {
                         break;
                     }
                 }
@@ -490,6 +493,171 @@ impl Filesystem for FuseAdapter {
             Err(e) => {
                 let errno = e.to_errno();
                 tracing::debug!("FUSE release error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn create(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: fuser::ReplyCreate,
+    ) {
+        let name_str = name.to_string_lossy();
+        let client_id = self.get_client_id(req);
+        let uid = req.uid();
+        let gid = req.gid();
+
+        tracing::debug!(
+            "FUSE create: parent={}, name={}, mode={:#o}, uid={}, gid={}",
+            parent,
+            name_str,
+            mode,
+            uid,
+            gid
+        );
+
+        match self.runtime.block_on(
+            self.service
+                .create(parent, &name_str, mode, uid, gid, client_id),
+        ) {
+            Ok(attr) => {
+                let fuse_attr = self.to_fuse_attr(&attr);
+                // Generate file handle from inode (simple approach for Phase 1)
+                let fh = attr.ino;
+                tracing::debug!("FUSE create success: inode={}, fh={}", attr.ino, fh);
+                reply.created(&TTL, &fuse_attr, 0, fh, 0);
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE create error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn open(&mut self, req: &Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
+        let client_id = self.get_client_id(req);
+        let uid = req.uid();
+        let gid = req.gid();
+
+        tracing::debug!(
+            "FUSE open: ino={}, flags={:#x}, uid={}, gid={}",
+            ino,
+            flags,
+            uid,
+            gid
+        );
+
+        match self
+            .runtime
+            .block_on(self.service.open(ino, flags as u32, uid, gid, client_id))
+        {
+            Ok((fh, _attr)) => {
+                tracing::debug!("FUSE open success: ino={}, fh={}", ino, fh);
+                reply.opened(fh, 0);
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE open error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn read(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyData,
+    ) {
+        let client_id = self.get_client_id(req);
+        let uid = req.uid();
+        let gid = req.gid();
+
+        tracing::debug!(
+            "FUSE read: ino={}, offset={}, size={}, uid={}, gid={}",
+            ino,
+            offset,
+            size,
+            uid,
+            gid
+        );
+
+        if offset < 0 {
+            tracing::debug!("FUSE read error: negative offset");
+            reply.error(libc::EINVAL);
+            return;
+        }
+
+        match self.runtime.block_on(
+            self.service
+                .read(ino, offset as u64, size, uid, gid, client_id),
+        ) {
+            Ok(data) => {
+                tracing::debug!("FUSE read success: {} bytes", data.len());
+                reply.data(&data);
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE read error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn write(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyWrite,
+    ) {
+        let client_id = self.get_client_id(req);
+        let uid = req.uid();
+        let gid = req.gid();
+
+        tracing::debug!(
+            "FUSE write: ino={}, offset={}, size={}, uid={}, gid={}",
+            ino,
+            offset,
+            data.len(),
+            uid,
+            gid
+        );
+
+        if offset < 0 {
+            tracing::debug!("FUSE write error: negative offset");
+            reply.error(libc::EINVAL);
+            return;
+        }
+
+        match self.runtime.block_on(
+            self.service
+                .write(ino, offset as u64, data.to_vec(), uid, gid, client_id),
+        ) {
+            Ok(written) => {
+                tracing::debug!("FUSE write success: {} bytes", written);
+                reply.written(written);
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE write error: {}, errno={}", e, errno);
                 reply.error(errno);
             }
         }

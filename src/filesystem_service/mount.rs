@@ -67,7 +67,7 @@ impl Default for MountOptions {
             allow_other: false,
             foreground: true,
             fsname: "wormfs".to_string(),
-            auto_unmount: true,
+            auto_unmount: false, // Disabled by default to avoid requiring user_allow_other in /etc/fuse.conf
             debug: false,
         }
     }
@@ -120,6 +120,13 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         .initialize_schema()
         .await
         .map_err(|e| Error::MetadataError(format!("Failed to initialize schema: {}", e)))?;
+
+    // Initialize node and disks in database
+    tracing::info!("Initializing node and disks...");
+    metadata_store
+        .initialize_node_and_disks(&config.file_store_config.disk_paths)
+        .await
+        .map_err(|e| Error::MetadataError(format!("Failed to initialize node and disks: {}", e)))?;
 
     // Initialize FileStore
     tracing::info!("Initializing FileStore...");
@@ -251,7 +258,7 @@ mod tests {
         assert_eq!(opts.allow_other, false);
         assert_eq!(opts.foreground, true);
         assert_eq!(opts.fsname, "wormfs");
-        assert_eq!(opts.auto_unmount, true);
+        assert_eq!(opts.auto_unmount, false);
         assert_eq!(opts.debug, false);
     }
 }

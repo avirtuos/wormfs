@@ -40,9 +40,13 @@
 //! - Environment variables (override specific values)
 //! - Command-line arguments (highest priority)
 
+pub mod factory;
+pub mod implementation;
 pub mod types;
 
 use async_trait::async_trait;
+pub use factory::StorageNodeFactory;
+pub use implementation::StorageNodeImpl;
 pub use types::{Config, Error};
 
 /// StorageNode trait defines the interface for the top-level storage node orchestrator.

@@ -47,6 +47,10 @@ enum Commands {
         #[arg(long)]
         allow_other: bool,
 
+        /// Enable auto-unmount on process exit (requires user_allow_other in /etc/fuse.conf)
+        #[arg(long)]
+        auto_unmount: bool,
+
         /// Enable FUSE debug logging
         #[arg(long)]
         fuse_debug: bool,
@@ -81,6 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             foreground,
             allow_root,
             allow_other,
+            auto_unmount,
             fuse_debug,
             metadata_db,
             data_dir,
@@ -91,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 foreground,
                 allow_root,
                 allow_other,
+                auto_unmount,
                 fuse_debug,
                 metadata_db,
                 data_dir,
@@ -138,6 +144,7 @@ async fn mount_command(
     foreground: bool,
     allow_root: bool,
     allow_other: bool,
+    auto_unmount: bool,
     fuse_debug: bool,
     metadata_db_override: Option<PathBuf>,
     data_dir_override: Option<PathBuf>,
@@ -158,6 +165,7 @@ async fn mount_command(
         mount_options: MountOptions {
             allow_root,
             allow_other,
+            auto_unmount,
             foreground,
             debug: fuse_debug,
             ..mount_config.mount_options
@@ -193,6 +201,7 @@ async fn mount_command(
     _foreground: bool,
     _allow_root: bool,
     _allow_other: bool,
+    _auto_unmount: bool,
     _fuse_debug: bool,
     _metadata_db_override: Option<PathBuf>,
     _data_dir_override: Option<PathBuf>,
