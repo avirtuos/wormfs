@@ -39,7 +39,7 @@ pub struct MountConfig {
 }
 
 /// FUSE mount options.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MountOptions {
     /// Allow root user to access the filesystem
     pub allow_root: bool,

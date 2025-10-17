@@ -14,23 +14,26 @@ pub use crate::metadata_store::types::ClientId;
 pub type FileHandle = u64;
 
 /// Configuration for FileSystemService.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     /// Node ID for this storage node (used in distributed lock tracking)
     pub node_id: u64,
 
-    /// Client heartbeat timeout - how long before client considered dead
+    /// Client heartbeat timeout - how long before client considered dead (in seconds when serialized)
     /// Phase 1: Set to 24 hours (effectively infinite, no real heartbeats)
     /// Phase 2: Set to 30 seconds (with actual gRPC heartbeat endpoint)
+    #[serde(with = "serde_duration_seconds")]
     pub client_heartbeat_timeout: Duration,
 
     /// Enable read lock enforcement
     pub enable_read_locks: bool,
 
-    /// Lock timeout duration
+    /// Lock timeout duration (in seconds when serialized)
+    #[serde(with = "serde_duration_seconds")]
     pub lock_timeout: Duration,
 
-    /// Lock extend interval for long-lived operations
+    /// Lock extend interval for long-lived operations (in seconds when serialized)
+    #[serde(with = "serde_duration_seconds")]
     pub lock_extend_interval: Duration,
 
     /// Maximum file handles per client
@@ -39,7 +42,8 @@ pub struct Config {
     /// Inode cache size (number of entries)
     pub inode_cache_size: usize,
 
-    /// Inode cache TTL
+    /// Inode cache TTL (in seconds when serialized)
+    #[serde(with = "serde_duration_seconds")]
     pub inode_cache_ttl: Duration,
 
     /// Read buffer size (for stripe assembly)
@@ -52,9 +56,11 @@ pub struct Config {
     pub write_through: bool,
 
     /// Default file permissions
+    #[serde(with = "serde_file_mode")]
     pub default_file_mode: u32,
 
     /// Default directory permissions
+    #[serde(with = "serde_file_mode")]
     pub default_dir_mode: u32,
 
     /// Maximum file size
@@ -68,6 +74,74 @@ pub struct Config {
 
     /// Default GID for filesystem operations
     pub gid: u32,
+}
+
+/// Serde helper module for Duration serialization/deserialization as seconds.
+mod serde_duration_seconds {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(duration.as_secs())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
+}
+
+/// Serde helper module for file mode serialization/deserialization.
+/// Supports both integer (decimal) and string (octal) formats.
+/// - Integer: 420 (decimal)
+/// - String: "0644" (octal, more intuitive for Unix permissions)
+mod serde_file_mode {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(mode: &u32, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u32(*mode)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u32, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        // Try to deserialize as either a u32 or a string
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum FileMode {
+            Integer(u32),
+            String(String),
+        }
+
+        match FileMode::deserialize(deserializer)? {
+            FileMode::Integer(mode) => Ok(mode),
+            FileMode::String(s) => {
+                let trimmed = s.trim();
+
+                // If the string starts with "0", parse as octal
+                if trimmed.starts_with('0') && trimmed.len() > 1 {
+                    u32::from_str_radix(&trimmed[1..], 8)
+                        .map_err(|e| Error::custom(format!("Invalid octal file mode '{}': {}", s, e)))
+                } else {
+                    // Otherwise parse as decimal
+                    trimmed.parse::<u32>()
+                        .map_err(|e| Error::custom(format!("Invalid file mode '{}': {}", s, e)))
+                }
+            }
+        }
+    }
 }
 
 impl Default for Config {

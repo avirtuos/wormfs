@@ -1,85 +1,123 @@
-# WormFS StorageNode Configuration (Phase 1)
+# WormFS Phase 1 Configuration Example
 #
-# This configuration file demonstrates all available Phase 1 settings.
-# Phase 2+ settings (Raft, libp2p) can be omitted in Phase 1.
+# This configuration file demonstrates Phase 1 (single-node) settings.
+# Phase 2+ features (Raft consensus, distributed storage, etc.) are not included.
+#
+# Usage:
+#   wormfs mount --config config.toml
+#   wormfs mount --config config.toml --mount-point /custom/path  # Override mount point
+#
+# Note: Command-line flags override config file values.
 
-# === Node Identity ===
+# Mount point for the filesystem
+mount_point = "/mnt/wormfs"
 
-# Unique identifier for this storage node (required)
-node_id = "wormfs-node-001"
+# ===== Metadata Store Configuration =====
+[metadata]
+# Path to SQLite database file for metadata storage
+database_path = "/var/lib/wormfs/metadata.db"
 
-# Network address to bind for client connections (default: "127.0.0.1:7000")
-listen_address = "127.0.0.1:7000"
+# Number of read connections in pool (4-8 recommended)
+read_pool_size = 8
 
-# === Storage Paths ===
+# Enable WAL mode for better concurrent access
+enable_wal = true
 
-# Root directory for all WormFS data (required)
-data_dir = "/var/lib/wormfs"
+# SQLite page cache size in MB (maximum: 2047 MB)
+cache_size_mb = 10
 
-# Path to SQLite metadata database (required)
-# Stores file metadata, chunk locations, and lock state
-metadata_db_path = "/var/lib/wormfs/metadata.db"
+# Enable foreign key constraints
+enable_foreign_keys = true
 
-# Path to transaction log (Phase 2+ - can be omitted in Phase 1)
-transaction_log_path = "/var/lib/wormfs/transaction_log"
+# Synchronous mode: "Off", "Normal", or "Full"
+# - Off: Fastest, least safe (may lose data on crash)
+# - Normal: Good balance (default)
+# - Full: Slowest, safest (all writes synced)
+synchronous = "Normal"
 
-# Directory for metadata snapshots (Phase 2+ - can be omitted in Phase 1)
-snapshot_dir = "/var/lib/wormfs/snapshots"
+# Transaction isolation level: "ReadCommitted" or "Serializable"
+# - ReadCommitted: Better performance
+# - Serializable: Strictest consistency (default)
+transaction_isolation = "Serializable"
 
-# === Erasure Coding Configuration ===
+# Enable prepared statements for common queries (recommended)
+enable_prepared_statements = true
 
-# Default stripe size in bytes (default: 1048576 = 1MB)
-# Files are split into stripes of this size before erasure coding
-default_stripe_size = 1048576
+# Timeout for acquiring connection from read pool (seconds)
+read_pool_timeout_secs = 30
 
-# Number of data shards per stripe (default: 2)
-# With k=2 data shards and m=1 parity shard, we can reconstruct from any 2 of 3 shards
+# ===== File Store Configuration =====
+[file_store]
+# List of disk paths for chunk storage
+# At least one path is required
+disk_paths = [
+    "/var/lib/wormfs/chunks"
+]
+
+# Maximum chunk size in bytes (affects memory usage and I/O granularity)
+max_chunk_size = 1048576  # 1 MB
+
+# Erasure coding configuration
+# With 2 data shards + 1 parity shard, you can lose 1 shard and still recover data
 default_data_shards = 2
-
-# Number of parity shards per stripe (default: 1)
-# This allows up to m failures per stripe
 default_parity_shards = 1
 
-# === Filesystem Settings ===
+# Maximum concurrent chunk operations
+max_concurrent_operations = 100
 
-# Default UID for new files (default: 1000)
-default_uid = 1000
+# Chunk verification interval (seconds)
+verification_interval = 3600  # 1 hour
 
-# Default GID for new files (default: 1000)
-default_gid = 1000
+# Orphan cleanup age threshold (seconds)
+orphan_cleanup_age = 3600  # 1 hour
 
-# Enable read lock optimization (default: true)
-# Allows concurrent reads without blocking
+# ===== Filesystem Service Configuration =====
+[filesystem]
+# Node ID for this storage node (used in distributed lock tracking)
+node_id = 1
+
+# Client heartbeat timeout (seconds)
+# Phase 1: Set to 24 hours (effectively infinite, no real heartbeats)
+# Phase 2: Set to 30 seconds with actual gRPC heartbeat endpoint
+client_heartbeat_timeout = 86400  # 24 hours
+
+# Enable read lock enforcement
 enable_read_locks = true
 
-# Lock timeout in seconds (default: 30)
-# Locks are automatically released after this duration
-lock_timeout = 30
+# Lock timeout duration (seconds)
+lock_timeout = 10
 
-# === Phase 2+ Settings (Cluster Configuration) ===
+# Lock extend interval for long-lived operations (seconds)
+lock_extend_interval = 5
 
-# libp2p listening port for peer-to-peer communication (Phase 2+)
-libp2p_listen_port = 7001
+# Maximum file handles per client
+max_file_handles = 10000
 
-# Peer node addresses for cluster membership (Phase 2+)
-# Example:
-# peer_addresses = [
-#     "192.168.1.10:7000",
-#     "192.168.1.11:7000",
-#     "192.168.1.12:7000"
-# ]
-peer_addresses = []
+# Inode cache configuration
+inode_cache_size = 10000  # number of entries
+inode_cache_ttl = 60       # seconds
 
-# === Phase 4+ Settings (Storage Watchdog) ===
+# Buffer sizes (bytes)
+read_buffer_size = 1048576   # 1 MB
+write_buffer_size = 1048576  # 1 MB
 
-# Shallow check interval in seconds (default: 300 = 5 minutes)
-# Quick verification of chunk existence
-shallow_check_interval = 300
+# Enable write-through (no buffering)
+write_through = false
 
-# Deep check interval in seconds (default: 3600 = 1 hour)
-# Full checksum verification of chunks
-deep_check_interval = 3600
+# Default file and directory permissions
+# Can be specified as octal strings (more intuitive) or decimal integers
+default_file_mode = "0644"
+default_dir_mode = "0755"
 
-# Snapshot creation interval in seconds (default: 1800 = 30 minutes)
-# How often to create metadata snapshots
-snapshot_interval = 1800
+# Maximum file size (bytes)
+max_file_size = 1099511627776  # 1 TB
+
+# Enable extended attributes (xattr)
+enable_xattr = false
+
+# Default UID and GID for filesystem operations
+uid = 1000
+gid = 1000
+
+# Note: Additional mount options (allow_root, allow_other, foreground, etc.)
+# are controlled via command-line flags, not this config file.

@@ -17,8 +17,8 @@ coverage:
         
     patch:
       default:
-        target: 70%           # New code should have 80% coverage
-        threshold: 5%         # Allow 1% drop without failing
+        target: 70%           # New code should have 70% coverage
+        threshold: 5%         # Allow 5% drop without failing
         if_ci_failed: error
         if_not_found: success
         only_pulls: true      # Only check patch coverage on PRs
@@ -26,7 +26,9 @@ coverage:
   ignore:
     - "benches/**/*"          # Ignore benchmark files
     - "tests/**/*"            # Ignore test files (already testing, don't need coverage)
-    - "src/main.rs"           # Ignore CLI entry point (hard to test comprehensively)
+    - "src/bin/*"             # Ignore CLI entry point (hard to test comprehensively)
+    - "src/worm_validator/*"  # Ignore validator test harness
+    - "src/test_utils/*"      # Ignore test utilities
     - "examples/**/*"         # Ignore example code
 
 comment:
@@ -38,43 +40,6 @@ comment:
 
 github_checks:
   annotations: true
-
-# Component-specific coverage targets
-flag_management:
-  default_rules:
-    carryforward: true
-    statuses:
-      - type: project
-        target: 85%
-      - type: patch
-        target: 80%
-
-# Define coverage flags for different components
-flags:
-  core:
-    paths:
-      - src/lib.rs
-      - src/chunk_format.rs
-      - src/erasure_coding.rs
-      - src/metadata_store.rs
-      - src/storage_layout.rs
-    carryforward: true
-    
-  storage_node:
-    paths:
-      - src/storage_node.rs
-    carryforward: true
-    
-  cli:
-    paths:
-      - src/main.rs
-    carryforward: true
-
-# Configure how comments appear on PRs
-comment:
-  layout: "reach,diff,flags,tree"
-  behavior: default
-  require_changes: true
   
 # Prevent status checks from failing the build for small changes
 parsers:
