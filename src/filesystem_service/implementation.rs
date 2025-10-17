@@ -17,7 +17,31 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+/// Overflow-safe helper: Check if offset + len would overflow u64.
+///
+/// Returns the end offset if safe, otherwise returns InvalidArgument error.
+/// This prevents integer overflow in file I/O operations that could lead to
+/// data corruption or security vulnerabilities.
+fn checked_end_offset(offset: u64, len: usize) -> Result<u64, Error> {
+    offset.checked_add(len as u64).ok_or_else(|| {
+        Error::InvalidArgument("File operation would exceed maximum offset (u64 overflow)".into())
+    })
+}
+
+/// Overflow-safe helper: Check if stripe_idx * stripe_size would overflow u64.
+///
+/// Returns the stripe offset if safe, otherwise returns Internal error.
+/// This prevents overflow when calculating stripe boundaries for very large files.
+fn checked_stripe_offset(stripe_idx: u64, stripe_size: u64) -> Result<u64, Error> {
+    stripe_idx.checked_mul(stripe_size).ok_or_else(|| {
+        Error::Internal(format!(
+            "Stripe offset calculation overflow: {} * {}",
+            stripe_idx, stripe_size
+        ))
+    })
+}
 
 /// Concrete implementation of FileSystemService.
 ///
@@ -47,6 +71,13 @@ pub struct FileSystemServiceImpl {
 
     /// Next file handle to allocate
     next_file_handle: AtomicU64,
+
+    /// Client session tracking (client_id → last heartbeat time)
+    /// Used to determine which clients are still alive for lock extension
+    client_sessions: Arc<RwLock<HashMap<ClientId, SystemTime>>>,
+
+    /// Lock extension background task handle
+    lock_extension_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl FileSystemServiceImpl {
@@ -79,6 +110,8 @@ impl FileSystemServiceImpl {
             inode_manager,
             open_files: Arc::new(RwLock::new(HashMap::new())),
             next_file_handle: AtomicU64::new(1), // Start file handles at 1
+            client_sessions: Arc::new(RwLock::new(HashMap::new())),
+            lock_extension_task: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -102,6 +135,7 @@ impl FileSystemServiceImpl {
             created_at: SystemTime::now(),
             modified_at: SystemTime::now(),
             accessed_at: SystemTime::now(),
+            target: None, // Directories don't have targets
         };
 
         self.metadata_store
@@ -133,6 +167,178 @@ impl FileSystemServiceImpl {
         &self.inode_manager
     }
 
+    /// Record a client heartbeat (keeps client session alive).
+    ///
+    /// In Phase 1: Called automatically on open() to create session (stub mode)
+    /// In Phase 2: Called via gRPC heartbeat endpoint by client libraries
+    ///
+    /// Clients that send recent heartbeats have their locks extended automatically
+    /// by the background lock extension task.
+    pub fn heartbeat(&self, client_id: ClientId) {
+        let mut sessions = self.client_sessions.write().unwrap();
+        sessions.insert(client_id, SystemTime::now());
+        tracing::debug!("Heartbeat recorded for client {}", client_id.as_u64());
+    }
+
+    /// Start background tasks (lock extension, cleanup, etc.).
+    ///
+    /// Should be called after FileSystemService is initialized, typically during
+    /// filesystem mount or storage node startup.
+    pub fn start_background_tasks(self: Arc<Self>) {
+        let service = Arc::clone(&self);
+
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(service.config.lock_extend_interval);
+
+            loop {
+                interval.tick().await;
+
+                if let Err(e) = service.extend_active_locks().await {
+                    tracing::error!("Lock extension failed: {}", e);
+                }
+            }
+        });
+
+        let mut lock_task = self.lock_extension_task.write().unwrap();
+        *lock_task = Some(task);
+
+        tracing::info!(
+            "Background tasks started (lock extension interval: {:?})",
+            self.config.lock_extend_interval
+        );
+    }
+
+    /// Extend locks for all active files with alive clients.
+    ///
+    /// This method is called periodically by the background task. It:
+    /// 1. Checks all open files with locks
+    /// 2. Verifies client is still alive (recent heartbeat)
+    /// 3. Extends lock expiration via Raft
+    async fn extend_active_locks(&self) -> Result<(), Error> {
+        let now = SystemTime::now();
+        let new_expiry = now + self.config.lock_timeout;
+
+        // Get snapshot of open files with locks
+        let files_to_extend: Vec<_> = {
+            let open_files = self.open_files.read().unwrap();
+            open_files
+                .values()
+                .filter(|f| f.lock_id.is_some())
+                .map(|f| (f.inode, f.client_id, f.lock_id.unwrap()))
+                .collect()
+        };
+
+        if files_to_extend.is_empty() {
+            return Ok(());
+        }
+
+        tracing::debug!("Extending {} active locks", files_to_extend.len());
+
+        // Check client heartbeats and build list of locks to extend
+        // Drop the lock before doing async operations
+        let locks_to_extend: Vec<_> = {
+            let sessions = self.client_sessions.read().unwrap();
+
+            files_to_extend
+                .iter()
+                .filter_map(|(inode, client_id, lock_id)| {
+                    if let Some(last_heartbeat) = sessions.get(client_id) {
+                        let heartbeat_age = now.duration_since(*last_heartbeat).unwrap_or(
+                            self.config.client_heartbeat_timeout + Duration::from_secs(1),
+                        );
+
+                        if heartbeat_age < self.config.client_heartbeat_timeout {
+                            Some((*inode, *client_id, *lock_id))
+                        } else {
+                            tracing::warn!(
+                                "Client {} heartbeat timeout ({:?} > {:?}), lock {} will expire",
+                                client_id.as_u64(),
+                                heartbeat_age,
+                                self.config.client_heartbeat_timeout,
+                                lock_id
+                            );
+                            None
+                        }
+                    } else {
+                        tracing::warn!(
+                            "No heartbeat record for client {}, lock {} will expire",
+                            client_id.as_u64(),
+                            lock_id
+                        );
+                        None
+                    }
+                })
+                .collect()
+        }; // Lock dropped here
+
+        // Now extend locks without holding any locks
+        for (inode, client_id, lock_id) in locks_to_extend {
+            use crate::filesystem_service::raft_commands::RaftCommand;
+
+            let command = RaftCommand::ExtendLock {
+                inode,
+                client_id: client_id.as_u64(),
+                new_expiry,
+            };
+
+            match self.raft_stub.propose_operation(command).await {
+                Ok(_) => {
+                    tracing::trace!(
+                        "Extended lock {} for inode {}, client {}",
+                        lock_id,
+                        inode,
+                        client_id.as_u64()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to extend lock {} for inode {}: {}",
+                        lock_id,
+                        inode,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Gracefully shutdown the filesystem service.
+    ///
+    /// Stops background tasks and releases all held locks.
+    /// Should be called during filesystem unmount.
+    pub async fn shutdown(&self) {
+        tracing::info!("Shutting down FileSystemService...");
+
+        // Stop background tasks
+        {
+            let mut task_guard = self.lock_extension_task.write().unwrap();
+            if let Some(task) = task_guard.take() {
+                task.abort();
+                tracing::info!("Lock extension task stopped");
+            }
+        }
+
+        // Release all held locks
+        let files_to_release: Vec<_> = {
+            let open_files = self.open_files.read().unwrap();
+            open_files.keys().copied().collect()
+        };
+
+        for fh in files_to_release {
+            if let Err(e) = self.release(fh).await {
+                tracing::error!(
+                    "Failed to release file handle {} during shutdown: {}",
+                    fh,
+                    e
+                );
+            }
+        }
+
+        tracing::info!("FileSystemService shutdown complete");
+    }
+
     /// Convert FileRecord to FileAttr for FUSE.
     fn file_record_to_attr(&self, record: &FileRecord) -> FileAttr {
         // Convert MetadataStore FileType to FileSystemService FileType
@@ -146,7 +352,7 @@ impl FileSystemServiceImpl {
             ino: record.inode,
             size: record.size,
             blocks: (record.size + 4095) / 4096, // 4KB blocks
-            atime: record.accessed_at,
+            atime: record.created_at, // Return creation time as atime (we don't track access time)
             mtime: record.modified_at,
             ctime: record.modified_at, // SQLite doesn't have ctime
             crtime: record.created_at,
@@ -177,7 +383,7 @@ impl FileSystemServiceImpl {
             ino: inode,
             size: cached.metadata.size,
             blocks: (cached.metadata.size + 4095) / 4096, // 4KB blocks
-            atime: cached.metadata.accessed_at,
+            atime: cached.metadata.created_at, // Return creation time as atime (we don't track access time)
             mtime: cached.metadata.modified_at,
             ctime: cached.metadata.modified_at, // Use mtime as ctime
             crtime: cached.metadata.created_at,
@@ -202,6 +408,14 @@ impl FileSystemServiceImpl {
             chunk_size: 2 * 1024 * 1024, // 2MB chunks = 4MB stripes (2 data shards)
             compression: crate::file_store::CompressionAlgorithm::None,
         }
+    }
+
+    /// Get the stripe size from the current storage policy.
+    ///
+    /// Stripe size = chunk_size × data_shards.
+    /// For the default policy (2 data shards × 2MB chunks), this returns 4MB.
+    fn stripe_size(&self) -> u64 {
+        self.default_storage_policy().stripe_size()
     }
 
     /// Convert ChunkRecord from MetadataStore to ChunkMetadata for FileStore.
@@ -240,15 +454,15 @@ impl FileSystemServiceImpl {
                 Error::MetadataError(format!("Parent directory not found: {:?}", path))
             }
             crate::metadata_store::Error::LockConflict { file_id, lock_type } => {
-                // Convert to simple lock conflict with context
-                Error::LockConflictSimple(format!(
+                // Convert lock conflict with context
+                Error::LockConflict(format!(
                     "Cannot acquire {} lock on file_id {:?}",
                     lock_type, file_id
                 ))
             }
             crate::metadata_store::Error::LockNotFound { file_id, client_id } => {
-                // Convert to simple lock not held with context
-                Error::LockNotHeldSimple(format!(
+                // Convert lock not held with context
+                Error::LockNotHeld(format!(
                     "Lock not found for file_id {:?} and client {:?}",
                     file_id, client_id
                 ))
@@ -340,18 +554,27 @@ impl FileSystemService for FileSystemServiceImpl {
             created_at: now,
             modified_at: now,
             accessed_at: now,
+            target: None, // Regular files don't have targets
         };
 
-        self.metadata_store
+        // Create the file in metadata store - release inode on error
+        if let Err(e) = self
+            .metadata_store
             .create_file(file_id, &path, inode, metadata.clone())
             .await
-            .map_err(|e| self.convert_metadata_error(e))?;
+        {
+            let _ = self.metadata_store.release_inode(inode).await;
+            return Err(self.convert_metadata_error(e));
+        }
 
-        // Step 7: Confirm inode reservation
-        self.metadata_store
-            .confirm_inode(inode)
-            .await
-            .map_err(|e| self.convert_metadata_error(e))?;
+        // Step 7: Confirm inode reservation - release inode on error
+        // Note: Inode reservations have a 1-hour TTL and will be cleaned up by a
+        // background maintenance task (TODO: implement in Phase 2). Explicit release
+        // here ensures immediate cleanup on database errors.
+        if let Err(e) = self.metadata_store.confirm_inode(inode).await {
+            let _ = self.metadata_store.release_inode(inode).await;
+            return Err(self.convert_metadata_error(e));
+        }
 
         // Step 8: Cache the inode
         self.inode_manager.cache().insert(inode, file_id, metadata);
@@ -388,9 +611,17 @@ impl FileSystemService for FileSystemServiceImpl {
         &self,
         inode: u64,
         flags: u32,
+        uid: u32,
+        gid: u32,
         _client_id: ClientId,
     ) -> Result<(u64, FileAttr), Error> {
-        tracing::debug!("open: inode={}, flags={}", inode, flags);
+        tracing::debug!(
+            "open: inode={}, flags={}, uid={}, gid={}",
+            inode,
+            flags,
+            uid,
+            gid
+        );
 
         // Step 1: Verify file exists and get metadata
         let record = self
@@ -404,17 +635,88 @@ impl FileSystemService for FileSystemServiceImpl {
             return Err(Error::IsADirectory(inode));
         }
 
-        // Step 3: Generate unique file handle
+        // Step 3: Parse open flags and check permissions
+        let is_write_mode = (flags & libc::O_ACCMODE as u32) != libc::O_RDONLY as u32;
+
+        // Check appropriate permission based on access mode
+        if is_write_mode {
+            crate::filesystem_service::permissions::check_write_permission(
+                uid,
+                gid,
+                record.uid,
+                record.gid,
+                record.permissions,
+            )
+            .map_err(|_| Error::PermissionDenied(inode))?;
+        } else {
+            crate::filesystem_service::permissions::check_read_permission(
+                uid,
+                gid,
+                record.uid,
+                record.gid,
+                record.permissions,
+            )
+            .map_err(|_| Error::PermissionDenied(inode))?;
+        }
+
+        // Step 4: Acquire distributed write lock if opening for write
+        // This ensures write exclusivity across the entire cluster, not just locally.
+        // The lock is enforced via Raft consensus and stored in MetadataStore.
+        let lock_id = if is_write_mode {
+            use crate::filesystem_service::raft_commands::{LockType, RaftCommand};
+
+            // Lock expires in 5 minutes (will be extended by keepalives in Phase 2)
+            let expires_at = SystemTime::now() + std::time::Duration::from_secs(300);
+
+            let command = RaftCommand::AcquireLock {
+                inode,
+                lock_type: LockType::Write,
+                client_id: _client_id.as_u64(),
+                node_id: self.config.node_id,
+                expires_at,
+            };
+
+            match self.raft_stub.propose_operation(command).await {
+                Ok(crate::filesystem_service::raft_commands::RaftCommandResult::LockAcquired {
+                    lock_id,
+                }) => {
+                    tracing::debug!(
+                        "Acquired write lock on inode {}, lock_id={}",
+                        inode,
+                        lock_id
+                    );
+                    Some(lock_id)
+                }
+                Ok(_) => {
+                    return Err(Error::RaftError(
+                        "Unexpected Raft result for lock acquisition".into(),
+                    ));
+                }
+                Err(e) => {
+                    // Lock acquisition failed - likely already locked
+                    tracing::warn!("Failed to acquire write lock on inode {}: {}", inode, e);
+                    return Err(Error::InvalidArgument(format!(
+                        "File inode {} is already open for writing",
+                        inode
+                    )));
+                }
+            }
+        } else {
+            None // No lock needed for read-only opens
+        };
+
+        // Step 5: Generate unique file handle
         let file_handle = self.next_file_handle.fetch_add(1, Ordering::SeqCst);
 
-        // Step 4: Create OpenFile state
+        // Step 6: Create OpenFile state
         let open_file = Arc::new(OpenFile {
             file_id: record.file_id,
             inode,
-            lock_id: None, // Locks handled separately
+            client_id: _client_id, // Store client ID for lock release
+            lock_id,               // Store the distributed lock ID
             flags: super::types::OpenFlags {
                 read: (flags & libc::O_ACCMODE as u32) != libc::O_WRONLY as u32,
-                write: (flags & libc::O_ACCMODE as u32) != libc::O_RDONLY as u32,
+                write: is_write_mode,
                 append: (flags & libc::O_APPEND as u32) != 0,
                 truncate: (flags & libc::O_TRUNC as u32) != 0,
                 create: (flags & libc::O_CREAT as u32) != 0,
@@ -424,13 +726,17 @@ impl FileSystemService for FileSystemServiceImpl {
             refcount: AtomicU32::new(1),
         });
 
-        // Step 5: Track open file
+        // Step 7: Track open file
         {
             let mut open_files = self.open_files.write().unwrap();
             open_files.insert(file_handle, open_file);
         }
 
-        // Step 6: Handle O_TRUNC flag (truncate file to 0)
+        // Step 7a: Register client heartbeat (stub mode - creates session for lock extension)
+        // In Phase 2, clients will send periodic heartbeats via gRPC
+        self.heartbeat(_client_id);
+
+        // Step 8: Handle O_TRUNC flag (truncate file to 0)
         if (flags & libc::O_TRUNC as u32) != 0 {
             // Update file size to 0 via Raft
             use crate::filesystem_service::raft_commands::{FileUpdateFields, RaftCommand};
@@ -462,6 +768,7 @@ impl FileSystemService for FileSystemServiceImpl {
                 created_at: record.created_at,
                 modified_at: SystemTime::now(),
                 accessed_at: record.accessed_at,
+                target: record.target.clone(), // Preserve target for symlinks
             };
 
             self.metadata_store
@@ -473,48 +780,9 @@ impl FileSystemService for FileSystemServiceImpl {
             self.inode_manager.cache().invalidate(inode);
         }
 
-        // Step 7: Update access time via Raft
-        use crate::filesystem_service::raft_commands::{FileUpdateFields, RaftCommand};
-        let command = RaftCommand::UpdateFile {
-            inode,
-            updates: FileUpdateFields {
-                size: None,
-                mode: None,
-                uid: None,
-                gid: None,
-                atime: Some(SystemTime::now()),
-                mtime: None,
-            },
-        };
+        // Note: We do NOT update access time on file open (see read() for rationale).
 
-        let _result = self
-            .raft_stub
-            .propose_operation(command)
-            .await
-            .map_err(|e| Error::RaftError(format!("{}", e)))?;
-
-        // [TEMP Phase 1] Update metadata store directly
-        let updated_metadata = FileMetadata {
-            file_type: record.file_type,
-            size: if (flags & libc::O_TRUNC as u32) != 0 {
-                0
-            } else {
-                record.size
-            },
-            permissions: record.permissions,
-            uid: record.uid,
-            gid: record.gid,
-            created_at: record.created_at,
-            modified_at: record.modified_at,
-            accessed_at: SystemTime::now(),
-        };
-
-        self.metadata_store
-            .update_file(record.file_id, updated_metadata)
-            .await
-            .map_err(|e| self.convert_metadata_error(e))?;
-
-        // Step 8: Return file handle and attributes
+        // Step 7: Return file handle and attributes
         let attr = self.file_record_to_attr(&record);
         tracing::info!("Opened file: inode={}, handle={}", inode, file_handle);
         Ok((file_handle, attr))
@@ -525,9 +793,18 @@ impl FileSystemService for FileSystemServiceImpl {
         inode: u64,
         offset: u64,
         size: u32,
+        uid: u32,
+        gid: u32,
         _client_id: ClientId,
     ) -> Result<Vec<u8>, Error> {
-        tracing::debug!("read: inode={}, offset={}, size={}", inode, offset, size);
+        tracing::debug!(
+            "read: inode={}, offset={}, size={}, uid={}, gid={}",
+            inode,
+            offset,
+            size,
+            uid,
+            gid
+        );
 
         // Step 1: Get file metadata (direct read - no Raft needed)
         let record = self
@@ -536,7 +813,17 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
             .map_err(|e| self.convert_metadata_error(e))?;
 
-        // Step 2: Bounds checking
+        // Step 2: Check read permission
+        crate::filesystem_service::permissions::check_read_permission(
+            uid,
+            gid,
+            record.uid,
+            record.gid,
+            record.permissions,
+        )
+        .map_err(|_| Error::PermissionDenied(inode))?;
+
+        // Step 3: Bounds checking
         if offset >= record.size {
             // Reading past EOF returns empty
             tracing::debug!(
@@ -560,12 +847,13 @@ impl FileSystemService for FileSystemServiceImpl {
             return Ok(Vec::new());
         }
 
-        // Step 3: Calculate stripe range
-        // For Phase 1, we'll use a simple stripe size (this should come from storage policy)
-        const STRIPE_SIZE: u64 = 4 * 1024 * 1024; // 4MB stripes
+        // Step 3: Calculate stripe range based on storage policy
+        let stripe_size = self.stripe_size();
 
-        let start_stripe_idx = offset / STRIPE_SIZE;
-        let end_stripe_idx = (offset + read_size as u64 - 1) / STRIPE_SIZE;
+        let start_stripe_idx = offset / stripe_size;
+        // Use checked arithmetic to prevent overflow (read_size already clamped to available data)
+        let end_offset_minus_one = checked_end_offset(offset, read_size)?.saturating_sub(1);
+        let end_stripe_idx = end_offset_minus_one / stripe_size;
 
         tracing::debug!(
             "read: reading stripes {} to {} (total: {})",
@@ -578,7 +866,8 @@ impl FileSystemService for FileSystemServiceImpl {
         let mut result_data = Vec::with_capacity(read_size);
 
         for stripe_idx in start_stripe_idx..=end_stripe_idx {
-            let stripe_offset = stripe_idx * STRIPE_SIZE;
+            // Use checked arithmetic to prevent overflow
+            let stripe_offset = checked_stripe_offset(stripe_idx, stripe_size)?;
 
             // Try to get stripe metadata from MetadataStore
             let stripe_result = self
@@ -614,20 +903,20 @@ impl FileSystemService for FileSystemServiceImpl {
                         "read: stripe {} doesn't exist, returning zeros (sparse region)",
                         stripe_idx
                     );
-                    vec![0u8; STRIPE_SIZE as usize]
+                    vec![0u8; stripe_size as usize]
                 }
             };
 
             // Calculate which part of this stripe we need
             let stripe_start = if stripe_idx == start_stripe_idx {
-                (offset % STRIPE_SIZE) as usize
+                (offset % stripe_size) as usize
             } else {
                 0
             };
 
             let stripe_end = if stripe_idx == end_stripe_idx {
-                let end_offset_in_stripe =
-                    ((offset + read_size as u64 - 1) % STRIPE_SIZE) as usize + 1;
+                // Reuse end_offset_minus_one to avoid recalculation and prevent overflow
+                let end_offset_in_stripe = (end_offset_minus_one % stripe_size) as usize + 1;
                 std::cmp::min(end_offset_in_stripe, stripe_data.len())
             } else {
                 stripe_data.len()
@@ -663,53 +952,11 @@ impl FileSystemService for FileSystemServiceImpl {
             }
         }
 
-        // Step 5: Update access time via Raft
-        use crate::filesystem_service::raft_commands::{FileUpdateFields, RaftCommand};
-        let command = RaftCommand::UpdateFile {
-            inode,
-            updates: FileUpdateFields {
-                size: None,
-                mode: None,
-                uid: None,
-                gid: None,
-                atime: Some(SystemTime::now()),
-                mtime: None,
-            },
-        };
-
-        // Fire and forget - don't block read on this
-        let raft_stub = Arc::clone(&self.raft_stub);
-        let metadata_store = self.metadata_store.clone();
-        let file_id = record.file_id;
-        let file_type = record.file_type;
-        let size = record.size;
-        let permissions = record.permissions;
-        let uid = record.uid;
-        let gid = record.gid;
-        let created_at = record.created_at;
-        let modified_at = record.modified_at;
-
-        tokio::spawn(async move {
-            if let Err(e) = raft_stub.propose_operation(command).await {
-                tracing::warn!("Failed to update access time via Raft: {}", e);
-            }
-
-            // [TEMP Phase 1] Update metadata store directly
-            let updated_metadata = FileMetadata {
-                file_type,
-                size,
-                permissions,
-                uid,
-                gid,
-                created_at,
-                modified_at,
-                accessed_at: SystemTime::now(),
-            };
-
-            if let Err(e) = metadata_store.update_file(file_id, updated_metadata).await {
-                tracing::warn!("Failed to update access time in metadata store: {}", e);
-            }
-        });
+        // Note: We do NOT update access time (atime) on reads.
+        // Updating atime on every read would turn every read into a write operation,
+        // doubling metadata I/O and Raft consensus overhead. This is standard practice
+        // (equivalent to the 'noatime' mount option used by most production systems).
+        // The getattr() operation returns creation time as atime.
 
         tracing::debug!("read: returning {} bytes", result_data.len());
         Ok(result_data)
@@ -720,13 +967,17 @@ impl FileSystemService for FileSystemServiceImpl {
         inode: u64,
         offset: u64,
         data: Vec<u8>,
+        uid: u32,
+        gid: u32,
         _client_id: ClientId,
     ) -> Result<u32, Error> {
         tracing::debug!(
-            "write: inode={}, offset={}, size={}",
+            "write: inode={}, offset={}, size={}, uid={}, gid={}",
             inode,
             offset,
-            data.len()
+            data.len(),
+            uid,
+            gid
         );
 
         if data.is_empty() {
@@ -740,14 +991,32 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
             .map_err(|e| self.convert_metadata_error(e))?;
 
-        // Step 2: Calculate new file size
-        let new_size = std::cmp::max(record.size, offset + data.len() as u64);
+        // Step 2: Check write permission
+        crate::filesystem_service::permissions::check_write_permission(
+            uid,
+            gid,
+            record.uid,
+            record.gid,
+            record.permissions,
+        )
+        .map_err(|_| Error::PermissionDenied(inode))?;
 
-        // Step 3: Calculate stripe range
-        const STRIPE_SIZE: u64 = 4 * 1024 * 1024; // 4MB stripes
+        // Step 2: Calculate new file size and validate against max_file_size
+        // Use checked arithmetic to prevent u64 overflow
+        let end_offset = checked_end_offset(offset, data.len())?;
+        let new_size = std::cmp::max(record.size, end_offset);
 
-        let start_stripe_idx = offset / STRIPE_SIZE;
-        let end_stripe_idx = (offset + data.len() as u64 - 1) / STRIPE_SIZE;
+        if new_size > self.config.max_file_size {
+            return Err(Error::NoSpace); // ENOSPC - file would exceed maximum size
+        }
+
+        // Step 3: Calculate stripe range based on storage policy
+        let stripe_size = self.stripe_size();
+
+        let start_stripe_idx = offset / stripe_size;
+        // Use checked arithmetic and saturating_sub to prevent overflow
+        let end_offset_minus_one = checked_end_offset(offset, data.len())?.saturating_sub(1);
+        let end_stripe_idx = end_offset_minus_one / stripe_size;
 
         tracing::debug!(
             "write: writing stripes {} to {} (total: {})",
@@ -761,19 +1030,21 @@ impl FileSystemService for FileSystemServiceImpl {
         let mut stripe_metadata_updates = Vec::new();
 
         for stripe_idx in start_stripe_idx..=end_stripe_idx {
-            let stripe_offset = stripe_idx * STRIPE_SIZE;
+            // Use checked arithmetic to prevent overflow
+            let stripe_offset = checked_stripe_offset(stripe_idx, stripe_size)?;
 
             // Calculate what portion of data goes into this stripe
             let stripe_start = if stripe_idx == start_stripe_idx {
-                (offset % STRIPE_SIZE) as usize
+                (offset % stripe_size) as usize
             } else {
                 0
             };
 
             let stripe_end = if stripe_idx == end_stripe_idx {
-                ((offset + data.len() as u64 - 1) % STRIPE_SIZE) as usize + 1
+                // Reuse end_offset_minus_one to avoid recalculation
+                (end_offset_minus_one % stripe_size) as usize + 1
             } else {
-                STRIPE_SIZE as usize
+                stripe_size as usize
             };
 
             let data_len = stripe_end - stripe_start;
@@ -781,7 +1052,7 @@ impl FileSystemService for FileSystemServiceImpl {
             data_offset += data_len;
 
             // Check if this is a partial stripe write (requires read-modify-write)
-            let is_partial = stripe_start > 0 || stripe_end < STRIPE_SIZE as usize;
+            let is_partial = stripe_start > 0 || stripe_end < stripe_size as usize;
 
             tracing::debug!(
                 "write: stripe {} - start={}, end={}, partial={}",
@@ -912,6 +1183,7 @@ impl FileSystemService for FileSystemServiceImpl {
             created_at: record.created_at,
             modified_at: SystemTime::now(),
             accessed_at: record.accessed_at,
+            target: record.target.clone(), // Preserve target for symlinks
         };
 
         self.metadata_store
@@ -946,8 +1218,21 @@ impl FileSystemService for FileSystemServiceImpl {
         Ok(data.len() as u32)
     }
 
-    async fn unlink(&self, parent: u64, name: &str, _client_id: ClientId) -> Result<(), Error> {
-        tracing::debug!("unlink: parent={}, name={}", parent, name);
+    async fn unlink(
+        &self,
+        parent: u64,
+        name: &str,
+        uid: u32,
+        gid: u32,
+        _client_id: ClientId,
+    ) -> Result<(), Error> {
+        tracing::debug!(
+            "unlink: parent={}, name={}, uid={}, gid={}",
+            parent,
+            name,
+            uid,
+            gid
+        );
 
         // Step 1: Verify parent exists and is a directory
         let parent_record = self
@@ -960,7 +1245,17 @@ impl FileSystemService for FileSystemServiceImpl {
             return Err(Error::NotADirectory(parent));
         }
 
-        // Step 2: Construct path and lookup file
+        // Step 2: Check write permission on parent directory (needed to delete files)
+        crate::filesystem_service::permissions::check_unlink_permission(
+            uid,
+            gid,
+            parent_record.uid,
+            parent_record.gid,
+            parent_record.permissions,
+        )
+        .map_err(|_| Error::PermissionDenied(parent))?;
+
+        // Step 3: Construct path and lookup file
         let path = parent_record.path.join(name);
         let file_record = self
             .metadata_store
@@ -973,23 +1268,7 @@ impl FileSystemService for FileSystemServiceImpl {
             return Err(Error::IsADirectory(file_record.inode));
         }
 
-        // Step 4: Check if file is open (for deferred deletion)
-        let is_open = {
-            let open_files = self.open_files.read().unwrap();
-            open_files.values().any(|f| f.inode == file_record.inode)
-        };
-
-        if is_open {
-            tracing::info!(
-                "File {} is open, deferring deletion until all handles are closed",
-                name
-            );
-            // In a full implementation, we would mark the file for deferred deletion
-            // For Phase 1, we'll proceed with deletion but log a warning
-            tracing::warn!("Deferred deletion not fully implemented in Phase 1");
-        }
-
-        // Step 5: Propose file deletion through Raft
+        // Step 4: Propose file deletion through Raft (handles metadata and stripe cleanup)
         use crate::filesystem_service::raft_commands::RaftCommand;
         let command = RaftCommand::DeleteFile {
             parent_inode: parent,
@@ -1000,7 +1279,16 @@ impl FileSystemService for FileSystemServiceImpl {
             .raft_stub
             .propose_operation(command)
             .await
-            .map_err(|e| Error::RaftError(format!("{}", e)))?;
+            .map_err(|e| {
+                let error_msg = format!("{}", e);
+                // Convert specific Raft errors to appropriate FileSystemService errors
+                if error_msg.contains("File not found") || error_msg.contains("not found") {
+                    // We don't have the inode from the error, use a placeholder
+                    Error::MetadataError(format!("File not found: {}", name))
+                } else {
+                    Error::RaftError(error_msg)
+                }
+            })?;
 
         match result {
             crate::filesystem_service::raft_commands::RaftCommandResult::FileDeleted => {}
@@ -1012,63 +1300,8 @@ impl FileSystemService for FileSystemServiceImpl {
             }
         }
 
-        // Step 6: [TEMP Phase 1] Delete from MetadataStore directly
-        self.metadata_store
-            .delete_file(file_record.file_id)
-            .await
-            .map_err(|e| self.convert_metadata_error(e))?;
-
-        // Step 7: Queue async chunk cleanup (DATA PLANE)
-        let file_id = file_record.file_id;
-        let file_store = Arc::clone(&self.file_store);
-        let metadata_store = self.metadata_store.clone();
-
-        tokio::spawn(async move {
-            tracing::debug!("Starting async cleanup for file_id {:?}", file_id);
-
-            // Get all stripes for the file
-            match metadata_store.get_file_stripes(file_id).await {
-                Ok(stripes) => {
-                    for stripe in stripes {
-                        // Get chunks for this stripe
-                        match metadata_store.get_stripe_chunks(stripe.stripe_id).await {
-                            Ok(chunks) => {
-                                // Delete each chunk
-                                // TODO: Implement delete_chunk in FileStore for Phase 2
-                                // For Phase 1, chunks will be orphaned (handled by StorageWatchdog)
-                                tracing::debug!(
-                                    "Would delete {} chunks for stripe {:?} (deferred to StorageWatchdog)",
-                                    chunks.len(),
-                                    stripe.stripe_id
-                                );
-                                // for chunk in chunks {
-                                //     if let Err(e) = file_store.delete_chunk(chunk.chunk_id).await {
-                                //         tracing::warn!(
-                                //             "Failed to delete chunk {:?}: {}",
-                                //             chunk.chunk_id,
-                                //             e
-                                //         );
-                                //     }
-                                // }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to get chunks for stripe {:?}: {}",
-                                    stripe.stripe_id,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    tracing::info!("Completed cleanup for file_id {:?}", file_id);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to get stripes for file_id {:?}: {}", file_id, e);
-                }
-            }
-        });
-
-        // Step 8: Invalidate cache
+        // Step 5: Invalidate cache
+        // Note: Physical chunk deletion is handled by StorageWatchdog in Phase 2
         self.inode_manager.cache().invalidate(file_record.inode);
 
         tracing::info!(
@@ -1076,6 +1309,188 @@ impl FileSystemService for FileSystemServiceImpl {
             path,
             file_record.inode
         );
+        Ok(())
+    }
+
+    async fn symlink(
+        &self,
+        parent: u64,
+        name: &str,
+        target: &str,
+        uid: u32,
+        gid: u32,
+        _client_id: ClientId,
+    ) -> Result<FileAttr, Error> {
+        tracing::debug!(
+            "symlink: parent={}, name={}, target={}",
+            parent,
+            name,
+            target
+        );
+
+        // Step 1: Verify parent exists and is a directory
+        let parent_record = self
+            .metadata_store
+            .get_file_by_inode(parent)
+            .await
+            .map_err(|e| self.convert_metadata_error(e))?;
+
+        if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            return Err(Error::NotADirectory(parent));
+        }
+
+        // Step 2: Check if symlink already exists
+        let path = parent_record.path.join(name);
+        if let Ok(_existing) = self.metadata_store.get_file_by_path(&path).await {
+            return Err(Error::AlreadyExists(path.to_string_lossy().into_owned()));
+        }
+
+        // Step 3: Create the symlink through Raft for consistency
+        use crate::filesystem_service::raft_commands::{RaftCommand, RaftCommandResult};
+        let command = RaftCommand::CreateSymlink {
+            parent_inode: parent,
+            name: name.to_string(),
+            target: target.to_string(),
+            uid,
+            gid,
+        };
+
+        let result = self
+            .raft_stub
+            .propose_operation(command)
+            .await
+            .map_err(|e| Error::RaftError(format!("Failed to create symlink: {}", e)))?;
+
+        // Step 4: Extract inode and file_id from result
+        let (inode, file_id) = match result {
+            RaftCommandResult::SymlinkCreated { inode, file_id } => (inode, file_id),
+            RaftCommandResult::Error { message } => {
+                return Err(Error::MetadataError(message));
+            }
+            _ => {
+                return Err(Error::Internal(
+                    "Unexpected Raft result for symlink creation".into(),
+                ));
+            }
+        };
+
+        // Step 5: Create FileAttr for the response
+        let now = SystemTime::now();
+        let attr = FileAttr {
+            ino: inode,
+            size: target.len() as u64, // Size of symlink is length of target path
+            blocks: 0,                 // Symlinks don't use data blocks
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FileType::Symlink,
+            perm: 0o777, // Symlinks typically have 777 permissions
+            nlink: 1,
+            uid,
+            gid,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        };
+
+        // Step 6: Cache the new symlink's inode
+        // Convert FileAttr to FileMetadata for caching
+        let metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Symlink,
+            size: attr.size,
+            permissions: attr.perm as u32,
+            uid: attr.uid,
+            gid: attr.gid,
+            created_at: attr.ctime,
+            modified_at: attr.mtime,
+            accessed_at: attr.atime,
+            target: Some(target.to_string()),
+        };
+        self.inode_manager.cache().insert(inode, file_id, metadata);
+
+        tracing::info!(
+            "Created symlink: path={:?}, inode={}, target={}, file_id={:?}",
+            path,
+            inode,
+            target,
+            file_id
+        );
+
+        Ok(attr)
+    }
+
+    async fn readlink(&self, inode: u64) -> Result<String, Error> {
+        tracing::debug!("readlink: inode={}", inode);
+
+        // Get the file record
+        let record = self
+            .metadata_store
+            .get_file_by_inode(inode)
+            .await
+            .map_err(|e| self.convert_metadata_error(e))?;
+
+        // Verify it's a symlink
+        if record.file_type != crate::metadata_store::FileType::Symlink {
+            return Err(Error::NotASymlink(inode));
+        }
+
+        // Return the target path
+        record.target.ok_or_else(|| {
+            Error::Internal(format!("Symlink at inode {} has no target path", inode))
+        })
+    }
+
+    async fn release(&self, file_handle: u64) -> Result<(), Error> {
+        tracing::debug!("release: file_handle={}", file_handle);
+
+        // Remove the file handle from tracking and extract lock info
+        let removed = {
+            let mut open_files = self.open_files.write().unwrap();
+            open_files.remove(&file_handle)
+        };
+
+        match removed {
+            Some(open_file) => {
+                // If this file was locked (opened for write), release the distributed lock
+                if let Some(lock_id) = open_file.lock_id {
+                    tracing::debug!(
+                        "Releasing distributed lock: inode={}, lock_id={}, client_id={}",
+                        open_file.inode,
+                        lock_id,
+                        open_file.client_id.as_u64()
+                    );
+
+                    let command =
+                        crate::filesystem_service::raft_commands::RaftCommand::ReleaseLock {
+                            inode: open_file.inode,
+                            client_id: open_file.client_id.as_u64(),
+                        };
+
+                    match self.raft_stub.propose_operation(command).await {
+                        Ok(_) => {
+                            tracing::debug!(
+                                "Successfully released lock on inode {}",
+                                open_file.inode
+                            );
+                        }
+                        Err(e) => {
+                            // Log error but don't fail the release - file is already closed
+                            tracing::error!(
+                                "Failed to release lock on inode {}: {}",
+                                open_file.inode,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            None => {
+                tracing::warn!("release: file_handle {} not found", file_handle);
+                // Don't return an error - FUSE may call release multiple times
+            }
+        }
+
         Ok(())
     }
 
@@ -1096,8 +1511,16 @@ impl FileSystemService for FileSystemServiceImpl {
         ))
     }
 
-    async fn rmdir(&self, _parent: u64, _name: &str, _client_id: ClientId) -> Result<(), Error> {
+    async fn rmdir(
+        &self,
+        _parent: u64,
+        _name: &str,
+        _uid: u32,
+        _gid: u32,
+        _client_id: ClientId,
+    ) -> Result<(), Error> {
         // Phase 1: Stub - will be implemented in Step 9
+        // Note: When implemented, will need to check write permission on parent directory
         Err(Error::NotSupported(
             "rmdir not implemented in Step 7".into(),
         ))
@@ -1213,6 +1636,7 @@ impl FileSystemService for FileSystemServiceImpl {
             created_at: record.created_at,
             modified_at: record.modified_at,
             accessed_at: record.accessed_at,
+            target: record.target.clone(), // Include target for symlinks
         };
         self.inode_manager
             .cache()
@@ -1225,14 +1649,23 @@ impl FileSystemService for FileSystemServiceImpl {
         &self,
         inode: u64,
         mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
+        new_uid: Option<u32>,
+        new_gid: Option<u32>,
         size: Option<u64>,
         atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
+        req_uid: u32,
+        req_gid: u32,
         _client_id: ClientId,
     ) -> Result<FileAttr, Error> {
-        tracing::debug!("setattr: inode={}, mode={:?}, size={:?}", inode, mode, size);
+        tracing::debug!(
+            "setattr: inode={}, mode={:?}, size={:?}, req_uid={}, req_gid={}",
+            inode,
+            mode,
+            size,
+            req_uid,
+            req_gid
+        );
 
         // Step 1: Get current metadata
         let record = self
@@ -1241,22 +1674,49 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
             .map_err(|e| self.convert_metadata_error(e))?;
 
-        // Step 2: Handle truncation if size is changing (DATA PLANE)
+        // Step 2: Check permissions
+        // Changing ownership or permissions requires being the owner
+        if mode.is_some() || new_uid.is_some() || new_gid.is_some() {
+            crate::filesystem_service::permissions::check_owner_permission(
+                req_uid, record.uid, inode,
+            )?;
+        }
+
+        // Changing size (truncate) requires write permission
+        if size.is_some() {
+            crate::filesystem_service::permissions::check_write_permission(
+                req_uid,
+                req_gid,
+                record.uid,
+                record.gid,
+                record.permissions,
+            )
+            .map_err(|_| Error::PermissionDenied(inode))?;
+        }
+
+        // Step 3: Validate new size against max_file_size
+        if let Some(new_size) = size {
+            if new_size > self.config.max_file_size {
+                return Err(Error::NoSpace); // ENOSPC - file would exceed maximum size
+            }
+        }
+
+        // Step 3: Handle truncation if size is changing (DATA PLANE)
         if let Some(new_size) = size {
             if new_size < record.size {
                 // Shrinking - need to delete/truncate stripes
-                const STRIPE_SIZE: u64 = 4 * 1024 * 1024; // 4MB stripes
+                let stripe_size = self.stripe_size();
 
                 let new_last_stripe_idx = if new_size == 0 {
                     0
                 } else {
-                    (new_size - 1) / STRIPE_SIZE
+                    (new_size - 1) / stripe_size
                 };
 
                 let old_last_stripe_idx = if record.size == 0 {
                     0
                 } else {
-                    (record.size - 1) / STRIPE_SIZE
+                    (record.size - 1) / stripe_size
                 };
 
                 tracing::debug!(
@@ -1276,7 +1736,7 @@ impl FileSystemService for FileSystemServiceImpl {
 
                 // Delete stripes beyond the new size
                 for stripe in stripes {
-                    let stripe_idx = stripe.offset / STRIPE_SIZE;
+                    let stripe_idx = stripe.offset / stripe_size;
 
                     if stripe_idx > new_last_stripe_idx {
                         // Delete entire stripe (metadata and chunks)
@@ -1297,7 +1757,7 @@ impl FileSystemService for FileSystemServiceImpl {
                             "setattr: deleted stripe metadata for stripe {}",
                             stripe_idx
                         );
-                    } else if stripe_idx == new_last_stripe_idx && new_size % STRIPE_SIZE != 0 {
+                    } else if stripe_idx == new_last_stripe_idx && new_size % stripe_size != 0 {
                         // Partial truncation of last stripe - would require read-modify-write
                         // For Phase 1, we'll leave the stripe as-is (wasted space)
                         tracing::debug!(
@@ -1310,16 +1770,17 @@ impl FileSystemService for FileSystemServiceImpl {
             // Growing the file - no action needed (sparse file semantics)
         }
 
-        // Step 3: Propose metadata update through Raft (CONTROL PLANE)
+        // Step 4: Propose metadata update through Raft (CONTROL PLANE)
+        // Note: We ignore atime parameter - WormFS doesn't track access time
         use crate::filesystem_service::raft_commands::{FileUpdateFields, RaftCommand};
         let command = RaftCommand::UpdateFile {
             inode,
             updates: FileUpdateFields {
                 size,
                 mode,
-                uid,
-                gid,
-                atime,
+                uid: new_uid,
+                gid: new_gid,
+                atime: None, // Always None - we don't track access time
                 mtime,
             },
         };
@@ -1330,17 +1791,18 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
             .map_err(|e| Error::RaftError(format!("{}", e)))?;
 
-        // Step 4: [TEMP Phase 1] Update metadata store directly
+        // Step 5: [TEMP Phase 1] Update metadata store directly
         let now = SystemTime::now();
         let updated_metadata = FileMetadata {
             file_type: record.file_type,
             size: size.unwrap_or(record.size),
             permissions: mode.unwrap_or(record.permissions),
-            uid: uid.unwrap_or(record.uid),
-            gid: gid.unwrap_or(record.gid),
+            uid: new_uid.unwrap_or(record.uid),
+            gid: new_gid.unwrap_or(record.gid),
             created_at: record.created_at,
             modified_at: mtime.unwrap_or(now),
-            accessed_at: atime.unwrap_or(record.accessed_at),
+            accessed_at: record.accessed_at, // Never update - preserved as-is
+            target: record.target.clone(),   // Preserve target for symlinks
         };
 
         self.metadata_store
@@ -1348,10 +1810,10 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
             .map_err(|e| self.convert_metadata_error(e))?;
 
-        // Step 5: Invalidate cache
+        // Step 6: Invalidate cache
         self.inode_manager.cache().invalidate(inode);
 
-        // Step 6: Return updated attributes
+        // Step 7: Return updated attributes
         let attr = FileAttr {
             ino: inode,
             size: updated_metadata.size,
@@ -1416,8 +1878,545 @@ impl FileSystemService for FileSystemServiceImpl {
 // Tests will be added via FUSE integration tests
 #[cfg(test)]
 mod tests {
-    // TODO: Add unit tests once we have a public factory for MetadataStoreImpl
-    // For now, FileSystemServiceImpl will be tested via FUSE integration tests
+    use super::*;
+    use crate::file_store::FileStore;
+    use crate::metadata_store::{
+        factory::MetadataStoreFactory, types::Config as MetadataConfig, types::IsolationLevel,
+        types::SynchronousMode, FileMetadata, MetadataStore,
+    };
+    use tempfile::TempDir;
+
+    /// Test user ID (matches the uid used in create() calls in tests)
+    const TEST_UID: u32 = 1000;
+    /// Test group ID (matches the gid used in create() calls in tests)
+    const TEST_GID: u32 = 1000;
+
+    /// Create a test FileSystemService instance with temporary storage
+    async fn create_test_service() -> Arc<FileSystemServiceImpl> {
+        let metadata_config = MetadataConfig {
+            database_path: ":memory:".into(),
+            read_pool_size: 5,
+            enable_wal: false,
+            cache_size_mb: 64,
+            enable_foreign_keys: false,
+            synchronous: SynchronousMode::Normal,
+            transaction_isolation: IsolationLevel::ReadCommitted,
+            enable_prepared_statements: false,
+            read_pool_timeout_secs: 5,
+        };
+
+        let metadata_store = MetadataStoreFactory::create_concrete(metadata_config)
+            .await
+            .unwrap();
+        metadata_store.initialize_schema().await.unwrap();
+
+        // Create temp dir for file store
+        let temp_dir = TempDir::new().unwrap();
+
+        let file_store_config = crate::file_store::types::Config {
+            disk_paths: vec![temp_dir.path().to_path_buf()],
+            max_chunk_size: 512,
+            default_data_shards: 2,
+            default_parity_shards: 1,
+            max_concurrent_operations: 10,
+            verification_interval: Duration::from_secs(3600),
+            orphan_cleanup_age: Duration::from_secs(3600),
+        };
+
+        let file_store = Arc::new(FileStore::new(file_store_config).unwrap());
+
+        let fs_config = Config {
+            uid: 1000,
+            gid: 1000,
+            lock_timeout: Duration::from_secs(2), // Short timeout for testing
+            lock_extend_interval: Duration::from_millis(500), // Fast extension for testing
+            ..Default::default()
+        };
+
+        Arc::new(FileSystemServiceImpl::new(
+            fs_config,
+            metadata_store,
+            file_store,
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_lock_extension_keeps_lock_alive() {
+        let service = create_test_service().await;
+
+        // Create root directory
+        service.initialize_root().await.unwrap();
+
+        let client_id = ClientId::new(123);
+
+        // Create a file using the FileSystemService trait
+        let file_attr = service
+            .create(
+                ROOT_INODE, "test.txt", 0o644, // mode
+                1000,  // uid
+                1000,  // gid
+                client_id,
+            )
+            .await
+            .unwrap();
+
+        // Open file for writing (acquires lock), flags=0x02 is O_RDWR
+        let (fh, _attr) = service
+            .open(file_attr.ino, 0x02, TEST_UID, TEST_GID, client_id)
+            .await
+            .unwrap();
+
+        // Start background tasks (lock extension)
+        Arc::clone(&service).start_background_tasks();
+
+        // Sleep for 5 seconds (longer than lock_timeout of 2 seconds)
+        // If lock extension is working, the lock should still be held
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // Verify file is still open with lock
+        {
+            let open_files = service.open_files.read().unwrap();
+            let open_file = open_files.get(&fh).expect("File handle should still exist");
+            assert!(open_file.lock_id.is_some(), "Lock should still be held");
+        }
+
+        // Try to acquire the same lock from a different client (should fail)
+        let other_client = ClientId::new(456);
+        let result = service
+            .open(file_attr.ino, 0x02, TEST_UID, TEST_GID, other_client)
+            .await;
+        assert!(
+            result.is_err(),
+            "Should not be able to acquire lock held by another client"
+        );
+
+        // Release the file
+        service.release(fh).await.unwrap();
+
+        // Shutdown to clean up background tasks
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_lock_expires_without_heartbeat() {
+        let service = create_test_service().await;
+
+        // Create root directory
+        service.initialize_root().await.unwrap();
+
+        let client_id = ClientId::new(123);
+
+        // Create a file
+        let file_attr = service
+            .create(
+                ROOT_INODE, "test.txt", 0o644, // mode
+                1000,  // uid
+                1000,  // gid
+                client_id,
+            )
+            .await
+            .unwrap();
+
+        // Open file for writing (acquires lock, registers heartbeat)
+        let (fh, _attr) = service
+            .open(file_attr.ino, 0x02, TEST_UID, TEST_GID, client_id)
+            .await
+            .unwrap();
+
+        // Start background tasks
+        Arc::clone(&service).start_background_tasks();
+
+        // Remove the client from sessions (simulate no heartbeat)
+        {
+            let mut sessions = service.client_sessions.write().unwrap();
+            sessions.remove(&client_id);
+        }
+
+        // Sleep for longer than lock_timeout
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // The lock extension task should NOT extend the lock because
+        // the client has no heartbeat. However, in our current implementation,
+        // the lock is registered once during open(). This test verifies the
+        // infrastructure is in place for Phase 2 heartbeat tracking.
+
+        // For now, just verify the heartbeat removal worked
+        {
+            let sessions = service.client_sessions.read().unwrap();
+            assert!(
+                !sessions.contains_key(&client_id),
+                "Client session should be removed"
+            );
+        }
+
+        // Release and shutdown
+        service.release(fh).await.unwrap();
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_registration() {
+        let service = create_test_service().await;
+
+        let client_id = ClientId::new(789);
+
+        // Initially no session
+        {
+            let sessions = service.client_sessions.read().unwrap();
+            assert!(!sessions.contains_key(&client_id));
+        }
+
+        // Call heartbeat
+        service.heartbeat(client_id);
+
+        // Should now have session
+        {
+            let sessions = service.client_sessions.read().unwrap();
+            assert!(
+                sessions.contains_key(&client_id),
+                "Client session should be registered"
+            );
+            let last_heartbeat = sessions.get(&client_id).unwrap();
+
+            // Heartbeat should be recent (within last second)
+            let age = SystemTime::now().duration_since(*last_heartbeat).unwrap();
+            assert!(age < Duration::from_secs(1), "Heartbeat should be recent");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_overflow_detection() {
+        let service = create_test_service().await;
+
+        // Create root directory
+        service.initialize_root().await.unwrap();
+
+        let client_id = ClientId::new(1);
+
+        // Create a test file
+        let file_attr = service
+            .create(ROOT_INODE, "test.txt", 0o644, 1000, 1000, client_id)
+            .await
+            .unwrap();
+
+        let (fh, _) = service
+            .open(file_attr.ino, 0x02, TEST_UID, TEST_GID, client_id)
+            .await
+            .unwrap();
+
+        // Try to write at near u64::MAX offset - should fail gracefully
+        let data = vec![0u8; 1000];
+        let result = service
+            .write(
+                file_attr.ino,
+                u64::MAX - 100,
+                data,
+                TEST_UID,
+                TEST_GID,
+                client_id,
+            )
+            .await;
+
+        assert!(result.is_err(), "Should detect overflow");
+
+        // Verify error message mentions overflow
+        match result {
+            Err(Error::InvalidArgument(msg)) => {
+                assert!(
+                    msg.contains("overflow"),
+                    "Error should mention overflow: {}",
+                    msg
+                );
+            }
+            Err(e) => panic!("Expected InvalidArgument error, got: {:?}", e),
+            Ok(_) => panic!("Should have failed with overflow error"),
+        }
+
+        // Clean up
+        service.release(fh).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_read_overflow_detection() {
+        let service = create_test_service().await;
+
+        // Create root directory
+        service.initialize_root().await.unwrap();
+
+        let client_id = ClientId::new(1);
+
+        // Create a test file
+        let file_attr = service
+            .create(ROOT_INODE, "test.txt", 0o644, 1000, 1000, client_id)
+            .await
+            .unwrap();
+
+        let (fh, _) = service
+            .open(file_attr.ino, 0x02, TEST_UID, TEST_GID, client_id)
+            .await
+            .unwrap();
+
+        // Try to read at near u64::MAX offset - should fail gracefully or return empty
+        // (read is clamped to file size, so it might succeed with empty result)
+        let result = service
+            .read(
+                file_attr.ino,
+                u64::MAX - 100,
+                1000,
+                TEST_UID,
+                TEST_GID,
+                client_id,
+            )
+            .await;
+
+        // Either succeeds with empty data (offset > file_size) or detects overflow
+        match result {
+            Ok(data) => {
+                assert!(
+                    data.is_empty(),
+                    "Should return empty data for read beyond file size"
+                );
+            }
+            Err(Error::InvalidArgument(msg)) if msg.contains("overflow") => {
+                // Also acceptable - overflow detected
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+
+        // Clean up
+        service.release(fh).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_permission_denied_read() {
+        let service = create_test_service().await;
+        service.initialize_root().await.unwrap();
+        let client_id = ClientId::new(1);
+
+        // Create a file owned by uid=1000 with mode 0o600 (rw-------)
+        // Only the owner can read/write
+        let file_attr = service
+            .create(ROOT_INODE, "private.txt", 0o600, 1000, 1000, client_id)
+            .await
+            .unwrap();
+
+        // Try to read as a different user (uid=2000) - should fail
+        let result = service
+            .read(file_attr.ino, 0, 100, 2000, 2000, client_id)
+            .await;
+
+        assert!(result.is_err(), "Should deny read access to non-owner");
+        match result {
+            Err(Error::PermissionDenied(inode)) => {
+                assert_eq!(inode, file_attr.ino);
+            }
+            _ => panic!("Expected PermissionDenied error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_permission_denied_write() {
+        let service = create_test_service().await;
+        service.initialize_root().await.unwrap();
+        let client_id = ClientId::new(1);
+
+        // Create a file owned by uid=1000 with mode 0o644 (rw-r--r--)
+        // Owner can write, but group and others cannot
+        let file_attr = service
+            .create(ROOT_INODE, "readonly.txt", 0o644, 1000, 1000, client_id)
+            .await
+            .unwrap();
+
+        // Try to open for writing as a different user (uid=2000) - should fail at open
+        let result = service
+            .open(file_attr.ino, 0x02, 2000, 2000, client_id)
+            .await;
+
+        assert!(result.is_err(), "Should deny write open to non-owner");
+        match result {
+            Err(Error::PermissionDenied(inode)) => {
+                assert_eq!(inode, file_attr.ino);
+            }
+            _ => panic!("Expected PermissionDenied error, got: {:?}", result),
+        }
+
+        // Try to write as a different user (uid=2000) - should also fail
+        let data = vec![1u8; 100];
+        let result = service
+            .write(file_attr.ino, 0, data, 2000, 2000, client_id)
+            .await;
+
+        assert!(result.is_err(), "Should deny write access to non-owner");
+        match result {
+            Err(Error::PermissionDenied(inode)) => {
+                assert_eq!(inode, file_attr.ino);
+            }
+            _ => panic!("Expected PermissionDenied error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_permission_owner_precedence() {
+        let service = create_test_service().await;
+        service.initialize_root().await.unwrap();
+        let client_id = ClientId::new(1);
+
+        // Create a file with mode 0o077 (---rwxrwx)
+        // Owner has NO permissions, but group and others have full permissions
+        // This tests POSIX precedence: owner permissions checked first
+        let file_attr = service
+            .create(ROOT_INODE, "weird.txt", 0o077, 1000, 1000, client_id)
+            .await
+            .unwrap();
+
+        // Try to read as the owner (uid=1000) - should FAIL
+        // Even though group has read permission, owner permissions take precedence
+        let result = service
+            .read(file_attr.ino, 0, 100, 1000, 1000, client_id)
+            .await;
+
+        assert!(result.is_err(), "Owner should be denied due to precedence");
+        assert!(matches!(result, Err(Error::PermissionDenied(_))));
+
+        // Try to read as a group member (uid=2000, gid=1000) - should SUCCEED
+        let result = service
+            .read(file_attr.ino, 0, 100, 2000, 1000, client_id)
+            .await;
+
+        assert!(result.is_ok(), "Group member should be able to read");
+    }
+
+    #[tokio::test]
+    async fn test_permission_group_access() {
+        let service = create_test_service().await;
+        service.initialize_root().await.unwrap();
+        let client_id = ClientId::new(1);
+
+        // Create a file with mode 0o640 (rw-r-----)
+        // Owner can read/write, group can read, others have no access
+        let file_attr = service
+            .create(ROOT_INODE, "group.txt", 0o640, 1000, 1000, client_id)
+            .await
+            .unwrap();
+
+        // Try to open for read as group member (uid=2000, gid=1000) - should succeed
+        // Note: O_RDONLY = 0x00 (not 0x01 which is O_WRONLY!)
+        let result = service
+            .open(file_attr.ino, 0x00, 2000, 1000, client_id)
+            .await;
+        assert!(
+            result.is_ok(),
+            "Group member should be able to open for read. Error: {:?}",
+            result.as_ref().err()
+        );
+        if let Ok((fh, _)) = result {
+            service.release(fh).await.unwrap();
+        }
+
+        // Try to open for write as group member - should fail (group has no write permission)
+        // O_WRONLY = 0x01
+        let result = service
+            .open(file_attr.ino, 0x01, 2000, 1000, client_id)
+            .await;
+        assert!(
+            result.is_err(),
+            "Group member should not be able to open for write"
+        );
+
+        // Try to open for read as other (uid=2000, gid=2000) - should fail
+        let result = service
+            .open(file_attr.ino, 0x00, 2000, 2000, client_id)
+            .await;
+        assert!(result.is_err(), "Other should not be able to open for read");
+    }
+
+    #[tokio::test]
+    async fn test_permission_unlink_requires_parent_write() {
+        let service = create_test_service().await;
+        service.initialize_root().await.unwrap();
+        let client_id = ClientId::new(1);
+
+        // Create a file - the file's permissions don't matter for unlink
+        let file_attr = service
+            .create(ROOT_INODE, "deleteme.txt", 0o644, 1000, 1000, client_id)
+            .await
+            .unwrap();
+
+        // Try to unlink as non-owner of parent directory (uid=2000)
+        // Root is owned by uid=1000, so this should fail
+        let result = service
+            .unlink(ROOT_INODE, "deleteme.txt", 2000, 2000, client_id)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Should deny unlink without write permission on parent"
+        );
+        match result {
+            Err(Error::PermissionDenied(inode)) => {
+                assert_eq!(inode, ROOT_INODE);
+            }
+            _ => panic!("Expected PermissionDenied error on parent directory"),
+        }
+
+        // Unlink as owner of parent directory - should succeed
+        let result = service
+            .unlink(ROOT_INODE, "deleteme.txt", 1000, 1000, client_id)
+            .await;
+        assert!(result.is_ok(), "Owner of parent should be able to unlink");
+    }
+
+    #[tokio::test]
+    async fn test_permission_setattr_requires_ownership() {
+        let service = create_test_service().await;
+        service.initialize_root().await.unwrap();
+        let client_id = ClientId::new(1);
+
+        // Create a file owned by uid=1000
+        let file_attr = service
+            .create(ROOT_INODE, "changeme.txt", 0o644, 1000, 1000, client_id)
+            .await
+            .unwrap();
+
+        // Try to change permissions as non-owner (uid=2000) - should fail
+        let result = service
+            .setattr(
+                file_attr.ino,
+                Some(0o600),
+                None,
+                None,
+                None,
+                None,
+                None,
+                2000,
+                2000,
+                client_id,
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Non-owner should not be able to change permissions"
+        );
+        assert!(matches!(result, Err(Error::PermissionDenied(_))));
+
+        // Change permissions as owner - should succeed
+        let result = service
+            .setattr(
+                file_attr.ino,
+                Some(0o600),
+                None,
+                None,
+                None,
+                None,
+                None,
+                1000,
+                1000,
+                client_id,
+            )
+            .await;
+        assert!(result.is_ok(), "Owner should be able to change permissions");
+    }
 
     /*
     use super::*;

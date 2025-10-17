@@ -33,6 +33,15 @@ pub enum RaftCommand {
     /// Delete a file or directory
     DeleteFile { parent_inode: u64, name: String },
 
+    /// Create a symbolic link
+    CreateSymlink {
+        parent_inode: u64,
+        name: String,
+        target: String,
+        uid: u32,
+        gid: u32,
+    },
+
     /// Allocate stripes for a file
     AllocateStripes {
         file_id: FileId,
@@ -57,6 +66,7 @@ pub enum RaftCommand {
         inode: u64,
         lock_type: LockType,
         client_id: u64,
+        node_id: u64,
         expires_at: SystemTime,
     },
 
@@ -96,6 +106,9 @@ pub enum RaftCommandResult {
     /// File deleted successfully
     FileDeleted,
 
+    /// Symlink created successfully
+    SymlinkCreated { inode: u64, file_id: FileId },
+
     /// Stripes allocated successfully
     StripesAllocated { stripe_ids: Vec<StripeId> },
 
@@ -132,6 +145,7 @@ pub enum RaftCommandResult {
 pub enum FileType {
     Regular,
     Directory,
+    Symlink,
 }
 
 /// Lock type for lock operations
@@ -197,7 +211,24 @@ impl StorageRaftMemberStub {
                 self.handle_update_file(inode, updates).await?;
                 RaftCommandResult::FileUpdated
             }
-            RaftCommand::DeleteFile { .. } => RaftCommandResult::FileDeleted,
+            RaftCommand::DeleteFile { parent_inode, name } => {
+                // Handle file deletion
+                self.handle_delete_file(parent_inode, &name).await?;
+                RaftCommandResult::FileDeleted
+            }
+            RaftCommand::CreateSymlink {
+                parent_inode,
+                name,
+                target,
+                uid,
+                gid,
+            } => {
+                // Handle symlink creation
+                let (inode, file_id) = self
+                    .handle_create_symlink(parent_inode, &name, &target, uid, gid)
+                    .await?;
+                RaftCommandResult::SymlinkCreated { inode, file_id }
+            }
             RaftCommand::AllocateStripes { .. } => RaftCommandResult::StripesAllocated {
                 stripe_ids: vec![StripeId::generate()],
             },
@@ -212,11 +243,34 @@ impl StorageRaftMemberStub {
                 RaftCommandResult::StripeUpdated
             }
             RaftCommand::CommitChunks { .. } => RaftCommandResult::ChunksCommitted,
-            RaftCommand::AcquireLock { .. } => RaftCommandResult::LockAcquired {
-                lock_id: generate_lock_id(),
-            },
-            RaftCommand::ReleaseLock { .. } => RaftCommandResult::LockReleased,
-            RaftCommand::ExtendLock { .. } => RaftCommandResult::LockExtended,
+            RaftCommand::AcquireLock {
+                inode,
+                lock_type,
+                client_id,
+                node_id,
+                expires_at,
+            } => {
+                // Handle lock acquisition through MetadataStore
+                let lock_id = self
+                    .handle_acquire_lock(inode, lock_type, client_id, node_id, expires_at)
+                    .await?;
+                RaftCommandResult::LockAcquired { lock_id }
+            }
+            RaftCommand::ReleaseLock { inode, client_id } => {
+                // Handle lock release through MetadataStore
+                self.handle_release_lock(inode, client_id).await?;
+                RaftCommandResult::LockReleased
+            }
+            RaftCommand::ExtendLock {
+                inode,
+                client_id,
+                new_expiry,
+            } => {
+                // Handle lock extension through MetadataStore
+                self.handle_extend_lock(inode, client_id, new_expiry)
+                    .await?;
+                RaftCommandResult::LockExtended
+            }
             RaftCommand::BeginTransaction { .. } => RaftCommandResult::TransactionBegun,
             RaftCommand::CommitTransaction { .. } => RaftCommandResult::TransactionCommitted,
             RaftCommand::AbortTransaction { .. } => RaftCommandResult::TransactionAborted,
@@ -248,6 +302,7 @@ impl StorageRaftMemberStub {
             created_at: file_record.created_at,
             modified_at: updates.mtime.unwrap_or(file_record.modified_at),
             accessed_at: updates.atime.unwrap_or(file_record.accessed_at),
+            target: file_record.target, // Preserve existing target for symlinks
         };
 
         // Write updated metadata back to store
@@ -397,6 +452,261 @@ impl StorageRaftMemberStub {
         Ok(())
     }
 
+    /// Handle DeleteFile command - delete file from metadata store
+    async fn handle_delete_file(&self, parent_inode: u64, name: &str) -> Result<(), RaftError> {
+        // Get parent directory
+        let parent_record = self
+            .metadata_store
+            .get_file_by_inode(parent_inode)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Parent not found: {}", e)))?;
+
+        // Construct full path
+        let path = parent_record.path.join(name);
+
+        // Get file to delete
+        let file_record = self
+            .metadata_store
+            .get_file_by_path(&path)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("File not found: {}", e)))?;
+
+        // Delete all stripes and chunks for the file (metadata only)
+        // Physical chunk deletion is handled by StorageWatchdog in Phase 2
+        let stripes = self
+            .metadata_store
+            .get_file_stripes(file_record.file_id)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Failed to get stripes: {}", e)))?;
+
+        for stripe in stripes {
+            // Delete stripe (also deletes associated chunks in metadata)
+            self.metadata_store
+                .delete_stripe(stripe.stripe_id)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to delete stripe: {}", e))
+                })?;
+        }
+
+        // Delete file metadata
+        self.metadata_store
+            .delete_file(file_record.file_id)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Delete failed: {}", e)))?;
+
+        tracing::info!(
+            "Deleted file: path={:?}, inode={}, file_id={:?}",
+            path,
+            file_record.inode,
+            file_record.file_id
+        );
+
+        Ok(())
+    }
+
+    /// Handle symlink creation
+    async fn handle_create_symlink(
+        &self,
+        parent_inode: u64,
+        name: &str,
+        target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(u64, FileId), RaftError> {
+        // Get parent directory
+        let parent_record = self
+            .metadata_store
+            .get_file_by_inode(parent_inode)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Parent not found: {}", e)))?;
+
+        if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            return Err(RaftError::OperationFailed(
+                "Parent is not a directory".into(),
+            ));
+        }
+
+        // Construct full path
+        let path = parent_record.path.join(name);
+
+        // Check if symlink already exists
+        if let Ok(_existing) = self.metadata_store.get_file_by_path(&path).await {
+            return Err(RaftError::OperationFailed(format!(
+                "Symlink already exists: {:?}",
+                path
+            )));
+        }
+
+        // Reserve an inode
+        let inode =
+            self.metadata_store.reserve_inode().await.map_err(|e| {
+                RaftError::OperationFailed(format!("Failed to reserve inode: {}", e))
+            })?;
+
+        // Generate file ID
+        let file_id = FileId::new(uuid::Uuid::new_v4());
+
+        // Create metadata for the symlink
+        let now = std::time::SystemTime::now();
+        let metadata = crate::metadata_store::FileMetadata {
+            file_type: crate::metadata_store::FileType::Symlink,
+            size: target.len() as u64,
+            permissions: 0o777,
+            uid,
+            gid,
+            created_at: now,
+            modified_at: now,
+            accessed_at: now,
+            target: Some(target.to_string()),
+        };
+
+        // Create the symlink
+        if let Err(e) = self
+            .metadata_store
+            .create_file(file_id.clone(), &path, inode, metadata)
+            .await
+        {
+            // Clean up reserved inode on failure
+            let _ = self.metadata_store.release_inode(inode).await;
+            return Err(RaftError::OperationFailed(format!(
+                "Failed to create symlink: {}",
+                e
+            )));
+        }
+
+        // Confirm the inode reservation
+        if let Err(e) = self.metadata_store.confirm_inode(inode).await {
+            tracing::error!(
+                "Failed to confirm inode {} after symlink creation: {}",
+                inode,
+                e
+            );
+        }
+
+        tracing::info!(
+            "Created symlink: path={:?}, inode={}, target={}",
+            path,
+            inode,
+            target
+        );
+
+        Ok((inode, file_id))
+    }
+
+    /// Handle AcquireLock command - acquire a distributed lock
+    async fn handle_acquire_lock(
+        &self,
+        inode: u64,
+        lock_type: LockType,
+        client_id: u64,
+        node_id: u64,
+        expires_at: SystemTime,
+    ) -> Result<u64, RaftError> {
+        use crate::metadata_store::types::ClientId;
+        use crate::metadata_store::MetadataStore;
+
+        // Get the file by inode to get its file_id
+        let file_record = self
+            .metadata_store
+            .get_file_by_inode(inode)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Failed to get file: {}", e)))?;
+
+        let client_id = ClientId::new(client_id);
+
+        // Acquire lock via MetadataStore based on lock type
+        let lock_id = match lock_type {
+            LockType::Write => self
+                .metadata_store
+                .acquire_write_lock(file_record.file_id, client_id, node_id, expires_at)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to acquire write lock: {}", e))
+                })?,
+            LockType::Read => self
+                .metadata_store
+                .acquire_read_lock(file_record.file_id, client_id, expires_at)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to acquire read lock: {}", e))
+                })?,
+        };
+
+        tracing::info!(
+            "Acquired {:?} lock on inode {} by node {}, lock_id={}",
+            lock_type,
+            inode,
+            node_id,
+            lock_id
+        );
+
+        Ok(lock_id)
+    }
+
+    /// Handle ReleaseLock command - release a distributed lock
+    async fn handle_release_lock(&self, inode: u64, client_id: u64) -> Result<(), RaftError> {
+        use crate::metadata_store::types::ClientId;
+        use crate::metadata_store::MetadataStore;
+
+        // Get the file by inode to get its file_id
+        let file_record = self
+            .metadata_store
+            .get_file_by_inode(inode)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Failed to get file: {}", e)))?;
+
+        let client_id = ClientId::new(client_id);
+
+        // Release lock via MetadataStore
+        self.metadata_store
+            .release_lock(file_record.file_id, client_id)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Failed to release lock: {}", e)))?;
+
+        tracing::info!(
+            "Released lock on inode {}, client_id={}",
+            inode,
+            client_id.as_u64()
+        );
+
+        Ok(())
+    }
+
+    /// Handle ExtendLock command - extend a lock's expiration
+    async fn handle_extend_lock(
+        &self,
+        inode: u64,
+        client_id: u64,
+        new_expiry: SystemTime,
+    ) -> Result<(), RaftError> {
+        use crate::metadata_store::types::ClientId;
+        use crate::metadata_store::MetadataStore;
+
+        // Get the file by inode to get its file_id
+        let file_record = self
+            .metadata_store
+            .get_file_by_inode(inode)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Failed to get file: {}", e)))?;
+
+        let client_id = ClientId::new(client_id);
+
+        // Extend lock via MetadataStore
+        self.metadata_store
+            .extend_lock(file_record.file_id, client_id, new_expiry)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Failed to extend lock: {}", e)))?;
+
+        tracing::info!(
+            "Extended lock on inode {}, client_id={}",
+            inode,
+            client_id.as_u64()
+        );
+
+        Ok(())
+    }
+
     /// Check if this node is the leader (stub - always true)
     pub fn is_leader(&self) -> bool {
         true
@@ -456,6 +766,29 @@ mod tests {
             .expect("Failed to create test metadata store")
     }
 
+    /// Helper function to create root directory for tests
+    async fn create_root_directory(metadata_store: &MetadataStoreImpl) {
+        use crate::metadata_store::{FileId, FileMetadata, MetadataStore};
+        use std::path::Path;
+        use std::time::SystemTime;
+
+        let root_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Directory,
+            size: 0,
+            permissions: 0o755,
+            uid: 0,
+            gid: 0,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None, // Not a symlink
+        };
+        metadata_store
+            .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
+            .await
+            .expect("Failed to create root");
+    }
+
     #[tokio::test]
     async fn test_stub_create_file() {
         let metadata_store = create_test_metadata_store().await;
@@ -482,12 +815,44 @@ mod tests {
 
     #[tokio::test]
     async fn test_stub_acquire_lock() {
+        use crate::metadata_store::{FileId, FileMetadata, MetadataStore};
+        use std::path::Path;
+
+        // Create metadata store and initialize schema
         let metadata_store = create_test_metadata_store().await;
+        metadata_store
+            .initialize_schema()
+            .await
+            .expect("Failed to initialize schema");
+
+        // Create a test file to lock
+        let file_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
+            size: 1024,
+            permissions: 0o644,
+            uid: 1000,
+            gid: 1000,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None,
+        };
+        metadata_store
+            .create_file(
+                FileId::generate(),
+                Path::new("/test.txt"),
+                100,
+                file_metadata,
+            )
+            .await
+            .expect("Failed to create test file");
+
         let stub = StorageRaftMemberStub::new(metadata_store);
         let command = RaftCommand::AcquireLock {
             inode: 100,
             lock_type: LockType::Write,
             client_id: 1,
+            node_id: 1, // Test node
             expires_at: SystemTime::now() + std::time::Duration::from_secs(60),
         };
 
@@ -499,5 +864,472 @@ mod tests {
             }
             _ => panic!("Expected LockAcquired result"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_stub_delete_regular_file() {
+        use crate::metadata_store::{FileId, FileMetadata, MetadataStore};
+        use std::path::Path;
+        use std::time::SystemTime;
+
+        // Create metadata store and initialize schema
+        let metadata_store = create_test_metadata_store().await;
+        metadata_store
+            .initialize_schema()
+            .await
+            .expect("Failed to initialize schema");
+
+        // Create root directory
+        let root_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Directory,
+            size: 0,
+            permissions: 0o755,
+            uid: 0,
+            gid: 0,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None, // Not a symlink
+        };
+        metadata_store
+            .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
+            .await
+            .expect("Failed to create root");
+
+        // Create a regular file
+        let file_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
+            size: 1024,
+            permissions: 0o644,
+            uid: 1000,
+            gid: 1000,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None, // Not a symlink
+        };
+        let file_id = FileId::generate();
+        metadata_store
+            .create_file(file_id, Path::new("/test.txt"), 100, file_metadata)
+            .await
+            .expect("Failed to create test file");
+
+        // Create Raft stub and delete the file
+        let stub = StorageRaftMemberStub::new(metadata_store.clone());
+        let command = RaftCommand::DeleteFile {
+            parent_inode: 1,
+            name: "test.txt".to_string(),
+        };
+
+        let result = stub
+            .propose_operation(command)
+            .await
+            .expect("Delete operation failed");
+
+        // Verify the result
+        assert!(matches!(result, RaftCommandResult::FileDeleted));
+
+        // Verify file is actually deleted
+        let lookup_result = metadata_store
+            .get_file_by_path(Path::new("/test.txt"))
+            .await;
+        assert!(
+            lookup_result.is_err(),
+            "File should not exist after deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stub_delete_symlink() {
+        use crate::metadata_store::{FileId, FileMetadata, MetadataStore};
+        use std::path::Path;
+        use std::time::SystemTime;
+
+        // Create metadata store and initialize schema
+        let metadata_store = create_test_metadata_store().await;
+        metadata_store
+            .initialize_schema()
+            .await
+            .expect("Failed to initialize schema");
+
+        // Create root directory
+        let root_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Directory,
+            size: 0,
+            permissions: 0o755,
+            uid: 0,
+            gid: 0,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None, // Not a symlink
+        };
+        metadata_store
+            .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
+            .await
+            .expect("Failed to create root");
+
+        // Create a symlink
+        let symlink_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Symlink,
+            size: 0,            // Symlinks typically have size 0 or target path length
+            permissions: 0o777, // Symlinks usually have full permissions
+            uid: 1000,
+            gid: 1000,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None, // Not a symlink
+        };
+        let symlink_id = FileId::generate();
+        metadata_store
+            .create_file(symlink_id, Path::new("/link"), 101, symlink_metadata)
+            .await
+            .expect("Failed to create symlink");
+
+        // Create Raft stub and delete the symlink
+        let stub = StorageRaftMemberStub::new(metadata_store.clone());
+        let command = RaftCommand::DeleteFile {
+            parent_inode: 1,
+            name: "link".to_string(),
+        };
+
+        let result = stub
+            .propose_operation(command)
+            .await
+            .expect("Delete symlink operation failed");
+
+        // Verify the result
+        assert!(matches!(result, RaftCommandResult::FileDeleted));
+
+        // Verify symlink is actually deleted
+        let lookup_result = metadata_store.get_file_by_path(Path::new("/link")).await;
+        assert!(
+            lookup_result.is_err(),
+            "Symlink should not exist after deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stub_delete_nonexistent_file() {
+        use crate::metadata_store::{FileId, FileMetadata, MetadataStore};
+        use std::path::Path;
+        use std::time::SystemTime;
+
+        // Create metadata store and initialize schema
+        let metadata_store = create_test_metadata_store().await;
+        metadata_store
+            .initialize_schema()
+            .await
+            .expect("Failed to initialize schema");
+
+        // Create root directory
+        let root_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Directory,
+            size: 0,
+            permissions: 0o755,
+            uid: 0,
+            gid: 0,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None, // Not a symlink
+        };
+        metadata_store
+            .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
+            .await
+            .expect("Failed to create root");
+
+        // Try to delete a non-existent file
+        let stub = StorageRaftMemberStub::new(metadata_store);
+        let command = RaftCommand::DeleteFile {
+            parent_inode: 1,
+            name: "nonexistent.txt".to_string(),
+        };
+
+        let result = stub.propose_operation(command).await;
+
+        // Should fail with an error
+        assert!(result.is_err(), "Deleting nonexistent file should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("File not found"),
+            "Error should indicate file not found"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stub_delete_file_with_stripes() {
+        use crate::file_store::StripeId;
+        use crate::metadata_store::{FileId, FileMetadata, MetadataStore, StripeRecord};
+        use std::path::Path;
+        use std::time::SystemTime;
+
+        // Create metadata store and initialize schema
+        let metadata_store = create_test_metadata_store().await;
+        metadata_store
+            .initialize_schema()
+            .await
+            .expect("Failed to initialize schema");
+
+        // Create root directory
+        let root_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Directory,
+            size: 0,
+            permissions: 0o755,
+            uid: 0,
+            gid: 0,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None, // Not a symlink
+        };
+        metadata_store
+            .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
+            .await
+            .expect("Failed to create root");
+
+        // Create a file with data
+        let file_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
+            size: 8 * 1024 * 1024, // 8MB file
+            permissions: 0o644,
+            uid: 1000,
+            gid: 1000,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None, // Not a symlink
+        };
+        let file_id = FileId::generate();
+        metadata_store
+            .create_file(file_id, Path::new("/bigfile.dat"), 102, file_metadata)
+            .await
+            .expect("Failed to create file");
+
+        // Add some stripes to the file
+        let stripe1 = StripeRecord {
+            stripe_id: StripeId::generate(),
+            file_id,
+            stripe_index: 0,
+            offset: 0,
+            size: 4 * 1024 * 1024,
+            checksum: 0x12345678, // Mock checksum
+            created_at: SystemTime::now(),
+        };
+        let stripe2 = StripeRecord {
+            stripe_id: StripeId::generate(),
+            file_id,
+            stripe_index: 1,
+            offset: 4 * 1024 * 1024,
+            size: 4 * 1024 * 1024,
+            checksum: 0x87654321, // Mock checksum
+            created_at: SystemTime::now(),
+        };
+        metadata_store
+            .allocate_stripes(file_id, vec![stripe1.clone(), stripe2.clone()])
+            .await
+            .expect("Failed to allocate stripes");
+
+        // Delete the file
+        let stub = StorageRaftMemberStub::new(metadata_store.clone());
+        let command = RaftCommand::DeleteFile {
+            parent_inode: 1,
+            name: "bigfile.dat".to_string(),
+        };
+
+        let result = stub
+            .propose_operation(command)
+            .await
+            .expect("Delete operation failed");
+
+        assert!(matches!(result, RaftCommandResult::FileDeleted));
+
+        // Verify file is deleted
+        let lookup_result = metadata_store
+            .get_file_by_path(Path::new("/bigfile.dat"))
+            .await;
+        assert!(lookup_result.is_err(), "File should not exist");
+
+        // Verify stripes are also deleted
+        let stripes_result = metadata_store.get_file_stripes(file_id).await;
+        assert!(
+            stripes_result.is_err() || stripes_result.unwrap().is_empty(),
+            "Stripes should be deleted with the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stub_create_symlink() {
+        use crate::metadata_store::MetadataStore;
+        use std::path::Path;
+
+        // Create metadata store and initialize schema
+        let metadata_store = create_test_metadata_store().await;
+        metadata_store
+            .initialize_schema()
+            .await
+            .expect("Failed to initialize schema");
+
+        // Create root directory first
+        create_root_directory(&metadata_store).await;
+
+        // Create Raft stub and create a symlink
+        let stub = StorageRaftMemberStub::new(metadata_store.clone());
+        let command = RaftCommand::CreateSymlink {
+            parent_inode: 1,
+            name: "mylink".to_string(),
+            target: "/path/to/target".to_string(),
+            uid: 1000,
+            gid: 1000,
+        };
+
+        let result = stub
+            .propose_operation(command)
+            .await
+            .expect("Create symlink operation failed");
+
+        // Verify the result
+        match result {
+            RaftCommandResult::SymlinkCreated { inode, file_id } => {
+                assert!(inode > 1, "Inode should be allocated");
+                assert!(!file_id.0.is_nil(), "File ID should be generated");
+
+                // Verify symlink was created in metadata store
+                let symlink_record = metadata_store
+                    .get_file_by_path(Path::new("/mylink"))
+                    .await
+                    .expect("Should find symlink");
+
+                assert_eq!(
+                    symlink_record.file_type,
+                    crate::metadata_store::FileType::Symlink
+                );
+                assert_eq!(symlink_record.target, Some("/path/to/target".to_string()));
+                assert_eq!(symlink_record.inode, inode);
+            }
+            _ => panic!("Expected SymlinkCreated result, got {:?}", result),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stub_create_symlink_already_exists() {
+        use crate::metadata_store::{FileId, FileMetadata, MetadataStore};
+        use std::path::Path;
+        use std::time::SystemTime;
+
+        // Create metadata store and initialize schema
+        let metadata_store = create_test_metadata_store().await;
+        metadata_store
+            .initialize_schema()
+            .await
+            .expect("Failed to initialize schema");
+
+        // Create root directory first
+        create_root_directory(&metadata_store).await;
+
+        // Create an existing symlink
+        let inode = metadata_store
+            .reserve_inode()
+            .await
+            .expect("Failed to reserve inode");
+        let file_id = FileId::new(uuid::Uuid::new_v4());
+        let metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Symlink,
+            size: 10,
+            permissions: 0o777,
+            uid: 1000,
+            gid: 1000,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: Some("/existing/target".to_string()),
+        };
+        metadata_store
+            .create_file(file_id, Path::new("/existing"), inode, metadata)
+            .await
+            .expect("Failed to create existing symlink");
+
+        // Try to create symlink with same name
+        let stub = StorageRaftMemberStub::new(metadata_store);
+        let command = RaftCommand::CreateSymlink {
+            parent_inode: 1,
+            name: "existing".to_string(),
+            target: "/new/target".to_string(),
+            uid: 1000,
+            gid: 1000,
+        };
+
+        let result = stub.propose_operation(command).await;
+
+        // Should fail with an error
+        assert!(result.is_err(), "Creating duplicate symlink should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already exists"),
+            "Error should indicate symlink already exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stub_create_symlink_parent_not_directory() {
+        use crate::metadata_store::{FileId, FileMetadata, MetadataStore};
+        use std::path::Path;
+        use std::time::SystemTime;
+
+        // Create metadata store and initialize schema
+        let metadata_store = create_test_metadata_store().await;
+        metadata_store
+            .initialize_schema()
+            .await
+            .expect("Failed to initialize schema");
+
+        // Create root directory first
+        create_root_directory(&metadata_store).await;
+
+        // Create a regular file (not a directory)
+        let inode = metadata_store
+            .reserve_inode()
+            .await
+            .expect("Failed to reserve inode");
+        let file_id = FileId::new(uuid::Uuid::new_v4());
+        let metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
+            size: 100,
+            permissions: 0o644,
+            uid: 1000,
+            gid: 1000,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            accessed_at: SystemTime::now(),
+            target: None,
+        };
+        metadata_store
+            .create_file(file_id, Path::new("/file.txt"), inode, metadata)
+            .await
+            .expect("Failed to create regular file");
+
+        // Try to create symlink with regular file as parent
+        let stub = StorageRaftMemberStub::new(metadata_store);
+        let command = RaftCommand::CreateSymlink {
+            parent_inode: inode, // Using regular file's inode as parent
+            name: "link".to_string(),
+            target: "/target".to_string(),
+            uid: 1000,
+            gid: 1000,
+        };
+
+        let result = stub.propose_operation(command).await;
+
+        // Should fail with an error
+        assert!(
+            result.is_err(),
+            "Creating symlink in non-directory should fail"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not a directory"),
+            "Error should indicate parent is not a directory"
+        );
     }
 }

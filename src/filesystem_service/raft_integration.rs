@@ -274,6 +274,7 @@ impl RaftIntegratedFileSystemService {
             inode,
             lock_type: raft_lock_type,
             client_id: client_id.0,
+            node_id: 1, // TODO: Get from config when raft_integration is updated for distributed mode
             expires_at,
         };
 
@@ -285,7 +286,7 @@ impl RaftIntegratedFileSystemService {
 
         match result {
             RaftCommandResult::LockAcquired { lock_id } => Ok(lock_id),
-            RaftCommandResult::Error { message } => Err(Error::LockConflictSimple(message)),
+            RaftCommandResult::Error { message } => Err(Error::LockConflict(message)),
             _ => Err(Error::Internal("Unexpected Raft result".into())),
         }
     }
@@ -309,7 +310,7 @@ impl RaftIntegratedFileSystemService {
 
         match result {
             RaftCommandResult::LockReleased => Ok(()),
-            RaftCommandResult::Error { message } => Err(Error::LockNotHeldSimple(message)),
+            RaftCommandResult::Error { message } => Err(Error::LockNotHeld(message)),
             _ => Err(Error::Internal("Unexpected Raft result".into())),
         }
     }
@@ -335,7 +336,7 @@ impl RaftIntegratedFileSystemService {
 
         match result {
             RaftCommandResult::LockExtended => Ok(()),
-            RaftCommandResult::Error { message } => Err(Error::LockNotHeldSimple(message)),
+            RaftCommandResult::Error { message } => Err(Error::LockNotHeld(message)),
             _ => Err(Error::Internal("Unexpected Raft result".into())),
         }
     }

@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS files (
     modified_at INTEGER NOT NULL,
     accessed_at INTEGER NOT NULL,
     storage_policy_id INTEGER NOT NULL DEFAULT 1,
+    target TEXT DEFAULT NULL, -- Symlink target path (NULL for regular files and directories)
     FOREIGN KEY (storage_policy_id) REFERENCES storage_policies(policy_id)
 );
 

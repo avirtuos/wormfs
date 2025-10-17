@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS files_new (
     created_at INTEGER NOT NULL,
     modified_at INTEGER NOT NULL,
     accessed_at INTEGER NOT NULL,
+    target TEXT DEFAULT NULL,  -- Symlink target path (NULL for regular files and directories)
     storage_policy_id INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY (storage_policy_id) REFERENCES storage_policies(policy_id)
 );
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS locks_new (
     file_id BLOB NOT NULL,  -- 16-byte UUID
     client_id INTEGER NOT NULL,
     lock_type INTEGER NOT NULL,
+    node_id INTEGER,  -- Storage node that holds this lock (for distributed debugging)
     acquired_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     FOREIGN KEY (file_id) REFERENCES files_new(file_id) ON DELETE CASCADE
@@ -77,3 +79,4 @@ ALTER TABLE locks_new RENAME TO locks;
 -- Step 4: Recreate indexes
 CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type);
 CREATE INDEX IF NOT EXISTS idx_files_parent_path ON files(parent_path);
+CREATE INDEX IF NOT EXISTS idx_locks_node_id ON locks(node_id);

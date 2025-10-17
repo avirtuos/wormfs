@@ -154,6 +154,7 @@ impl MetadataStoreImpl {
             include_str!("migrations/001_initial_schema.sql").to_string(),
             include_str!("migrations/002_indexes.sql").to_string(),
             include_str!("migrations/003_inode_management.sql").to_string(),
+            include_str!("migrations/004_uuid_migration.sql").to_string(),
         ];
 
         self.inner
@@ -244,8 +245,8 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 conn.execute(
-                    "INSERT INTO files (file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1)",
+                    "INSERT INTO files (file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14)",
                     params![
                         file_id,
                         inode as i64,
@@ -260,6 +261,7 @@ impl MetadataStore for MetadataStoreImpl {
                         system_time_to_unix(metadata.created_at),
                         system_time_to_unix(metadata.modified_at),
                         system_time_to_unix(metadata.accessed_at),
+                        metadata.target,
                     ],
                 )?;
                 Ok(())
@@ -282,7 +284,7 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target
                      FROM files WHERE path = ?1",
                     params![path_str],
                     |row| {
@@ -301,6 +303,7 @@ impl MetadataStore for MetadataStoreImpl {
                             modified_at: unix_to_system_time(row.get(11)?),
                             accessed_at: unix_to_system_time(row.get(12)?),
                             storage_policy_id: row.get::<_, i64>(13)? as u32,
+                            target: row.get::<_, Option<String>>(14)?,
                         })
                     },
                 )?)
@@ -319,7 +322,7 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target
                      FROM files WHERE inode = ?1",
                     params![inode as i64],
                     |row| {
@@ -338,6 +341,7 @@ impl MetadataStore for MetadataStoreImpl {
                             modified_at: unix_to_system_time(row.get(11)?),
                             accessed_at: unix_to_system_time(row.get(12)?),
                             storage_policy_id: row.get::<_, i64>(13)? as u32,
+                            target: row.get::<_, Option<String>>(14)?,
                         })
                     },
                 )?)
@@ -358,7 +362,7 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
-                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target
                      FROM files WHERE file_id = ?1",
                     params![file_id],
                     |row| {
@@ -377,6 +381,7 @@ impl MetadataStore for MetadataStoreImpl {
                             modified_at: unix_to_system_time(row.get(11)?),
                             accessed_at: unix_to_system_time(row.get(12)?),
                             storage_policy_id: row.get::<_, i64>(13)? as u32,
+                            target: row.get::<_, Option<String>>(14)?,
                         })
                     },
                 )?)
@@ -396,8 +401,8 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 Ok(conn.execute(
-                    "UPDATE files SET size = ?1, permissions = ?2, uid = ?3, gid = ?4, modified_at = ?5, accessed_at = ?6
-                     WHERE file_id = ?7",
+                    "UPDATE files SET size = ?1, permissions = ?2, uid = ?3, gid = ?4, modified_at = ?5, accessed_at = ?6, target = ?7
+                     WHERE file_id = ?8",
                     params![
                         metadata.size as i64,
                         metadata.permissions as i64,
@@ -405,6 +410,7 @@ impl MetadataStore for MetadataStoreImpl {
                         metadata.gid as i64,
                         system_time_to_unix(metadata.modified_at),
                         system_time_to_unix(metadata.accessed_at),
+                        metadata.target,
                         file_id,
                     ],
                 )?)
@@ -445,7 +451,7 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id
+                    "SELECT file_id, inode, path, parent_path, name, file_type, size, permissions, uid, gid, created_at, modified_at, accessed_at, storage_policy_id, target
                      FROM files WHERE parent_path = ?1 ORDER BY name",
                 )?;
 
@@ -466,6 +472,7 @@ impl MetadataStore for MetadataStoreImpl {
                             modified_at: unix_to_system_time(row.get(11)?),
                             accessed_at: unix_to_system_time(row.get(12)?),
                             storage_policy_id: row.get::<_, i64>(13)? as u32,
+                            target: row.get::<_, Option<String>>(14)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -917,9 +924,11 @@ impl MetadataStore for MetadataStoreImpl {
         &self,
         file_id: FileId,
         client_id: ClientId,
+        node_id: u64,
         expires_at: SystemTime,
     ) -> Result<u64, Error> {
         let client_id_val = client_id.as_u64();
+        let node_id_val = node_id;
         let expires_at_unix = system_time_to_unix(expires_at);
 
         self.inner
@@ -948,11 +957,11 @@ impl MetadataStore for MetadataStoreImpl {
                     ));
                 }
 
-                // Acquire write lock
+                // Acquire write lock with node_id
                 tx.execute(
-                    "INSERT INTO locks (file_id, client_id, lock_type, acquired_at, expires_at)
-                     VALUES (?1, ?2, 1, ?3, ?4)",
-                    params![file_id, client_id_val as i64, now, expires_at_unix],
+                    "INSERT INTO locks (file_id, client_id, lock_type, node_id, acquired_at, expires_at)
+                     VALUES (?1, ?2, 1, ?3, ?4, ?5)",
+                    params![file_id, client_id_val as i64, node_id_val as i64, now, expires_at_unix],
                 )?;
 
                 let lock_id = tx.last_insert_rowid() as u64;
@@ -1185,6 +1194,12 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn cleanup_expired_inode_reservations(&self) -> Result<u64, Error> {
+        // TODO: This method should be called periodically by a background maintenance task.
+        // Currently, expired reservations (1-hour TTL) remain in the database until:
+        // 1. Explicitly released on error paths in FileSystemService
+        // 2. This cleanup method is manually invoked (only happens in tests currently)
+        // 3. Phase 2: Implement periodic background task to call this every 10-15 minutes
+
         let now = system_time_to_unix(SystemTime::now());
 
         let rows_affected = self

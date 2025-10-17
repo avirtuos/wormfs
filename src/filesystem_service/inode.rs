@@ -299,6 +299,7 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
         // Cache miss
@@ -326,6 +327,7 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
         cache.insert(100, file_id, metadata);
@@ -352,6 +354,7 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
         // Fill cache to capacity
@@ -383,6 +386,7 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
         cache.insert(100, FileId::generate(), metadata);
@@ -404,6 +408,7 @@ mod tests {
             created_at: std::time::SystemTime::now(),
             modified_at: std::time::SystemTime::now(),
             accessed_at: std::time::SystemTime::now(),
+            target: None, // Test files are not symlinks
         };
 
         // Insert 5 entries

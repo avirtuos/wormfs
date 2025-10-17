@@ -16,6 +16,14 @@ pub type FileHandle = u64;
 /// Configuration for FileSystemService.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Node ID for this storage node (used in distributed lock tracking)
+    pub node_id: u64,
+
+    /// Client heartbeat timeout - how long before client considered dead
+    /// Phase 1: Set to 24 hours (effectively infinite, no real heartbeats)
+    /// Phase 2: Set to 30 seconds (with actual gRPC heartbeat endpoint)
+    pub client_heartbeat_timeout: Duration,
+
     /// Enable read lock enforcement
     pub enable_read_locks: bool,
 
@@ -65,6 +73,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            node_id: 1,                                           // Single-node Phase 1 default
+            client_heartbeat_timeout: Duration::from_secs(86400), // 24 hours (stub mode)
             enable_read_locks: true,
             lock_timeout: Duration::from_secs(10),
             lock_extend_interval: Duration::from_secs(5),
@@ -76,7 +86,10 @@ impl Default for Config {
             write_through: true,
             default_file_mode: 0o644,
             default_dir_mode: 0o755,
-            max_file_size: u64::MAX,
+            // 16 EiB (exbibytes) = 16 * 1024^6 bytes
+            // Still allows files 16,000x larger than current largest files (~1 PiB)
+            // Leaves headroom to prevent offset + data.len() overflow
+            max_file_size: 16 * 1024 * 1024 * 1024 * 1024 * 1024,
             enable_xattr: true,
             uid: 1000,
             gid: 1000,
@@ -111,21 +124,17 @@ pub enum Error {
     #[error("Is a directory: inode {0}")]
     IsADirectory(u64),
 
+    /// Not a symbolic link
+    #[error("Not a symbolic link: inode {0}")]
+    NotASymlink(u64),
+
     /// Lock conflict
-    #[error("Lock conflict: cannot acquire {lock_type:?} lock on inode {inode}")]
-    LockConflict { inode: u64, lock_type: LockType },
+    #[error("Lock conflict: {0}")]
+    LockConflict(String),
 
     /// Lock not held
-    #[error("Lock not held by client {client_id:?} on inode {inode}")]
-    LockNotHeld { inode: u64, client_id: ClientId },
-
-    /// Lock not held (simple version)
     #[error("Lock not held: {0}")]
-    LockNotHeldSimple(String),
-
-    /// Lock conflict (simple version)
-    #[error("Lock conflict: {0}")]
-    LockConflictSimple(String),
+    LockNotHeld(String),
 
     /// Insufficient storage space
     #[error("Insufficient storage space")]
@@ -139,10 +148,6 @@ pub enum Error {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Metadata operation failed
-    #[error("Metadata operation failed: {0}")]
-    MetadataFailed(String),
-
     /// Data operation failed
     #[error("Data operation failed: {0}")]
     DataFailed(String),
@@ -150,10 +155,6 @@ pub enum Error {
     /// Invalid file handle
     #[error("Invalid file handle: {0}")]
     InvalidFileHandle(FileHandle),
-
-    /// I/O error
-    #[error("I/O error: {0}")]
-    IoError(String),
 
     /// Raft operation error
     #[error("Raft error: {0}")]
@@ -183,14 +184,15 @@ impl Error {
             Self::AlreadyExists(_) => libc::EEXIST,
             Self::NotADirectory(_) => libc::ENOTDIR,
             Self::IsADirectory(_) => libc::EISDIR,
+            Self::NotASymlink(_) => libc::EINVAL,
             Self::DirectoryNotEmpty(_) => libc::ENOTEMPTY,
             Self::InvalidFileHandle(_) => libc::EBADF,
-            Self::LockConflict { .. } | Self::LockConflictSimple(_) => libc::ENOLCK,
-            Self::LockNotHeld { .. } | Self::LockNotHeldSimple(_) => libc::ENOLCK,
+            Self::LockConflict(_) => libc::ENOLCK,
+            Self::LockNotHeld(_) => libc::ENOLCK,
             Self::NoSpace => libc::ENOSPC,
             Self::InvalidArgument(_) => libc::EINVAL,
-            Self::Io(_) | Self::IoError(_) => libc::EIO,
-            Self::MetadataFailed(_) | Self::DataFailed(_) => libc::EIO,
+            Self::Io(_) => libc::EIO,
+            Self::DataFailed(_) => libc::EIO,
             Self::RaftError(_) | Self::MetadataError(_) | Self::Internal(_) => libc::EIO,
             Self::NotSupported(_) => libc::ENOSYS,
         }
@@ -294,6 +296,8 @@ pub struct OpenFile {
     pub file_id: FileId,
     /// Inode number
     pub inode: u64,
+    /// Client ID that opened the file
+    pub client_id: ClientId,
     /// Lock ID if file is locked
     pub lock_id: Option<u64>,
     /// Open flags

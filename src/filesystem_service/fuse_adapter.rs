@@ -228,6 +228,117 @@ impl Filesystem for FuseAdapter {
             }
         }
     }
+
+    fn unlink(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let name_str = name.to_string_lossy();
+        let client_id = self.get_client_id(req);
+        let uid = req.uid();
+        let gid = req.gid();
+
+        tracing::debug!(
+            "FUSE unlink: parent={}, name={}, uid={}, gid={}",
+            parent,
+            name_str,
+            uid,
+            gid
+        );
+
+        match self
+            .runtime
+            .block_on(self.service.unlink(parent, &name_str, uid, gid, client_id))
+        {
+            Ok(()) => {
+                tracing::debug!("FUSE unlink success");
+                reply.ok();
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE unlink error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn symlink(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        link_name: &OsStr,
+        target: &std::path::Path,
+        reply: ReplyEntry,
+    ) {
+        let link_name_str = link_name.to_string_lossy();
+        let target_str = target.to_string_lossy();
+        let client_id = self.get_client_id(req);
+
+        tracing::debug!(
+            "FUSE symlink: parent={}, link_name={}, target={}",
+            parent,
+            link_name_str,
+            target_str
+        );
+
+        match self.runtime.block_on(self.service.symlink(
+            parent,
+            &link_name_str,
+            &target_str,
+            req.uid(),
+            req.gid(),
+            client_id,
+        )) {
+            Ok(attr) => {
+                let fuse_attr = self.to_fuse_attr(&attr);
+                tracing::debug!("FUSE symlink success: inode={}", attr.ino);
+                reply.entry(&TTL, &fuse_attr, 0);
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE symlink error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: fuser::ReplyData) {
+        tracing::debug!("FUSE readlink: ino={}", ino);
+
+        match self.runtime.block_on(self.service.readlink(ino)) {
+            Ok(target) => {
+                tracing::debug!("FUSE readlink success: target={}", target);
+                reply.data(target.as_bytes());
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE readlink error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        tracing::debug!("FUSE release: fh={}", fh);
+
+        match self.runtime.block_on(self.service.release(fh)) {
+            Ok(()) => {
+                tracing::debug!("FUSE release success");
+                reply.ok();
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE release error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
 }
 
 // Export a stub when fuser feature is disabled

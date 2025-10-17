@@ -92,7 +92,7 @@ async fn test_multi_stripe_metadata_persistence() {
 
     // Open file
     service
-        .open(inode, 0, client_id)
+        .open(inode, 0, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -106,7 +106,7 @@ async fn test_multi_stripe_metadata_persistence() {
     let mut offset = 0u64;
     for chunk in data.chunks(STRIPE_SIZE) {
         let bytes_written = service
-            .write(inode, offset, chunk.to_vec(), client_id)
+            .write(inode, offset, chunk.to_vec(), 1000, 1000, client_id)
             .await
             .expect("Failed to write");
 
@@ -118,7 +118,7 @@ async fn test_multi_stripe_metadata_persistence() {
 
     // Read back and verify
     let read_data = service
-        .read(inode, 0, TOTAL_SIZE as u32, client_id)
+        .read(inode, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read");
 
@@ -155,7 +155,7 @@ async fn test_stripe_lookup_at_boundaries() {
     let inode = attrs.ino;
 
     service
-        .open(inode, 0, client_id)
+        .open(inode, 0, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -165,7 +165,7 @@ async fn test_stripe_lookup_at_boundaries() {
         let data = vec![(i as u8 + 10); STRIPE_SIZE]; // Patterns: 10, 11, 12
 
         service
-            .write(inode, offset, data, client_id)
+            .write(inode, offset, data, 1000, 1000, client_id)
             .await
             .expect("Failed to write");
     }
@@ -188,7 +188,7 @@ async fn test_stripe_lookup_at_boundaries() {
 
     for (offset, size, expected_byte, description) in test_cases {
         let data = service
-            .read(inode, offset, size, client_id)
+            .read(inode, offset, size, 1000, 1000, client_id)
             .await
             .expect(&format!("Failed to read at {}", description));
 
@@ -220,7 +220,7 @@ async fn test_stripe_metadata_after_truncation() {
     let inode = attrs.ino;
 
     service
-        .open(inode, 0, client_id)
+        .open(inode, 0, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -230,7 +230,7 @@ async fn test_stripe_metadata_after_truncation() {
         let data = vec![(i as u8 + 20); STRIPE_SIZE];
 
         service
-            .write(inode, offset, data, client_id)
+            .write(inode, offset, data, 1000, 1000, client_id)
             .await
             .expect("Failed to write");
     }
@@ -245,6 +245,8 @@ async fn test_stripe_metadata_after_truncation() {
             Some(6 * 1024 * 1024),
             None,
             None,
+            1000,
+            1000,
             client_id,
         )
         .await
@@ -252,7 +254,7 @@ async fn test_stripe_metadata_after_truncation() {
 
     // Read entire file - should get 6MB
     let data = service
-        .read(inode, 0, 12 * 1024 * 1024, client_id)
+        .read(inode, 0, 12 * 1024 * 1024, 1000, 1000, client_id)
         .await
         .expect("Failed to read");
 
@@ -289,7 +291,7 @@ async fn test_large_file_stripe_consistency() {
     let inode = attrs.ino;
 
     service
-        .open(inode, 0, client_id)
+        .open(inode, 0, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -301,7 +303,7 @@ async fn test_large_file_stripe_consistency() {
         let data = vec![pattern; STRIPE_SIZE];
 
         service
-            .write(inode, offset, data.clone(), client_id)
+            .write(inode, offset, data.clone(), 1000, 1000, client_id)
             .await
             .expect("Failed to write");
 
@@ -310,7 +312,7 @@ async fn test_large_file_stripe_consistency() {
 
     // Read entire file
     let read_data = service
-        .read(inode, 0, TOTAL_SIZE as u32, client_id)
+        .read(inode, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read full file");
 
@@ -322,7 +324,7 @@ async fn test_large_file_stripe_consistency() {
     let middle_size = STRIPE_SIZE as u32; // Read 4MB starting at 6MB
 
     let middle_data = service
-        .read(inode, middle_offset, middle_size, client_id)
+        .read(inode, middle_offset, middle_size, 1000, 1000, client_id)
         .await
         .expect("Failed to read middle section");
 

@@ -222,6 +222,9 @@ pub struct FileMetadata {
 
     /// Last access timestamp
     pub accessed_at: SystemTime,
+
+    /// Symlink target path (only for FileType::Symlink)
+    pub target: Option<String>,
 }
 
 // ===== Database Record Types =====
@@ -275,6 +278,8 @@ pub struct FileRecord {
     pub modified_at: SystemTime,
     pub accessed_at: SystemTime,
     pub storage_policy_id: u32,
+    /// Symlink target path (only for FileType::Symlink)
+    pub target: Option<String>,
 }
 
 /// Stripe record from the database.

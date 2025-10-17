@@ -97,6 +97,7 @@ pub mod fuse_adapter;
 pub mod implementation;
 pub mod inode;
 pub mod mount;
+pub mod permissions;
 pub mod raft_commands;
 pub mod raft_integration;
 pub mod types;
@@ -158,6 +159,8 @@ pub trait FileSystemService: Send + Sync {
     ///
     /// * `inode` - File inode
     /// * `flags` - Open flags (read, write, append)
+    /// * `uid` - User ID of the requesting process
+    /// * `gid` - Group ID of the requesting process
     /// * `client_id` - Client opening the file
     ///
     /// # Returns
@@ -171,6 +174,8 @@ pub trait FileSystemService: Send + Sync {
         &self,
         inode: u64,
         flags: u32,
+        uid: u32,
+        gid: u32,
         client_id: ClientId,
     ) -> Result<(u64, FileAttr), Error>;
 
@@ -181,6 +186,8 @@ pub trait FileSystemService: Send + Sync {
     /// * `inode` - File inode
     /// * `offset` - Byte offset in file
     /// * `size` - Number of bytes to read
+    /// * `uid` - User ID of the requesting process
+    /// * `gid` - Group ID of the requesting process
     /// * `client_id` - Client reading the file
     ///
     /// # Returns
@@ -195,6 +202,8 @@ pub trait FileSystemService: Send + Sync {
         inode: u64,
         offset: u64,
         size: u32,
+        uid: u32,
+        gid: u32,
         client_id: ClientId,
     ) -> Result<Vec<u8>, Error>;
 
@@ -205,6 +214,8 @@ pub trait FileSystemService: Send + Sync {
     /// * `inode` - File inode
     /// * `offset` - Byte offset in file
     /// * `data` - Data to write
+    /// * `uid` - User ID of the requesting process
+    /// * `gid` - Group ID of the requesting process
     /// * `client_id` - Client writing the file
     ///
     /// # Returns
@@ -222,6 +233,8 @@ pub trait FileSystemService: Send + Sync {
         inode: u64,
         offset: u64,
         data: Vec<u8>,
+        uid: u32,
+        gid: u32,
         client_id: ClientId,
     ) -> Result<u32, Error>;
 
@@ -231,12 +244,82 @@ pub trait FileSystemService: Send + Sync {
     ///
     /// * `parent` - Parent directory inode
     /// * `name` - File name to delete
+    /// * `uid` - User ID of the requesting process
+    /// * `gid` - Group ID of the requesting process
     /// * `client_id` - Client deleting the file
     ///
     /// # Errors
     ///
     /// Returns an error if file not found or permission denied.
-    async fn unlink(&self, parent: u64, name: &str, client_id: ClientId) -> Result<(), Error>;
+    async fn unlink(
+        &self,
+        parent: u64,
+        name: &str,
+        uid: u32,
+        gid: u32,
+        client_id: ClientId,
+    ) -> Result<(), Error>;
+
+    /// Create a symbolic link.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent` - Parent directory inode
+    /// * `name` - Name of the symbolic link
+    /// * `target` - Target path the link points to
+    /// * `uid` - Owner user ID
+    /// * `gid` - Owner group ID
+    /// * `client_id` - Client creating the link
+    ///
+    /// # Returns
+    ///
+    /// File attributes for the created symlink.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Parent directory doesn't exist
+    /// - Link already exists
+    /// - Permission denied
+    async fn symlink(
+        &self,
+        parent: u64,
+        name: &str,
+        target: &str,
+        uid: u32,
+        gid: u32,
+        client_id: ClientId,
+    ) -> Result<FileAttr, Error>;
+
+    /// Read the target of a symbolic link.
+    ///
+    /// # Arguments
+    ///
+    /// * `inode` - Symlink inode
+    ///
+    /// # Returns
+    ///
+    /// Target path that the symlink points to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - File not found
+    /// - File is not a symbolic link
+    async fn readlink(&self, inode: u64) -> Result<String, Error>;
+
+    /// Release (close) an open file handle.
+    ///
+    /// Called when a file handle is closed. Cleans up open file tracking.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_handle` - The file handle to release
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file handle is not found.
+    async fn release(&self, file_handle: u64) -> Result<(), Error>;
 
     // ===== Directory Operations =====
 
@@ -270,6 +353,8 @@ pub trait FileSystemService: Send + Sync {
     ///
     /// * `parent` - Parent directory inode
     /// * `name` - Directory name to remove
+    /// * `uid` - User ID of the requesting process
+    /// * `gid` - Group ID of the requesting process
     /// * `client_id` - Client removing the directory
     ///
     /// # Errors
@@ -278,7 +363,14 @@ pub trait FileSystemService: Send + Sync {
     /// - Directory not empty
     /// - Directory not found
     /// - Permission denied
-    async fn rmdir(&self, parent: u64, name: &str, client_id: ClientId) -> Result<(), Error>;
+    async fn rmdir(
+        &self,
+        parent: u64,
+        name: &str,
+        uid: u32,
+        gid: u32,
+        client_id: ClientId,
+    ) -> Result<(), Error>;
 
     /// Read directory contents.
     ///
@@ -325,11 +417,13 @@ pub trait FileSystemService: Send + Sync {
     ///
     /// * `inode` - File inode
     /// * `mode` - New permissions (optional)
-    /// * `uid` - New owner user ID (optional)
-    /// * `gid` - New owner group ID (optional)
+    /// * `new_uid` - New owner user ID (optional)
+    /// * `new_gid` - New owner group ID (optional)
     /// * `size` - New size (optional, for truncate)
     /// * `atime` - New access time (optional)
     /// * `mtime` - New modification time (optional)
+    /// * `req_uid` - User ID of the requesting process
+    /// * `req_gid` - Group ID of the requesting process
     /// * `client_id` - Client setting attributes
     ///
     /// # Returns
@@ -344,11 +438,13 @@ pub trait FileSystemService: Send + Sync {
         &self,
         inode: u64,
         mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
+        new_uid: Option<u32>,
+        new_gid: Option<u32>,
         size: Option<u64>,
         atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
+        req_uid: u32,
+        req_gid: u32,
         client_id: ClientId,
     ) -> Result<FileAttr, Error>;
 
