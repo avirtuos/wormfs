@@ -69,10 +69,13 @@
 //! metrics.publish_labeled("filestore.chunk_writes", 1, MetricType::Counter, UnitType::Operations, labels)?;
 //! ```
 
+pub mod implementation;
 pub mod types;
 
 use async_trait::async_trait;
+pub use implementation::MetricServiceImpl;
 use std::collections::HashMap;
+use std::time::Duration;
 pub use types::{
     AggregatedMetric, Config, Error, MetricSnapshot, MetricType, MetricValue, UnitType,
 };
@@ -182,4 +185,22 @@ pub trait MetricService: Send + Sync + Clone {
     ///
     /// Snapshot containing all aggregated metrics.
     fn snapshot(&self) -> MetricSnapshot;
+
+    /// Get time-series data for a specific metric.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Metric name
+    /// * `labels` - Optional labels to filter by
+    /// * `duration` - How far back to retrieve (from now)
+    ///
+    /// # Returns
+    ///
+    /// Vector of (timestamp, value) pairs ordered by time (oldest first).
+    fn get_time_series(
+        &self,
+        name: &str,
+        labels: Option<HashMap<String, String>>,
+        duration: Duration,
+    ) -> Vec<(std::time::SystemTime, f64)>;
 }

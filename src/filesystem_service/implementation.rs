@@ -18,6 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
+use tokio::time::Instant;
+
+// Import MetricService trait
+use crate::metric_service::MetricService;
 
 /// Overflow-safe helper: Check if offset + len would overflow u64.
 ///
@@ -78,9 +82,20 @@ pub struct FileSystemServiceImpl {
 
     /// Lock extension background task handle
     lock_extension_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+
+    /// Optional metrics service for instrumentation
+    metrics: Option<Arc<crate::metric_service::MetricServiceImpl>>,
 }
 
 impl FileSystemServiceImpl {
+    /// Set the metrics service for instrumentation.
+    ///
+    /// This method allows dependency injection of the metrics service after
+    /// FileSystemService construction, avoiding circular dependencies during initialization.
+    pub fn set_metrics(&mut self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
+        self.metrics = Some(metrics);
+    }
+
     /// Create a new FileSystemServiceImpl.
     ///
     /// This constructor is crate-private and should only be called via
@@ -112,6 +127,7 @@ impl FileSystemServiceImpl {
             next_file_handle: AtomicU64::new(1), // Start file handles at 1
             client_sessions: Arc::new(RwLock::new(HashMap::new())),
             lock_extension_task: Arc::new(RwLock::new(None)),
+            metrics: None, // Will be set via dependency injection
         }
     }
 
@@ -807,6 +823,9 @@ impl FileSystemService for FileSystemServiceImpl {
         gid: u32,
         _client_id: ClientId,
     ) -> Result<Vec<u8>, Error> {
+        // Start timing for metrics
+        let start = Instant::now();
+
         tracing::debug!(
             "read: inode={}, offset={}, size={}, uid={}, gid={}",
             inode,
@@ -968,6 +987,44 @@ impl FileSystemService for FileSystemServiceImpl {
         // (equivalent to the 'noatime' mount option used by most production systems).
         // The getattr() operation returns creation time as atime.
 
+        // Publish metrics if available
+        if let Some(ref metrics) = self.metrics {
+            let elapsed = start.elapsed().as_secs_f64();
+            let bytes_read = result_data.len() as u64;
+
+            // Track read operation count
+            let _ = metrics.publish_counter(
+                "filesystem.read_ops.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            // Track bytes read (client-level)
+            let _ = metrics.publish_counter(
+                "filesystem.read_ops.bytes",
+                bytes_read,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Track read latency
+            let _ = metrics.publish_histogram(
+                "filesystem.read_ops.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+
+            // Track with inode-specific labels
+            let mut labels = std::collections::HashMap::new();
+            labels.insert("inode".to_string(), inode.to_string());
+            let _ = metrics.publish_labeled(
+                "filesystem.read_ops.by_inode",
+                crate::metric_service::MetricValue::Counter(1),
+                crate::metric_service::MetricType::Counter,
+                crate::metric_service::UnitType::Operations,
+                labels,
+            );
+        }
+
         tracing::debug!("read: returning {} bytes", result_data.len());
         Ok(result_data)
     }
@@ -981,6 +1038,10 @@ impl FileSystemService for FileSystemServiceImpl {
         gid: u32,
         _client_id: ClientId,
     ) -> Result<u32, Error> {
+        // Start timing for metrics
+        let start = Instant::now();
+        let bytes_to_write = data.len() as u64;
+
         tracing::debug!(
             "write: inode={}, offset={}, size={}, uid={}, gid={}",
             inode,
@@ -1218,6 +1279,43 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 7: Invalidate cache
         self.inode_manager.cache().invalidate(inode);
+
+        // Publish metrics if available
+        if let Some(ref metrics) = self.metrics {
+            let elapsed = start.elapsed().as_secs_f64();
+
+            // Track write operation count
+            let _ = metrics.publish_counter(
+                "filesystem.write_ops.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            // Track bytes written (client-level)
+            let _ = metrics.publish_counter(
+                "filesystem.write_ops.bytes",
+                bytes_to_write,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Track write latency
+            let _ = metrics.publish_histogram(
+                "filesystem.write_ops.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+
+            // Track with inode-specific labels
+            let mut labels = std::collections::HashMap::new();
+            labels.insert("inode".to_string(), inode.to_string());
+            let _ = metrics.publish_labeled(
+                "filesystem.write_ops.by_inode",
+                crate::metric_service::MetricValue::Counter(1),
+                crate::metric_service::MetricType::Counter,
+                crate::metric_service::UnitType::Operations,
+                labels,
+            );
+        }
 
         tracing::info!(
             "Wrote {} bytes to inode {} at offset {}",

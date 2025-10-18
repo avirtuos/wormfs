@@ -1,0 +1,45 @@
+//! Admin module for WormFS management and monitoring.
+//!
+//! This module provides a comprehensive admin interface with:
+//! - REST API endpoints for metrics, configuration, health, and logs
+//! - WebSocket streaming for real-time metrics updates
+//! - Web-based UI for monitoring and managing the filesystem
+//!
+//! # Architecture
+//!
+//! The admin module is organized as follows:
+//! - `types`: Configuration and error types
+//! - `handlers`: Request handlers for API endpoints
+//! - `ui`: HTML/CSS/JS templates for the web interface
+//! - `websocket`: WebSocket support for real-time streaming
+//! - `server`: Main HTTP server implementation
+//!
+//! # Usage
+//!
+//! ```rust,no_run
+//! use wormfs::admin::{AdminServer, Config};
+//! use wormfs::metric_service::{MetricService, MetricServiceImpl};
+//! use std::sync::Arc;
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = Config::default();
+//! let metrics = Arc::new(MetricServiceImpl::new(Default::default())?);
+//!
+//! let server = AdminServer::new(config, metrics);
+//! let handle = server.start()?;
+//!
+//! // Server runs in the background
+//! // Access UI at http://127.0.0.1:9090/
+//! # Ok(())
+//! # }
+//! ```
+
+pub mod handlers;
+pub mod server;
+pub mod types;
+pub mod ui;
+pub mod websocket;
+
+pub use server::AdminServer;
+pub use types::{Config, Error};

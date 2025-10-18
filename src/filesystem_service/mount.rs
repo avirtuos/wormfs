@@ -8,6 +8,7 @@ use super::implementation::FileSystemServiceImpl;
 use super::types::{Config, Error};
 use crate::file_store::FileStore;
 use crate::metadata_store::{MetadataStore, MetadataStoreFactory};
+use crate::metric_service::{MetricService, MetricServiceImpl};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,6 +31,12 @@ pub struct MountConfig {
 
     /// FileStore configuration
     pub file_store_config: crate::file_store::types::Config,
+
+    /// MetricService configuration (optional)
+    pub metric_config: Option<crate::metric_service::Config>,
+
+    /// Admin server configuration (optional)
+    pub admin_config: Option<crate::admin::Config>,
 
     /// Mount point path
     pub mount_point: std::path::PathBuf,
@@ -135,12 +142,68 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
             .map_err(|e| Error::DataFailed(format!("Failed to create FileStore: {}", e)))?,
     );
 
+    // Initialize MetricService if configured
+    let metrics = if let Some(metric_config) = config.metric_config.clone() {
+        tracing::info!("Initializing MetricService...");
+        let metric_service = MetricServiceImpl::new(metric_config.clone())
+            .map_err(|e| Error::Internal(format!("Failed to create MetricService: {}", e)))?;
+
+        // Background aggregation loop is automatically started in new()
+        // No need to spawn a separate task here
+
+        Some(Arc::new(metric_service))
+    } else {
+        tracing::info!("MetricService disabled");
+        None
+    };
+
+    // Start admin server if configured and metrics are available
+    let _admin_handle = if let (Some(admin_cfg), Some(metrics_svc)) =
+        (config.admin_config.clone(), metrics.as_ref())
+    {
+        tracing::info!(
+            "Starting admin server on http://{}:{}",
+            admin_cfg.bind_address,
+            admin_cfg.port
+        );
+
+        let admin_server =
+            crate::admin::AdminServer::new(admin_cfg.clone(), Arc::clone(metrics_svc));
+
+        match admin_server.start() {
+            Ok(handle) => {
+                tracing::info!("Admin server task spawned successfully");
+
+                // Give the server a moment to bind to the port
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                tracing::info!(
+                    "Admin server available at http://{}:{}",
+                    admin_cfg.bind_address,
+                    admin_cfg.port
+                );
+
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start admin server: {}", e);
+                None
+            }
+        }
+    } else {
+        if config.admin_config.is_some() && metrics.is_none() {
+            tracing::warn!("Admin server requires metrics to be enabled");
+        }
+        None
+    };
+
     // Create FileSystemService via factory
     tracing::info!("Creating FileSystemService...");
     let service = Arc::new(FileSystemServiceImplFactory::create(
         config.filesystem_config,
         metadata_store,
         file_store,
+        metrics,
     )?);
 
     // Initialize root directory

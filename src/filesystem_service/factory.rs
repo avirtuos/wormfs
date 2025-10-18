@@ -9,6 +9,7 @@ use super::raft_commands::StorageRaftMemberStub;
 use super::{Config, Error};
 use crate::file_store::FileStoreImpl;
 use crate::metadata_store::MetadataStoreImpl;
+use crate::metric_service::{MetricService, MetricServiceImpl};
 use std::sync::Arc;
 
 /// Concrete factory for creating FileSystemServiceImpl instances.
@@ -39,6 +40,7 @@ impl FileSystemServiceImplFactory {
     /// * `config` - Configuration for the filesystem service
     /// * `metadata_store` - MetadataStore instance for metadata operations
     /// * `file_store` - FileStore instance for chunk I/O operations
+    /// * `metrics` - Optional MetricService for telemetry collection
     ///
     /// # Returns
     ///
@@ -54,25 +56,35 @@ impl FileSystemServiceImplFactory {
     /// let config = Config::default();
     /// let metadata_store = MetadataStoreFactory::create(metadata_config).await?;
     /// let file_store = Arc::new(FileStore::new(file_store_config)?);
+    /// let metrics = Arc::new(MetricServiceImpl::new(metric_config)?);
     ///
     /// let service = FileSystemServiceImplFactory::create(
     ///     config,
     ///     metadata_store,
     ///     file_store,
+    ///     Some(metrics),
     /// )?;
     /// ```
     pub fn create(
         config: Config,
         metadata_store: MetadataStoreImpl,
         file_store: Arc<FileStoreImpl>,
+        metrics: Option<Arc<MetricServiceImpl>>,
     ) -> Result<FileSystemServiceImpl, Error> {
         // Create the service instance
         // Note: new() is pub(crate) so only callable from within filesystem_service module
         // The Raft stub is created internally with metadata_store
-        Ok(FileSystemServiceImpl::new(
-            config,
-            metadata_store,
-            file_store,
-        ))
+        let mut service = FileSystemServiceImpl::new(config, metadata_store, file_store.clone());
+
+        // Inject metrics if provided
+        if let Some(metrics_arc) = metrics {
+            // Set metrics on FileSystemService
+            service.set_metrics(metrics_arc.clone());
+
+            // Set metrics on FileStore
+            file_store.set_metrics(metrics_arc);
+        }
+
+        Ok(service)
     }
 }

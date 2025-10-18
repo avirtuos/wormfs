@@ -7,7 +7,7 @@
 //!
 //! ## Architecture
 //!
-//! The system is built around 11 key components:
+//! The system is built around 12 key components:
 //!
 //! - **StorageNode**: Top-level orchestrator that initializes and wires together all components
 //! - **StorageRaftMember**: Raft consensus implementation for metadata consistency
@@ -20,6 +20,7 @@
 //! - **StorageWatchdog**: Data integrity monitoring and repair
 //! - **MetricService**: Centralized metrics collection and aggregation
 //! - **FileSystemService**: FUSE filesystem API implementation
+//! - **AdminServer**: Web-based admin interface with REST API and real-time monitoring
 //!
 //! ## Design Principles
 //!
@@ -29,6 +30,7 @@
 //! - **Modularity**: Clean component boundaries with well-defined traits
 //! - **Async-First**: Built on Tokio for high-performance async I/O
 
+pub mod admin;
 pub mod file_store;
 pub mod filesystem_service;
 pub mod metadata_store;
