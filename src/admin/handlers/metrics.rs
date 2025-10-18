@@ -36,12 +36,20 @@ pub async fn metrics_handler(
         metrics_json.insert(name.clone(), metric_obj);
     }
 
+    // Extract dropped metrics count for top-level field
+    let dropped_metrics = snapshot
+        .metrics
+        .get("_internal.metrics.dropped")
+        .map(|m| m.value as u64)
+        .unwrap_or(0);
+
     let response = serde_json::json!({
         "metrics": metrics_json,
         "timestamp": snapshot.timestamp
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        "dropped_metrics": dropped_metrics,
     });
 
     Ok(Json(response))

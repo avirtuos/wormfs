@@ -220,6 +220,41 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         .format-bytes {
             font-family: 'Courier New', monospace;
         }
+
+        .warning-banner {
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 0.5rem;
+            padding: 1rem 1.5rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .warning-banner-icon {
+            font-size: 1.5rem;
+        }
+
+        .warning-banner-content {
+            flex: 1;
+        }
+
+        .warning-banner-title {
+            font-weight: 600;
+            color: #856404;
+            margin-bottom: 0.25rem;
+        }
+
+        .warning-banner-message {
+            color: #856404;
+            font-size: 0.875rem;
+        }
+
+        .warning-banner-count {
+            font-weight: 700;
+            color: #d39e00;
+        }
     </style>
 </head>
 <body x-data="adminApp()">
@@ -253,6 +288,19 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
         <!-- Monitoring Tab -->
         <div class="tab-panel" :class="{ 'active': activeTab === 'monitoring' }">
+            <!-- Dropped Metrics Warning -->
+            <div class="warning-banner" x-show="droppedMetrics > 0" x-cloak>
+                <div class="warning-banner-icon">⚠️</div>
+                <div class="warning-banner-content">
+                    <div class="warning-banner-title">Metrics Dropped</div>
+                    <div class="warning-banner-message">
+                        <span class="warning-banner-count" x-text="formatNumber(droppedMetrics)"></span>
+                        metrics have been dropped due to channel overflow.
+                        Consider increasing <code>channel_buffer_size</code> in the metrics configuration.
+                    </div>
+                </div>
+            </div>
+
             <div class="metrics-grid">
                 <div class="metric-card">
                     <div class="metric-label">Total Write Operations</div>
@@ -274,6 +322,12 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     <div class="metric-label">RMW Operations</div>
                     <div class="metric-value" x-text="formatNumber(metrics['filestore.rmw_operations.total'])">
                         <span class="metric-unit">ops</span>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Metrics Dropped</div>
+                    <div class="metric-value" x-text="formatNumber(droppedMetrics)">
+                        <span class="metric-unit">total</span>
                     </div>
                 </div>
             </div>
@@ -339,6 +393,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             return {
                 activeTab: 'monitoring',
                 metrics: {},
+                droppedMetrics: 0,
                 wsConnected: false,
                 ws: null,
 
@@ -385,6 +440,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                         const data = await response.json();
                         if (data.metrics) {
                             this.updateMetrics(data.metrics);
+                        }
+                        if (data.dropped_metrics !== undefined) {
+                            this.droppedMetrics = data.dropped_metrics;
                         }
                     } catch (e) {
                         console.error('Failed to fetch metrics:', e);

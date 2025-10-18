@@ -22,15 +22,23 @@ const BROADCAST_CAPACITY: usize = 100;
 pub struct WsState {
     pub metrics: Arc<MetricServiceImpl>,
     pub broadcast_tx: broadcast::Sender<String>,
+    /// Shutdown signal sender (shared across clones)
+    shutdown_tx: Arc<tokio::sync::broadcast::Sender<()>>,
+    /// Background task handle (shared across clones, using parking_lot for sync Drop)
+    _task_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl WsState {
     /// Create a new WebSocket state
     pub fn new(metrics: Arc<MetricServiceImpl>) -> Self {
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+
         Self {
             metrics,
             broadcast_tx,
+            shutdown_tx: Arc::new(shutdown_tx),
+            _task_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -38,46 +46,67 @@ impl WsState {
     pub fn start_broadcast_task(&self) {
         let metrics = self.metrics.clone();
         let tx = self.broadcast_tx.clone();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        tokio::spawn(async move {
+        let task_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
 
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Get metrics snapshot
+                        let snapshot = metrics.snapshot();
 
-                // Get metrics snapshot
-                let snapshot = metrics.snapshot();
+                        // Convert to JSON
+                        let mut metrics_json = serde_json::Map::new();
+                        for (name, metric) in snapshot.metrics.iter() {
+                            let metric_obj = serde_json::json!({
+                                "value": metric.value,
+                                "type": format!("{:?}", metric.metric_type),
+                                "unit": format!("{:?}", metric.unit),
+                                "timestamp": snapshot.timestamp
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            });
+                            metrics_json.insert(name.clone(), metric_obj);
+                        }
 
-                // Convert to JSON
-                let mut metrics_json = serde_json::Map::new();
-                for (name, metric) in snapshot.metrics.iter() {
-                    let metric_obj = serde_json::json!({
-                        "value": metric.value,
-                        "type": format!("{:?}", metric.metric_type),
-                        "unit": format!("{:?}", metric.unit),
-                        "timestamp": snapshot.timestamp
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    });
-                    metrics_json.insert(name.clone(), metric_obj);
-                }
+                        let payload = serde_json::json!({
+                            "metrics": metrics_json,
+                            "timestamp": snapshot.timestamp
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        });
 
-                let payload = serde_json::json!({
-                    "metrics": metrics_json,
-                    "timestamp": snapshot.timestamp
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                });
-
-                if let Ok(json_str) = serde_json::to_string(&payload) {
-                    // Send to all connected clients
-                    // Ignore send errors (happens when no receivers are connected)
-                    let _ = tx.send(json_str);
+                        if let Ok(json_str) = serde_json::to_string(&payload) {
+                            // Send to all connected clients
+                            // Ignore send errors (happens when no receivers are connected)
+                            let _ = tx.send(json_str);
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        // Shutdown signal received
+                        tracing::info!("WebSocket broadcast task stopped (shutdown signal)");
+                        break;
+                    }
                 }
             }
         });
+
+        // Store the handle
+        *self._task_handle.lock() = Some(task_handle);
+    }
+}
+
+impl Drop for WsState {
+    fn drop(&mut self) {
+        // Send shutdown signal (non-blocking)
+        // We don't wait for the task to complete to avoid blocking Drop
+        let _ = self.shutdown_tx.send(());
+
+        tracing::debug!("WsState dropped, shutdown signal sent");
     }
 }
 

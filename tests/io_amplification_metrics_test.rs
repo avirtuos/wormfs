@@ -46,14 +46,9 @@ async fn test_io_amplification_tracking() {
 
     let metrics =
         Arc::new(MetricServiceImpl::new(metric_config).expect("Failed to create metrics"));
-    let metrics_clone = metrics.clone();
 
-    // Start metrics aggregation loop
-    tokio::spawn(async move {
-        let _ = metrics_clone.run().await;
-    });
-
-    // Give metrics loop time to start
+    // Aggregation loop is automatically started in new()
+    // Give it a moment to initialize
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Inject metrics into file store
@@ -215,12 +210,8 @@ async fn test_no_amplification_for_aligned_writes() {
     let metrics = Arc::new(
         MetricServiceImpl::new(MetricConfig::default()).expect("Failed to create metrics"),
     );
-    let metrics_clone = metrics.clone();
 
-    tokio::spawn(async move {
-        let _ = metrics_clone.run().await;
-    });
-
+    // Aggregation loop is automatically started in new()
     tokio::time::sleep(Duration::from_millis(100)).await;
     file_store.set_metrics(metrics.clone());
 

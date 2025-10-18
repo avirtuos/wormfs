@@ -6,6 +6,7 @@ use super::types::{
 use super::MetricService;
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, RwLock};
@@ -72,6 +73,10 @@ impl MetricRegistry {
         }
     }
 
+    /// Update the registry with a new metric event.
+    ///
+    /// Counter values use saturating arithmetic and will cap at u64::MAX
+    /// instead of wrapping around, preserving monotonicity.
     fn update(&mut self, event: MetricEvent) -> Result<(), Error> {
         let key = MetricKey::new(event.name.clone(), event.labels.clone());
 
@@ -87,7 +92,8 @@ impl MetricRegistry {
 
         match event.value {
             MetricValue::Counter(value) => {
-                *self.counters.entry(key).or_insert(0) += value;
+                let counter = self.counters.entry(key).or_insert(0);
+                *counter = counter.saturating_add(value);
             }
             MetricValue::Gauge(value) => {
                 self.gauges.insert(key, value);
@@ -296,13 +302,14 @@ impl TimeSeriesStore {
 
 /// MetricService implementation with channel-based publishing.
 ///
-/// This implementation uses an unbounded channel for lock-free metric publishing.
+/// This implementation uses a bounded channel for metric publishing with backpressure handling.
+/// When the channel is full, metrics are dropped and counted rather than blocking the caller.
 /// The channel and background aggregation loop are internal implementation details
 /// not exposed through the trait interface.
 #[derive(Clone)]
 pub struct MetricServiceImpl {
     /// Channel sender for publishing metrics (private - not exposed in trait)
-    sender: mpsc::UnboundedSender<MetricEvent>,
+    sender: mpsc::Sender<MetricEvent>,
 
     /// Aggregated metrics registry (shared across clones)
     registry: Arc<RwLock<MetricRegistry>>,
@@ -312,6 +319,15 @@ pub struct MetricServiceImpl {
 
     /// Configuration
     config: Config,
+
+    /// Shutdown signal sender (shared across clones)
+    shutdown_tx: Arc<tokio::sync::broadcast::Sender<()>>,
+
+    /// Background task handle (shared across clones, using parking_lot for sync Drop)
+    _task_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+
+    /// Counter for metrics dropped due to channel overflow (shared across clones)
+    dropped_metrics: Arc<AtomicU64>,
 }
 
 impl MetricServiceImpl {
@@ -323,7 +339,8 @@ impl MetricServiceImpl {
             return Err(Error::ConfigError("Metrics are disabled".into()));
         }
 
-        let (sender, receiver) = mpsc::unbounded_channel();
+        // Use bounded channel to prevent OOM under extreme load
+        let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
         let registry = Arc::new(RwLock::new(MetricRegistry::new(config.max_cardinality)));
         let time_series = Arc::new(RwLock::new(TimeSeriesStore::new(
             config.max_points_per_metric,
@@ -331,17 +348,24 @@ impl MetricServiceImpl {
             config.time_series_sample_interval_secs,
         )));
 
+        // Counter for dropped metrics when channel is full
+        let dropped_metrics = Arc::new(AtomicU64::new(0));
+
+        // Create shutdown channel
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+
         // Spawn background aggregation loop
         let registry_clone = Arc::clone(&registry);
         let time_series_clone = Arc::clone(&time_series);
         let enable_time_series = config.enable_time_series;
 
-        tokio::spawn(async move {
+        let task_handle = tokio::spawn(async move {
             Self::aggregation_loop(
                 receiver,
                 registry_clone,
                 time_series_clone,
                 enable_time_series,
+                shutdown_rx,
             )
             .await;
         });
@@ -351,17 +375,22 @@ impl MetricServiceImpl {
             registry,
             time_series,
             config,
+            shutdown_tx: Arc::new(shutdown_tx),
+            _task_handle: Arc::new(parking_lot::Mutex::new(Some(task_handle))),
+            dropped_metrics,
         })
     }
 
     /// Background aggregation loop.
     ///
     /// Processes metric events from the channel and updates the registry and time-series store.
+    /// Exits gracefully when receiving a shutdown signal or when the channel is closed.
     async fn aggregation_loop(
-        mut receiver: mpsc::UnboundedReceiver<MetricEvent>,
+        mut receiver: mpsc::Receiver<MetricEvent>,
         registry: Arc<RwLock<MetricRegistry>>,
         time_series: Arc<RwLock<TimeSeriesStore>>,
         enable_time_series: bool,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     ) {
         tracing::info!("MetricService aggregation loop started");
 
@@ -391,6 +420,11 @@ impl MetricServiceImpl {
                         let mut ts = time_series.write().await;
                         ts.evict_old_points();
                     }
+                }
+                _ = shutdown_rx.recv() => {
+                    // Shutdown signal received
+                    tracing::info!("MetricService aggregation loop stopped (shutdown signal)");
+                    break;
                 }
                 else => {
                     // Channel closed
@@ -424,9 +458,17 @@ impl MetricService for MetricServiceImpl {
             labels: HashMap::new(),
         };
 
-        self.sender
-            .send(event)
-            .map_err(|_| Error::SendFailed("Channel send failed".into()))
+        match self.sender.try_send(event) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Increment dropped counter instead of blocking
+                self.dropped_metrics.fetch_add(1, Ordering::Relaxed);
+                Ok(()) // Don't fail - just drop and count
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(Error::SendFailed("Channel closed".into()))
+            }
+        }
     }
 
     fn publish_gauge(&self, name: &str, value: f64, unit: UnitType) -> Result<(), Error> {
@@ -439,9 +481,17 @@ impl MetricService for MetricServiceImpl {
             labels: HashMap::new(),
         };
 
-        self.sender
-            .send(event)
-            .map_err(|_| Error::SendFailed("Channel send failed".into()))
+        match self.sender.try_send(event) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Increment dropped counter instead of blocking
+                self.dropped_metrics.fetch_add(1, Ordering::Relaxed);
+                Ok(()) // Don't fail - just drop and count
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(Error::SendFailed("Channel closed".into()))
+            }
+        }
     }
 
     fn publish_histogram(&self, name: &str, value: f64, unit: UnitType) -> Result<(), Error> {
@@ -454,9 +504,17 @@ impl MetricService for MetricServiceImpl {
             labels: HashMap::new(),
         };
 
-        self.sender
-            .send(event)
-            .map_err(|_| Error::SendFailed("Channel send failed".into()))
+        match self.sender.try_send(event) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Increment dropped counter instead of blocking
+                self.dropped_metrics.fetch_add(1, Ordering::Relaxed);
+                Ok(()) // Don't fail - just drop and count
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(Error::SendFailed("Channel closed".into()))
+            }
+        }
     }
 
     fn publish_labeled(
@@ -476,19 +534,39 @@ impl MetricService for MetricServiceImpl {
             labels,
         };
 
-        self.sender
-            .send(event)
-            .map_err(|_| Error::SendFailed("Channel send failed".into()))
+        match self.sender.try_send(event) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Increment dropped counter instead of blocking
+                self.dropped_metrics.fetch_add(1, Ordering::Relaxed);
+                Ok(()) // Don't fail - just drop and count
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(Error::SendFailed("Channel closed".into()))
+            }
+        }
     }
 
     fn snapshot(&self) -> MetricSnapshot {
         // Use try_read to avoid blocking
         // If lock is held, return empty snapshot
-        let metrics = self
+        let mut metrics = self
             .registry
             .try_read()
             .map(|registry| registry.snapshot())
             .unwrap_or_default();
+
+        // Add special internal metric for dropped count
+        let dropped_count = self.dropped_metrics.load(Ordering::Relaxed);
+        metrics.insert(
+            "_internal.metrics.dropped".to_string(),
+            AggregatedMetric {
+                metric_type: MetricType::Counter,
+                unit: UnitType::Count,
+                value: dropped_count as f64,
+                labels: HashMap::new(),
+            },
+        );
 
         let time_series = if self.config.enable_time_series {
             self.time_series.try_read().ok().map(|ts| {
@@ -520,6 +598,16 @@ impl MetricService for MetricServiceImpl {
             .ok()
             .map(|ts| ts.get_series(name, labels, duration))
             .unwrap_or_default()
+    }
+}
+
+impl Drop for MetricServiceImpl {
+    fn drop(&mut self) {
+        // Send shutdown signal (non-blocking)
+        // We don't wait for the task to complete to avoid blocking Drop
+        let _ = self.shutdown_tx.send(());
+
+        tracing::debug!("MetricServiceImpl dropped, shutdown signal sent");
     }
 }
 

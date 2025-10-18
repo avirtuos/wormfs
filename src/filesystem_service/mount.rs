@@ -148,13 +148,8 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         let metric_service = MetricServiceImpl::new(metric_config.clone())
             .map_err(|e| Error::Internal(format!("Failed to create MetricService: {}", e)))?;
 
-        // Start background aggregation loop
-        let metric_service_clone = metric_service.clone();
-        tokio::spawn(async move {
-            if let Err(e) = metric_service_clone.run().await {
-                tracing::error!("MetricService aggregation loop failed: {}", e);
-            }
-        });
+        // Background aggregation loop is automatically started in new()
+        // No need to spawn a separate task here
 
         Some(Arc::new(metric_service))
     } else {

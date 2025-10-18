@@ -4755,6 +4755,7 @@ dependencies = [
  "md5",
  "mockall",
  "openraft",
+ "parking_lot 0.12.5",
  "priority-queue",
  "proptest",
  "prost",
