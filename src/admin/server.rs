@@ -1,0 +1,170 @@
+//! Main admin HTTP server implementation.
+//!
+//! Provides the admin interface with REST API endpoints, WebSocket streaming,
+//! and a web-based UI for monitoring and managing WormFS.
+
+use super::{
+    handlers::{config_handler, health_handler, logs_handler, metrics_handler, status_handler},
+    types::{Config, Error},
+    ui::templates::INDEX_HTML,
+    websocket::{ws_handler, WsState},
+};
+use crate::metric_service::MetricServiceImpl;
+use axum::{
+    response::{Html, IntoResponse},
+    routing::get,
+    Router,
+};
+use std::sync::Arc;
+use tower_http::trace::TraceLayer;
+
+/// Admin server instance
+pub struct AdminServer {
+    config: Config,
+    metrics: Arc<MetricServiceImpl>,
+}
+
+impl AdminServer {
+    /// Create a new admin server instance
+    pub fn new(config: Config, metrics: Arc<MetricServiceImpl>) -> Self {
+        Self { config, metrics }
+    }
+
+    /// Start the admin server
+    ///
+    /// This spawns a background task that runs the HTTP server on the configured port.
+    /// The server provides:
+    /// - REST API endpoints at `/api/*`
+    /// - WebSocket streaming at `/ws/metrics`
+    /// - Web UI at `/`
+    ///
+    /// # Returns
+    ///
+    /// A `tokio::task::JoinHandle` for the background server task.
+    pub fn start(self) -> Result<tokio::task::JoinHandle<()>, Error> {
+        if !self.config.enabled {
+            tracing::info!("Admin server is disabled");
+            return Err(Error::InvalidConfig("Admin server is disabled".to_string()));
+        }
+
+        let config = self.config.clone();
+        let metrics = self.metrics.clone();
+
+        let handle = tokio::spawn(async move {
+            if let Err(e) = Self::run_server(config, metrics).await {
+                tracing::error!("Admin server error: {}", e);
+            }
+        });
+
+        Ok(handle)
+    }
+
+    /// Internal method to run the server
+    async fn run_server(config: Config, metrics: Arc<MetricServiceImpl>) -> Result<(), Error> {
+        // Create WebSocket state and start broadcast task
+        let ws_state = WsState::new(metrics.clone());
+        ws_state.start_broadcast_task();
+
+        // Build the router
+        let app = Self::create_router(metrics, ws_state);
+
+        // Create bind address
+        let addr = format!("{}:{}", config.bind_address, config.port);
+        let socket_addr: std::net::SocketAddr = addr
+            .parse()
+            .map_err(|e| Error::ServerStartup(format!("Invalid bind address: {}", e)))?;
+
+        tracing::info!("Starting admin server on http://{}", socket_addr);
+
+        // Bind and serve
+        let listener = tokio::net::TcpListener::bind(socket_addr)
+            .await
+            .map_err(|e| Error::ServerStartup(format!("Failed to bind: {}", e)))?;
+
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| Error::ServerStartup(format!("Server error: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Create the Axum router with all routes
+    fn create_router(metrics: Arc<MetricServiceImpl>, ws_state: WsState) -> Router {
+        // Create WebSocket router with WsState
+        let ws_router = Router::new()
+            .route("/ws/metrics", get(ws_handler))
+            .with_state(ws_state);
+
+        // Create main router with metrics state
+        let api_router = Router::new()
+            // UI routes
+            .route("/", get(index_handler))
+            // API routes
+            .route("/api/metrics", get(metrics_handler))
+            .route("/api/health", get(health_handler))
+            .route("/api/status", get(status_handler))
+            .route("/api/config", get(config_handler))
+            .route("/api/logs", get(logs_handler))
+            .with_state(metrics);
+
+        // Merge routers and add tracing layer
+        api_router
+            .merge(ws_router)
+            .layer(TraceLayer::new_for_http())
+    }
+}
+
+/// Handler for the index page (main UI)
+async fn index_handler() -> impl IntoResponse {
+    Html(INDEX_HTML)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metric_service::{Config as MetricsConfig, MetricService};
+
+    #[tokio::test]
+    async fn test_admin_server_creation() {
+        let admin_config = Config {
+            enabled: true,
+            port: 9090,
+            bind_address: "127.0.0.1".to_string(),
+        };
+
+        let metrics_config = MetricsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+
+        let metrics =
+            Arc::new(MetricServiceImpl::new(metrics_config).expect("Failed to create metrics"));
+
+        let server = AdminServer::new(admin_config, metrics);
+
+        assert_eq!(server.config.port, 9090);
+        assert_eq!(server.config.bind_address, "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn test_disabled_server() {
+        let admin_config = Config {
+            enabled: false,
+            port: 9090,
+            bind_address: "127.0.0.1".to_string(),
+        };
+
+        let metrics_config = MetricsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+
+        let metrics =
+            Arc::new(MetricServiceImpl::new(metrics_config).expect("Failed to create metrics"));
+
+        let server = AdminServer::new(admin_config, metrics);
+
+        let result = server.start();
+        assert!(result.is_err());
+    }
+}

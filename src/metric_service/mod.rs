@@ -71,7 +71,6 @@
 
 pub mod implementation;
 pub mod types;
-pub mod http_server;
 
 use async_trait::async_trait;
 pub use implementation::MetricServiceImpl;

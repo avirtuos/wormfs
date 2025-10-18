@@ -35,6 +35,9 @@ pub struct MountConfig {
     /// MetricService configuration (optional)
     pub metric_config: Option<crate::metric_service::Config>,
 
+    /// Admin server configuration (optional)
+    pub admin_config: Option<crate::admin::Config>,
+
     /// Mount point path
     pub mount_point: std::path::PathBuf,
 
@@ -153,23 +156,49 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
             }
         });
 
-        let metric_service_arc = Arc::new(metric_service);
-
-        // Start HTTP metrics server if Prometheus is enabled
-        if metric_config.enable_prometheus {
-            tracing::info!(
-                "Starting metrics HTTP server on port {}...",
-                metric_config.prometheus_port
-            );
-            crate::metric_service::http_server::start_metrics_server(
-                metric_service_arc.clone(),
-                metric_config.prometheus_port,
-            );
-        }
-
-        Some(metric_service_arc)
+        Some(Arc::new(metric_service))
     } else {
         tracing::info!("MetricService disabled");
+        None
+    };
+
+    // Start admin server if configured and metrics are available
+    let _admin_handle = if let (Some(admin_cfg), Some(metrics_svc)) =
+        (config.admin_config.clone(), metrics.as_ref())
+    {
+        tracing::info!(
+            "Starting admin server on http://{}:{}",
+            admin_cfg.bind_address,
+            admin_cfg.port
+        );
+
+        let admin_server =
+            crate::admin::AdminServer::new(admin_cfg.clone(), Arc::clone(metrics_svc));
+
+        match admin_server.start() {
+            Ok(handle) => {
+                tracing::info!("Admin server task spawned successfully");
+
+                // Give the server a moment to bind to the port
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                tracing::info!(
+                    "Admin server available at http://{}:{}",
+                    admin_cfg.bind_address,
+                    admin_cfg.port
+                );
+
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start admin server: {}", e);
+                None
+            }
+        }
+    } else {
+        if config.admin_config.is_some() && metrics.is_none() {
+            tracing::warn!("Admin server requires metrics to be enabled");
+        }
         None
     };
 

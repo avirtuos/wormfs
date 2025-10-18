@@ -254,13 +254,18 @@ enabled = true
 aggregation_window_secs = 10
 max_cardinality = 10000
 channel_buffer_size = 10000
-enable_prometheus = true
-prometheus_port = 9090
+enable_prometheus = false
+prometheus_port = 9091  # Not used when enable_prometheus=false
 enable_otel = false
 enable_time_series = true
 time_series_retention_secs = 3600  # 1 hour of historical data
 max_points_per_metric = 3600
 time_series_sample_interval_secs = 1
+
+[admin]
+enabled = true
+port = 9090
+bind_address = "127.0.0.1"
 EOF
 
     print_success "Created temporary configuration"
@@ -293,15 +298,16 @@ EOF
     fi
 
     WORMFS_LOG=$(mktemp -t wormfs-demo-fuse-log.XXXXXX)
-    print_command "$WORMFS_BINARY mount --config $CONFIG_FILE --mount-point $MOUNT_POINT --foreground"
+    print_command "$WORMFS_BINARY mount --config $CONFIG_FILE --mount-point $MOUNT_POINT --foreground --verbose"
     echo ""
     echo "Mounting WormFS with config file..."
 
-    # Start FUSE mount in background with config file
+    # Start FUSE mount in background with config file and verbose logging
     "$WORMFS_BINARY" mount \
         --config "$CONFIG_FILE" \
         --mount-point "$MOUNT_POINT" \
-        --foreground > "$WORMFS_LOG" 2>&1 &
+        --foreground \
+        --verbose > "$WORMFS_LOG" 2>&1 &
     WORMFS_PID=$!
     verbose "FUSE PID: $WORMFS_PID"
     verbose "FUSE log: $WORMFS_LOG"
@@ -331,6 +337,39 @@ EOF
     print_command "mount | grep wormfs"
     mount | grep wormfs
     print_success "Filesystem appears in mount table"
+
+    # Check if admin server is responding
+    echo ""
+    echo "Checking admin server..."
+    if curl -s --max-time 2 http://127.0.0.1:9090/api/health > /dev/null 2>&1; then
+        print_success "Admin server is responding on port 9090"
+    else
+        print_info "Admin server health check failed - checking logs..."
+        echo ""
+        echo "Last 20 lines of WormFS log:"
+        tail -20 "$WORMFS_LOG" | while IFS= read -r line; do
+            echo -e "${CYAN}  $line${NC}"
+        done
+        echo ""
+    fi
+
+    # Display Admin UI link
+    echo ""
+    echo "=========================================="
+    echo -e "${BOLD}${GREEN}🌐 Admin Web UI Available!${NC}"
+    echo "=========================================="
+    echo ""
+    echo -e "  ${CYAN}Open in your browser:${NC}"
+    echo -e "  ${BOLD}${BLUE}http://127.0.0.1:9090/${NC}"
+    echo ""
+    echo -e "  ${CYAN}Features:${NC}"
+    echo -e "    • ${GREEN}📊 Real-time Metrics Monitoring${NC}"
+    echo -e "    • ${GREEN}⚙️  Configuration Viewer${NC}"
+    echo -e "    • ${GREEN}❤️  Health & Status Dashboard${NC}"
+    echo -e "    • ${GREEN}📝 Live Log Streaming${NC}"
+    echo ""
+    echo "=========================================="
+    echo ""
 
     if [ "$SKIP_TESTS" -eq 1 ]; then
         print_info "Skipping file/directory operation tests (--skip-tests flag)"
@@ -507,14 +546,19 @@ EOF
     # Step 10: Metrics Summary
     print_section "Step 10: Metrics Summary"
 
-    echo "Fetching real-time metrics from WormFS MetricService HTTP endpoint..."
+    echo "Fetching real-time metrics from WormFS Admin API endpoint..."
     echo ""
 
-    # Fetch metrics from HTTP endpoint
-    METRICS_URL="http://localhost:9090/metrics"
+    # Fetch metrics from HTTP endpoint (disable exit-on-error temporarily)
+    METRICS_URL="http://localhost:9090/api/metrics"
+    set +e  # Temporarily disable exit on error for metrics fetching
     METRICS_JSON=$(curl -s "$METRICS_URL" 2>/dev/null)
+    CURL_EXIT=$?
+    set -e  # Re-enable exit on error
 
-    if [ $? -eq 0 ] && [ -n "$METRICS_JSON" ]; then
+    if [ $CURL_EXIT -eq 0 ] && [ -n "$METRICS_JSON" ]; then
+        set +e  # Disable exit on error for metrics processing (in case jq/bc/numfmt fail)
+
         echo -e "${BOLD}📊 Live Metrics from WormFS:${NC}"
         echo ""
 
@@ -596,12 +640,42 @@ EOF
         fi
         echo ""
 
-        echo -e "${YELLOW}${BOLD}ℹ️  Metrics Endpoint Details:${NC}"
-        echo "  • HTTP endpoint: $METRICS_URL"
+        echo -e "${YELLOW}${BOLD}ℹ️  Admin Interface Details:${NC}"
+        echo "  • Web UI: http://127.0.0.1:9090/"
+        echo "  • API endpoint: $METRICS_URL"
         METRIC_COUNT=$(echo "$METRICS_JSON" | jq '.metrics | length' 2>/dev/null || echo "0")
         echo "  ✓ Total metrics collected: $METRIC_COUNT"
+        echo ""
+        echo -e "${GREEN}${BOLD}💡 Tip:${NC} Open the Admin UI in your browser for live metrics and monitoring!"
+
+        set -e  # Re-enable exit on error
+    else
+        print_info "Could not fetch metrics from Admin API (this is normal if jq is not installed)"
+        echo "  • The Admin UI may still be accessible at: http://127.0.0.1:9090/"
+        echo "  • You can check it manually in your browser"
+        echo ""
     fi
 
+    # Demo Complete - Display summary and wait for user
+    print_header "Demo Complete!"
+    echo ""
+    echo -e "${GREEN}✓ All Phase 1 capabilities demonstrated successfully!${NC}"
+    echo ""
+    echo "=========================================="
+    echo -e "${BOLD}${GREEN}🌐 Admin Web UI${NC}"
+    echo "=========================================="
+    echo ""
+    echo -e "  ${CYAN}Open in your browser:${NC}"
+    echo -e "  ${BOLD}${BLUE}http://127.0.0.1:9090/${NC}"
+    echo ""
+    echo "=========================================="
+    echo ""
+    echo "WormFS is still running. You can:"
+    echo "  • Explore the admin UI in your browser"
+    echo "  • Manually test the filesystem at: $MOUNT_POINT"
+    echo "  • Check the metrics at: http://127.0.0.1:9090/api/metrics"
+    echo ""
+    echo -e "${YELLOW}${BOLD}Press Enter when ready to unmount and cleanup...${NC}"
     read -r
 }
 
