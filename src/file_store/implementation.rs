@@ -10,7 +10,11 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::RwLock as TokioRwLock;
+use tokio::time::Instant;
+
+// Import MetricService trait to use its methods
+use crate::metric_service::MetricService;
 
 /// Magic bytes for chunk file format
 const CHUNK_MAGIC: &[u8; 4] = b"WORM";
@@ -23,8 +27,11 @@ struct FileStoreInner {
     /// Configuration
     config: Config,
 
-    /// Local disks managed by this node
-    disks: RwLock<HashMap<DiskId, DiskInfo>>,
+    /// Local disks managed by this node (async lock for disk operations)
+    disks: TokioRwLock<HashMap<DiskId, DiskInfo>>,
+
+    /// Optional metrics service for instrumentation (sync lock for fire-and-forget publishing)
+    metrics: std::sync::RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>,
     // NOTE: MetadataStore integration will be added in Phase 2+
     // For Phase 1, FileStore operates independently
 }
@@ -206,6 +213,16 @@ impl FileStoreImpl {
     }
 }
 
+impl FileStoreImpl {
+    /// Set the metrics service for instrumentation.
+    ///
+    /// This method allows dependency injection of the metrics service after
+    /// FileStore construction, avoiding circular dependencies during initialization.
+    pub fn set_metrics(&self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
+        *self.inner.metrics.write().unwrap() = Some(metrics);
+    }
+}
+
 #[async_trait]
 impl FileStore for FileStoreImpl {
     fn new(config: Config) -> Result<Self, Error> {
@@ -240,7 +257,8 @@ impl FileStore for FileStoreImpl {
 
         let inner = FileStoreInner {
             config,
-            disks: RwLock::new(disks),
+            disks: TokioRwLock::new(disks),
+            metrics: std::sync::RwLock::new(None),
         };
 
         Ok(Self {
@@ -256,6 +274,10 @@ impl FileStore for FileStoreImpl {
         data: Vec<u8>,
         policy: StoragePolicy,
     ) -> Result<StripeMetadata, Error> {
+        // Start timing for latency metric
+        let start = Instant::now();
+        let data_size = data.len() as u64;
+
         // Phase 1: For now, we only support local writes to first available disk
         // Phase 2+ will add distributed chunk placement across nodes
 
@@ -327,6 +349,43 @@ impl FileStore for FileStoreImpl {
             chunk_metadata,
         );
 
+        // Publish metrics if available
+        if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+            let elapsed = start.elapsed().as_secs_f64();
+
+            // Track stripe write operation
+            let _ = metrics.publish_counter(
+                "filestore.stripe_writes.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            // Track bytes written
+            let _ = metrics.publish_counter(
+                "filestore.stripe_writes.bytes",
+                data_size,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Track write latency
+            let _ = metrics.publish_histogram(
+                "filestore.stripe_writes.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+
+            // Track with file-specific labels
+            let mut labels = std::collections::HashMap::new();
+            labels.insert("file_id".to_string(), file_id.0.to_string());
+            let _ = metrics.publish_labeled(
+                "filestore.stripe_writes.by_file",
+                crate::metric_service::MetricValue::Counter(1),
+                crate::metric_service::MetricType::Counter,
+                crate::metric_service::UnitType::Operations,
+                labels,
+            );
+        }
+
         Ok(stripe_metadata)
     }
 
@@ -336,6 +395,9 @@ impl FileStore for FileStoreImpl {
         stripe_id: StripeId,
         chunks: Vec<ChunkMetadata>,
     ) -> Result<Vec<u8>, Error> {
+        // Start timing for latency metric
+        let start = Instant::now();
+
         // Sort chunks by chunk_index to ensure correct erasure coding order
         let mut chunks_sorted = chunks;
         chunks_sorted.sort_by_key(|c| c.chunk_index);
@@ -395,6 +457,44 @@ impl FileStore for FileStoreImpl {
         // Decode stripe from shards
         let data = erasure_coding::decode_stripe(shards, &policy, original_size)?;
 
+        // Publish metrics if available
+        if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+            let elapsed = start.elapsed().as_secs_f64();
+            let data_size = data.len() as u64;
+
+            // Track stripe read operation
+            let _ = metrics.publish_counter(
+                "filestore.stripe_reads.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            // Track bytes read
+            let _ = metrics.publish_counter(
+                "filestore.stripe_reads.bytes",
+                data_size,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Track read latency
+            let _ = metrics.publish_histogram(
+                "filestore.stripe_reads.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+
+            // Track with file-specific labels
+            let mut labels = std::collections::HashMap::new();
+            labels.insert("file_id".to_string(), file_id.0.to_string());
+            let _ = metrics.publish_labeled(
+                "filestore.stripe_reads.by_file",
+                crate::metric_service::MetricValue::Counter(1),
+                crate::metric_service::MetricType::Counter,
+                crate::metric_service::UnitType::Operations,
+                labels,
+            );
+        }
+
         Ok(data)
     }
 
@@ -408,10 +508,17 @@ impl FileStore for FileStoreImpl {
         new_data: Vec<u8>,
         policy: StoragePolicy,
     ) -> Result<StripeMetadata, Error> {
+        // Start timing and capture logical I/O size
+        let start = Instant::now();
+        let logical_bytes = new_data.len() as u64;
+
         // 1. Read existing stripe
         let mut stripe_data = self
             .read_stripe(file_id, stripe_id, existing_chunks)
             .await?;
+
+        // Track physical I/O (read entire stripe)
+        let read_bytes = stripe_data.len() as u64;
 
         // 2. Apply modifications
         let end = (offset as usize) + new_data.len();
@@ -420,10 +527,69 @@ impl FileStore for FileStoreImpl {
         }
         stripe_data[offset as usize..end].copy_from_slice(&new_data);
 
+        // Track physical I/O (write entire stripe)
+        let write_bytes = stripe_data.len() as u64;
+
         // 3. Write as new stripe (generates NEW ChunkIds)
         // Note: This creates NEW chunks without deleting old ones
-        self.write_stripe(file_id, stripe_id, stripe_offset, stripe_data, policy)
-            .await
+        let result = self
+            .write_stripe(file_id, stripe_id, stripe_offset, stripe_data, policy)
+            .await?;
+
+        // Publish I/O amplification metrics
+        if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+            let elapsed = start.elapsed().as_secs_f64();
+            let physical_bytes = read_bytes + write_bytes;
+            let amplification = physical_bytes as f64 / logical_bytes as f64;
+
+            // Track I/O amplification ratio
+            let _ = metrics.publish_histogram(
+                "filestore.io_amplification.ratio",
+                amplification,
+                crate::metric_service::UnitType::Count,
+            );
+
+            // Track RMW operation count
+            let _ = metrics.publish_counter(
+                "filestore.rmw_operations.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            // Track physical I/O (actual bytes read + written)
+            let _ = metrics.publish_counter(
+                "filestore.rmw_operations.physical_bytes",
+                physical_bytes,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Track logical I/O (bytes the client wanted to write)
+            let _ = metrics.publish_counter(
+                "filestore.rmw_operations.logical_bytes",
+                logical_bytes,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Track RMW latency
+            let _ = metrics.publish_histogram(
+                "filestore.rmw_operations.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+
+            // Track with file-specific labels for debugging
+            let mut labels = std::collections::HashMap::new();
+            labels.insert("file_id".to_string(), file_id.0.to_string());
+            let _ = metrics.publish_labeled(
+                "filestore.rmw_operations.by_file",
+                crate::metric_service::MetricValue::Counter(1),
+                crate::metric_service::MetricType::Counter,
+                crate::metric_service::UnitType::Operations,
+                labels,
+            );
+        }
+
+        Ok(result)
     }
 
     async fn stage_chunk(&self, _chunk_data: ChunkData) -> Result<ChunkId, Error> {

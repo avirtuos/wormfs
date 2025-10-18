@@ -8,6 +8,7 @@ use super::implementation::FileSystemServiceImpl;
 use super::types::{Config, Error};
 use crate::file_store::FileStore;
 use crate::metadata_store::{MetadataStore, MetadataStoreFactory};
+use crate::metric_service::{MetricService, MetricServiceImpl};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,6 +31,9 @@ pub struct MountConfig {
 
     /// FileStore configuration
     pub file_store_config: crate::file_store::types::Config,
+
+    /// MetricService configuration (optional)
+    pub metric_config: Option<crate::metric_service::Config>,
 
     /// Mount point path
     pub mount_point: std::path::PathBuf,
@@ -135,12 +139,47 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
             .map_err(|e| Error::DataFailed(format!("Failed to create FileStore: {}", e)))?,
     );
 
+    // Initialize MetricService if configured
+    let metrics = if let Some(metric_config) = config.metric_config.clone() {
+        tracing::info!("Initializing MetricService...");
+        let metric_service = MetricServiceImpl::new(metric_config.clone())
+            .map_err(|e| Error::Internal(format!("Failed to create MetricService: {}", e)))?;
+
+        // Start background aggregation loop
+        let metric_service_clone = metric_service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = metric_service_clone.run().await {
+                tracing::error!("MetricService aggregation loop failed: {}", e);
+            }
+        });
+
+        let metric_service_arc = Arc::new(metric_service);
+
+        // Start HTTP metrics server if Prometheus is enabled
+        if metric_config.enable_prometheus {
+            tracing::info!(
+                "Starting metrics HTTP server on port {}...",
+                metric_config.prometheus_port
+            );
+            crate::metric_service::http_server::start_metrics_server(
+                metric_service_arc.clone(),
+                metric_config.prometheus_port,
+            );
+        }
+
+        Some(metric_service_arc)
+    } else {
+        tracing::info!("MetricService disabled");
+        None
+    };
+
     // Create FileSystemService via factory
     tracing::info!("Creating FileSystemService...");
     let service = Arc::new(FileSystemServiceImplFactory::create(
         config.filesystem_config,
         metadata_store,
         file_store,
+        metrics,
     )?);
 
     // Initialize root directory

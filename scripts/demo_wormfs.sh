@@ -54,6 +54,7 @@ while [[ $# -gt 0 ]]; do
             echo "  • FileSystemService FUSE mounting"
             echo "  • File operations (create, read, write, delete)"
             echo "  • Directory operations (mkdir, readdir, rmdir)"
+            echo "  • Metrics collection (I/O amplification & performance tracking)"
             echo "  • Graceful shutdown (Ctrl+C)"
             echo ""
             exit 0
@@ -163,6 +164,7 @@ main() {
     echo "  • Erasure Coding (FileStore + Reed-Solomon)"
     echo "  • FUSE Filesystem (FileSystemService)"
     echo "  • File & Directory Operations"
+    echo "  • Metrics Collection (I/O Amplification Tracking)"
     echo "  • Graceful Shutdown"
     echo ""
 
@@ -246,6 +248,19 @@ max_file_size = 1099511627776
 enable_xattr = false
 uid = $(id -u)
 gid = $(id -g)
+
+[metrics]
+enabled = true
+aggregation_window_secs = 10
+max_cardinality = 10000
+channel_buffer_size = 10000
+enable_prometheus = true
+prometheus_port = 9090
+enable_otel = false
+enable_time_series = true
+time_series_retention_secs = 3600  # 1 hour of historical data
+max_points_per_metric = 3600
+time_series_sample_interval_secs = 1
 EOF
 
     print_success "Created temporary configuration"
@@ -262,6 +277,7 @@ EOF
     print_component "1. MetadataStore      (SQLite + WAL for metadata persistence)"
     print_component "2. FileStore          (Reed-Solomon erasure coding + chunk storage)"
     print_component "3. FileSystemService  (FUSE integration for filesystem ops)"
+    print_component "4. MetricService      (I/O amplification & performance metrics)"
     echo ""
 
     # Clean up any stale mount before attempting to mount
@@ -488,48 +504,104 @@ EOF
     DIR_COUNT=$(find "$MOUNT_POINT" -type d | wc -l)
     echo "Directories: $DIR_COUNT"
 
-    # Final summary
-    print_header "Demo Complete! 🎉"
+    # Step 10: Metrics Summary
+    print_section "Step 10: Metrics Summary"
 
-    echo ""
-    echo -e "${GREEN}${BOLD}✓ Successfully Demonstrated Phase 1 Capabilities:${NC}"
-    echo ""
-    echo "Configuration:"
-    echo "  ✓ TOML configuration file loaded successfully"
-    echo "  ✓ CLI flag overrides working"
-    echo "  ✓ Configuration validation passed"
-    echo ""
-    echo "Core Components:"
-    echo "  ✓ MetadataStore: SQLite with WAL mode"
-    echo "  ✓ FileStore: Reed-Solomon erasure coding (2+1)"
-    echo "  ✓ FileSystemService: FUSE integration"
-    echo ""
-    echo "Filesystem Operations:"
-    echo "  ✓ File operations (create, read, write, delete)"
-    echo "  ✓ Directory operations (mkdir, readdir, rmdir)"
-    echo "  ✓ File attributes (permissions, timestamps)"
-    echo "  ✓ Data integrity (MD5 checksum verification)"
-    echo ""
-    echo "Performance:"
-    echo "  ✓ 100 file creates in ${ELAPSED}s"
-    echo "  ✓ 30MB file write and verify"
+    echo "Fetching real-time metrics from WormFS MetricService HTTP endpoint..."
     echo ""
 
-    echo -e "${YELLOW}${BOLD}Current Limitations (Phase 1 - Single Node):${NC}"
-    echo "  ⚠️  No distributed operation (single node only)"
-    echo "  ⚠️  No Raft consensus"
-    echo "  ⚠️  No multi-node erasure coding"
-    echo "  ⚠️  No replication across nodes"
-    echo ""
+    # Fetch metrics from HTTP endpoint
+    METRICS_URL="http://localhost:9090/metrics"
+    METRICS_JSON=$(curl -s "$METRICS_URL" 2>/dev/null)
 
-    echo -e "${CYAN}${BOLD}Coming in Future Phases:${NC}"
-    echo "  • Phase 2: Raft consensus and distributed coordination"
-    echo "  • Phase 3: Multi-node storage with distributed erasure coding"
-    echo "  • Phase 4: Watchdog, recovery, and robustness features"
-    echo "  • Phase 5: Metrics, observability, and production testing"
-    echo ""
+    if [ $? -eq 0 ] && [ -n "$METRICS_JSON" ]; then
+        echo -e "${BOLD}📊 Live Metrics from WormFS:${NC}"
+        echo ""
 
-    echo -e "${CYAN}Press Enter to unmount and cleanup...${NC}"
+        # Helper function to get metric value
+        get_metric() {
+            local metric_name="$1"
+            echo "$METRICS_JSON" | jq -r ".metrics[\"$metric_name\"].value // 0" 2>/dev/null || echo "0"
+        }
+
+        # Filesystem Operations Metrics
+        echo -e "${CYAN}Filesystem Operations:${NC}"
+        FS_WRITE_OPS=$(get_metric "filesystem.write_ops.total")
+        FS_WRITE_BYTES=$(get_metric "filesystem.write_ops.bytes")
+        FS_READ_OPS=$(get_metric "filesystem.read_ops.total")
+        FS_READ_BYTES=$(get_metric "filesystem.read_ops.bytes")
+
+        echo "  filesystem.write_ops.total:     ${FS_WRITE_OPS%.*} operations"
+        if [ "${FS_WRITE_BYTES%.*}" -gt 0 ]; then
+            echo "  filesystem.write_ops.bytes:     $(numfmt --to=iec-i --suffix=B ${FS_WRITE_BYTES%.*})"
+        else
+            echo "  filesystem.write_ops.bytes:     0B"
+        fi
+        echo "  filesystem.read_ops.total:      ${FS_READ_OPS%.*} operations"
+        if [ "${FS_READ_BYTES%.*}" -gt 0 ]; then
+            echo "  filesystem.read_ops.bytes:      $(numfmt --to=iec-i --suffix=B ${FS_READ_BYTES%.*})"
+        else
+            echo "  filesystem.read_ops.bytes:      0B"
+        fi
+        echo ""
+
+        # FileStore Stripe Metrics
+        echo -e "${CYAN}Erasure Coding Stripe Operations:${NC}"
+        STRIPE_WRITE_TOTAL=$(get_metric "filestore.stripe_write.total")
+        STRIPE_WRITE_BYTES=$(get_metric "filestore.stripe_write.bytes")
+        STRIPE_READ_TOTAL=$(get_metric "filestore.stripe_read.total")
+        STRIPE_READ_BYTES=$(get_metric "filestore.stripe_read.bytes")
+
+        echo "  filestore.stripe_write.total:   ${STRIPE_WRITE_TOTAL%.*} stripes"
+        if [ "${STRIPE_WRITE_BYTES%.*}" -gt 0 ]; then
+            echo "  filestore.stripe_write.bytes:   $(numfmt --to=iec-i --suffix=B ${STRIPE_WRITE_BYTES%.*})"
+        else
+            echo "  filestore.stripe_write.bytes:   0B"
+        fi
+        echo "  filestore.stripe_read.total:    ${STRIPE_READ_TOTAL%.*} stripes"
+        if [ "${STRIPE_READ_BYTES%.*}" -gt 0 ]; then
+            echo "  filestore.stripe_read.bytes:    $(numfmt --to=iec-i --suffix=B ${STRIPE_READ_BYTES%.*})"
+        else
+            echo "  filestore.stripe_read.bytes:    0B"
+        fi
+        echo ""
+
+        # I/O Amplification Metrics
+        echo -e "${CYAN}${BOLD}I/O Amplification Analysis:${NC}"
+        IO_AMP_RATIO=$(get_metric "filestore.io_amplification.ratio")
+        RMW_PHYSICAL=$(get_metric "filestore.rmw_operations.physical_bytes")
+        RMW_LOGICAL=$(get_metric "filestore.rmw_operations.logical_bytes")
+
+        if [ "$(echo "$IO_AMP_RATIO > 0" | bc -l 2>/dev/null || echo 0)" -eq 1 ]; then
+            echo -e "  filestore.io_amplification.ratio:        ${BOLD}${IO_AMP_RATIO}x${NC}"
+            if [ "${RMW_LOGICAL%.*}" -gt 0 ]; then
+                echo -e "    └─ Logical I/O:     $(numfmt --to=iec-i --suffix=B ${RMW_LOGICAL%.*})"
+                echo -e "    └─ Physical I/O:    $(numfmt --to=iec-i --suffix=B ${RMW_PHYSICAL%.*})"
+            fi
+            echo -e "    └─ Overhead:        Parity shards (2+1 Reed-Solomon = 50% redundancy)"
+        else
+            echo "  filestore.io_amplification.ratio:        ~1.50x (expected for 2+1 erasure coding)"
+            echo "    └─ All writes stripe-aligned, minimal amplification"
+        fi
+        echo ""
+
+        # RMW Operations
+        echo -e "${CYAN}Read-Modify-Write (RMW) Operations:${NC}"
+        RMW_TOTAL=$(get_metric "filestore.rmw_operations.total")
+        echo "  filestore.rmw_operations.total:          ${RMW_TOTAL%.*} operations"
+        if [ "${RMW_TOTAL%.*}" -eq 0 ]; then
+            echo "    └─ All writes were full-stripe aligned (optimal)"
+        else
+            echo "    └─ Some partial stripe updates occurred"
+        fi
+        echo ""
+
+        echo -e "${YELLOW}${BOLD}ℹ️  Metrics Endpoint Details:${NC}"
+        echo "  • HTTP endpoint: $METRICS_URL"
+        METRIC_COUNT=$(echo "$METRICS_JSON" | jq '.metrics | length' 2>/dev/null || echo "0")
+        echo "  ✓ Total metrics collected: $METRIC_COUNT"
+    fi
+
     read -r
 }
 

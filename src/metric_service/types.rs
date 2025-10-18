@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use thiserror::Error;
 
 /// Configuration for MetricService.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     /// Enable metrics collection
     pub enabled: bool,
@@ -30,6 +30,38 @@ pub struct Config {
 
     /// OpenTelemetry endpoint
     pub otel_endpoint: Option<String>,
+
+    /// Enable time-series storage for graphing
+    pub enable_time_series: bool,
+
+    /// Retention window for time-series data (seconds)
+    pub time_series_retention_secs: u64,
+
+    /// Maximum data points per metric (memory limit)
+    pub max_points_per_metric: usize,
+
+    /// Sample interval for time-series (seconds)
+    /// Metrics published more frequently will be downsampled
+    pub time_series_sample_interval_secs: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            aggregation_window_secs: 60,
+            max_cardinality: 10_000,
+            channel_buffer_size: 10_000,
+            enable_prometheus: false,
+            prometheus_port: 9090,
+            enable_otel: false,
+            otel_endpoint: None,
+            enable_time_series: true,
+            time_series_retention_secs: 3600, // 1 hour
+            max_points_per_metric: 1000,
+            time_series_sample_interval_secs: 1, // 1 second
+        }
+    }
 }
 
 /// Errors that can occur during MetricService operations.
@@ -114,6 +146,8 @@ pub enum MetricValue {
 pub struct MetricSnapshot {
     pub timestamp: SystemTime,
     pub metrics: HashMap<String, AggregatedMetric>,
+    /// Time-series data if enabled (metric_name -> Vec<(timestamp, value)>)
+    pub time_series: Option<HashMap<String, Vec<(SystemTime, f64)>>>,
 }
 
 /// Aggregated metric data.
