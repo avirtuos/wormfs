@@ -43,10 +43,7 @@ use crate::filesystem_service::types::{Error, FileAttr};
 use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
-use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tracing::trace;
 
@@ -188,6 +185,69 @@ struct BufferedFileHandleInner {
     storage_policy: Arc<StoragePolicy>,
 }
 
+impl BufferedFileHandleInner {
+    /// Recalculate memory usage from all builders.
+    ///
+    /// This ensures accurate memory accounting by iterating through all builders
+    /// and calculating complete_stripe_bytes, partial_stripe_bytes, and buffered_bytes
+    /// from scratch. This is more reliable than incremental updates which can drift
+    /// due to overwrites, partial-to-complete transitions, and flush operations.
+    fn recalculate_memory_usage(&mut self) {
+        let mut complete = 0;
+        let mut partial = 0;
+        let mut total = 0;
+
+        let max_stripe_size = self.config.max_stripe_size as usize;
+
+        for builder in self.builders.values() {
+            let size = builder.size();
+            total += size;
+
+            // A stripe is "complete" when it reaches exactly max_stripe_size
+            if size == max_stripe_size {
+                complete += size;
+            } else {
+                partial += size;
+            }
+        }
+
+        self.complete_stripe_bytes = complete;
+        self.partial_stripe_bytes = partial;
+        self.buffered_bytes = total;
+    }
+
+    /// Calculate stripe file offset with overflow checking.
+    ///
+    /// Returns the byte offset in the logical file where this stripe begins.
+    /// Protects against integer overflow for very large files.
+    fn checked_stripe_offset(&self, stripe_idx: u32) -> Result<u64, Error> {
+        let stripe_size = self.config.max_stripe_size as u64;
+        let stripe_idx_u64 = stripe_idx as u64;
+        stripe_idx_u64.checked_mul(stripe_size).ok_or_else(|| {
+            Error::Internal(format!(
+                "Stripe offset calculation overflow: stripe_idx={} * stripe_size={}",
+                stripe_idx, stripe_size
+            ))
+        })
+    }
+}
+
+/// Trait for reporting BufferedFileHandle metrics to parent service.
+///
+/// This allows BufferedFileHandle to report flush events and write patterns
+/// without direct coupling to the metrics system.
+pub trait BufferedMetricsReporter: Send + Sync {
+    /// Report a flush operation.
+    ///
+    /// # Arguments
+    /// * `is_full` - true for full flush (force=true), false for partial flush (force=false)
+    /// * `latency_secs` - Duration of the flush operation in seconds
+    fn report_flush(&self, is_full: bool, latency_secs: f64);
+
+    /// Report a coalesced write (write that reused an existing stripe builder).
+    fn report_write_coalesced(&self);
+}
+
 /// Per-file-handle write buffer that coalesces metadata and data changes.
 ///
 /// Maintains an in-memory snapshot of file state plus uncommitted changes.
@@ -205,6 +265,9 @@ pub struct BufferedFileHandle {
     metadata_store: Arc<MetadataStoreImpl>,
     file_store: Arc<dyn FileStore + Send + Sync>,
     raft_client: Option<Arc<dyn RaftClient>>,
+
+    /// Optional metrics reporter for observability
+    metrics_reporter: Option<Arc<dyn BufferedMetricsReporter>>,
 }
 
 // Manual Debug implementation since RaftClient is a trait object
@@ -229,6 +292,7 @@ impl BufferedFileHandle {
     /// * `metadata_store` - MetadataStore for reading committed state
     /// * `file_store` - FileStore for writing stripe data
     /// * `raft_client` - Optional Raft client for metadata updates (None for testing)
+    /// * `metrics_reporter` - Optional metrics reporter for observability
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         file_id: FileId,
@@ -239,6 +303,7 @@ impl BufferedFileHandle {
         metadata_store: Arc<MetadataStoreImpl>,
         file_store: Arc<dyn FileStore + Send + Sync>,
         raft_client: Option<Arc<dyn RaftClient>>,
+        metrics_reporter: Option<Arc<dyn BufferedMetricsReporter>>,
     ) -> Self {
         let inner = BufferedFileHandleInner {
             file_id,
@@ -264,6 +329,7 @@ impl BufferedFileHandle {
             metadata_store,
             file_store,
             raft_client,
+            metrics_reporter,
         }
     }
 
@@ -349,7 +415,7 @@ impl BufferedFileHandle {
                     let mut inner = self.inner.lock().unwrap();
                     let file_id = inner.file_id;
                     let storage_policy = Arc::clone(&inner.storage_policy);
-                    let stripe_file_offset = stripe_idx as u64 * config.max_stripe_size as u64;
+                    let stripe_file_offset = inner.checked_stripe_offset(stripe_idx)?;
 
                     // Create new builder with NEW StripeId (immutability)
                     let mut new_builder = StripeBuilder::new(
@@ -414,7 +480,7 @@ impl BufferedFileHandle {
             }
 
             // Get or create builder for this stripe
-            let written = {
+            let (written, is_new_builder) = {
                 let mut inner = self.inner.lock().unwrap();
 
                 // Need to extract these before calling or_insert_with to avoid borrow issues
@@ -433,8 +499,10 @@ impl BufferedFileHandle {
                         false
                     };
 
+                // Calculate stripe offset with overflow check before or_insert_with
+                let stripe_file_offset = inner.checked_stripe_offset(stripe_idx)?;
+
                 let builder = inner.builders.entry(stripe_idx).or_insert_with(|| {
-                    let stripe_file_offset = stripe_idx as u64 * config.max_stripe_size as u64;
                     let new_builder = StripeBuilder::new(
                         file_id,
                         stripe_idx,
@@ -481,20 +549,19 @@ impl BufferedFileHandle {
                     "Write operation to stripe"
                 );
 
-                // Update memory accounting
-                // Only complete stripes (exactly max_stripe_size) count toward memory pressure
-                let builder_size = builder.size();
-                if builder_size == config.max_stripe_size as usize {
-                    // This stripe just became complete
-                    inner.complete_stripe_bytes += written;
-                } else {
-                    // Still partial
-                    inner.partial_stripe_bytes += written;
-                }
-                inner.buffered_bytes += written;
+                // Recalculate memory accounting from all builders
+                // This ensures accuracy even with overwrites and partial-to-complete transitions
+                inner.recalculate_memory_usage();
 
-                written
+                (written, is_new_builder)
             };
+
+            // Report write coalescence metric if this was a reused builder
+            if !is_new_builder {
+                if let Some(reporter) = &self.metrics_reporter {
+                    reporter.report_write_coalesced();
+                }
+            }
 
             bytes_written += written as u32;
             remaining = &remaining[written..];
@@ -772,13 +839,12 @@ impl BufferedFileHandle {
                 }
             } else {
                 // Stripe not found in buffer - fetch from MetadataStore
-                let file_id = {
+                let (file_id, stripe_file_offset) = {
                     let inner = self.inner.lock().unwrap();
-                    inner.file_id
+                    (inner.file_id, inner.checked_stripe_offset(stripe_idx)?)
                 };
 
                 // Query MetadataStore for stripe at this file offset
-                let stripe_file_offset = stripe_idx as u64 * config.max_stripe_size as u64;
                 trace!(
                     stripe_idx = %stripe_idx,
                     file_id = ?file_id,
@@ -860,6 +926,9 @@ impl BufferedFileHandle {
     /// This is called automatically when write count or time thresholds are met,
     /// or can be called explicitly (e.g., on file close or fsync).
     pub async fn full_flush(&self, force: bool) -> Result<(), Error> {
+        // Start timing for metrics
+        let start_time = std::time::Instant::now();
+
         // 1. Flush complete builders to FileStore (or all if force=true)
         let (builders_to_flush, config) = {
             let mut inner = self.inner.lock().unwrap();
@@ -1098,22 +1167,9 @@ impl BufferedFileHandle {
             // Note: builders were already removed when we extracted them for flushing
             // Partial builders (if any) remain in the builders map ONLY if force=false
 
-            // Update memory accounting
-            if force {
-                // When force=true, we flushed ALL builders (complete + partial), so reset everything
-                inner.complete_stripe_bytes = 0;
-                inner.partial_stripe_bytes = 0;
-                inner.buffered_bytes = 0;
-            } else {
-                // When force=false, we only flushed complete stripes
-                // Reset complete_stripe_bytes, but partial stripes remain
-                inner.complete_stripe_bytes = 0;
-
-                // Recalculate buffered_bytes from remaining builders
-                let remaining_bytes: usize = inner.builders.values().map(|b| b.size()).sum();
-                inner.buffered_bytes = remaining_bytes;
-                // partial_stripe_bytes already reflects the partial builders, no change needed
-            }
+            // Update memory accounting by recalculating from all remaining builders
+            // This works for both force=true (no builders left) and force=false (partial builders remain)
+            inner.recalculate_memory_usage();
 
             // Only fully clean state if this was a forced flush
             if force {
@@ -1123,6 +1179,12 @@ impl BufferedFileHandle {
             }
 
             inner.last_flush = Some(Instant::now());
+        }
+
+        // Report flush metrics
+        if let Some(reporter) = &self.metrics_reporter {
+            let latency_secs = start_time.elapsed().as_secs_f64();
+            reporter.report_flush(force, latency_secs);
         }
 
         Ok(())
@@ -1425,6 +1487,7 @@ mod tests {
             metadata_store,
             file_store,
             None, // No Raft client for unit tests
+            None, // No metrics reporter for unit tests
         )
     }
 
@@ -1568,6 +1631,7 @@ mod tests {
             metadata_store.clone(),
             file_store,
             Some(raft_client),
+            None, // No metrics reporter for unit tests
         );
 
         // Write some data

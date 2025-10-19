@@ -48,6 +48,52 @@ fn checked_stripe_offset(stripe_idx: u64, stripe_size: u64) -> Result<u64, Error
     })
 }
 
+/// Metrics collector for BufferedFileHandle operations.
+///
+/// Tracks flush operations, write coalescence, and latencies for observability.
+/// Uses atomic operations for thread-safe concurrent updates.
+#[derive(Debug)]
+struct BufferedMetricsCollector {
+    /// Count of partial flushes (memory pressure, force=false)
+    partial_flushes: AtomicU64,
+    /// Count of full flushes (time/count based, force=true)
+    full_flushes: AtomicU64,
+    /// Count of writes that reused existing buffers (coalesced)
+    writes_coalesced: AtomicU64,
+    /// Recent flush latencies for histogram calculation
+    flush_latencies: Arc<std::sync::Mutex<Vec<f64>>>,
+}
+
+impl BufferedMetricsCollector {
+    fn new() -> Self {
+        Self {
+            partial_flushes: AtomicU64::new(0),
+            full_flushes: AtomicU64::new(0),
+            writes_coalesced: AtomicU64::new(0),
+            flush_latencies: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl super::buffered_file_handle::BufferedMetricsReporter for BufferedMetricsCollector {
+    fn report_flush(&self, is_full: bool, latency_secs: f64) {
+        if is_full {
+            self.full_flushes.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.partial_flushes.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Store latency for histogram
+        if let Ok(mut latencies) = self.flush_latencies.lock() {
+            latencies.push(latency_secs);
+        }
+    }
+
+    fn report_write_coalesced(&self) {
+        self.writes_coalesced.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Concrete implementation of FileSystemService.
 ///
 /// This implementation:
@@ -86,6 +132,9 @@ pub struct FileSystemServiceImpl {
 
     /// Optional metrics service for instrumentation
     metrics: Option<Arc<crate::metric_service::MetricServiceImpl>>,
+
+    /// Metrics collector for BufferedFileHandle operations
+    buffered_metrics: Arc<BufferedMetricsCollector>,
 }
 
 impl FileSystemServiceImpl {
@@ -151,6 +200,58 @@ impl FileSystemServiceImpl {
                 handle_count as f64,
                 crate::metric_service::UnitType::Count,
             );
+
+            // Flush operation counts
+            let _ = metrics.publish_counter(
+                "buffered_file_handles.partial_flushes",
+                self.buffered_metrics.partial_flushes.load(Ordering::Relaxed),
+                crate::metric_service::UnitType::Count,
+            );
+
+            let _ = metrics.publish_counter(
+                "buffered_file_handles.full_flushes",
+                self.buffered_metrics.full_flushes.load(Ordering::Relaxed),
+                crate::metric_service::UnitType::Count,
+            );
+
+            // Write coalescence count
+            let _ = metrics.publish_counter(
+                "buffered_file_handles.writes_coalesced",
+                self.buffered_metrics.writes_coalesced.load(Ordering::Relaxed),
+                crate::metric_service::UnitType::Count,
+            );
+
+            // Flush latency (average of recent flushes)
+            if let Ok(mut latencies) = self.buffered_metrics.flush_latencies.lock() {
+                if !latencies.is_empty() {
+                    let avg_latency = latencies.iter().sum::<f64>() / latencies.len() as f64;
+                    let _ = metrics.publish_gauge(
+                        "buffered_file_handles.flush_latency_avg",
+                        avg_latency,
+                        crate::metric_service::UnitType::Seconds,
+                    );
+
+                    // Also publish min/max for better insight
+                    if let (Some(min), Some(max)) = (
+                        latencies.iter().min_by(|a, b| a.partial_cmp(b).unwrap()),
+                        latencies.iter().max_by(|a, b| a.partial_cmp(b).unwrap()),
+                    ) {
+                        let _ = metrics.publish_gauge(
+                            "buffered_file_handles.flush_latency_min",
+                            *min,
+                            crate::metric_service::UnitType::Seconds,
+                        );
+                        let _ = metrics.publish_gauge(
+                            "buffered_file_handles.flush_latency_max",
+                            *max,
+                            crate::metric_service::UnitType::Seconds,
+                        );
+                    }
+
+                    // Clear latencies after publishing to avoid unbounded growth
+                    latencies.clear();
+                }
+            }
         }
 
         (total_bytes, total_complete, total_partial, handle_count)
@@ -199,6 +300,7 @@ impl FileSystemServiceImpl {
             Arc::new(self.metadata_store.clone()),
             Arc::clone(&self.file_store) as Arc<dyn crate::file_store::FileStore + Send + Sync>,
             Some(raft_client),
+            Some(Arc::clone(&self.buffered_metrics) as Arc<dyn super::buffered_file_handle::BufferedMetricsReporter>),
         ))
     }
 
@@ -236,6 +338,7 @@ impl FileSystemServiceImpl {
             client_sessions: Arc::new(RwLock::new(HashMap::new())),
             lock_extension_task: Arc::new(RwLock::new(None)),
             metrics: None, // Will be set via dependency injection
+            buffered_metrics: Arc::new(BufferedMetricsCollector::new()),
         }
     }
 

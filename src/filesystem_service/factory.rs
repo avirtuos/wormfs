@@ -5,7 +5,6 @@
 //! construction with concrete dependency types.
 
 use super::implementation::FileSystemServiceImpl;
-use super::raft_commands::StorageRaftMemberStub;
 use super::{Config, Error};
 use crate::file_store::FileStoreImpl;
 use crate::metadata_store::MetadataStoreImpl;
