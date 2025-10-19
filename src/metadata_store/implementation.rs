@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rusqlite::Connection;
 
+// Import MetricService for instrumentation
+use crate::metric_service::MetricService;
+
 /// Maximum safe inode value (SQLite INTEGER is signed i64).
 /// While the API uses u64 for consistency with filesystem conventions,
 /// SQLite's INTEGER type can only safely store values up to 2^63-1.
@@ -44,6 +47,9 @@ struct MetadataStoreInner {
     /// Configuration
     #[allow(dead_code)]
     config: Config,
+
+    /// Optional metrics service for instrumentation (sync lock for fire-and-forget publishing)
+    metrics: std::sync::RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>,
 }
 
 /// Concrete implementation of MetadataStore.
@@ -96,11 +102,91 @@ impl MetadataStoreImpl {
         // Configure connection with optimal settings
         Self::configure_connection(&conn, &config).await?;
 
-        let inner = MetadataStoreInner { conn, config };
+        let inner = MetadataStoreInner {
+            conn,
+            config,
+            metrics: std::sync::RwLock::new(None),
+        };
 
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// Set the metrics service for instrumentation.
+    ///
+    /// This method allows dependency injection of the metrics service after
+    /// MetadataStore construction, avoiding circular dependencies during initialization.
+    pub fn set_metrics(&self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
+        *self.inner.metrics.write().unwrap() = Some(metrics);
+    }
+
+    /// Helper function to publish operation metrics.
+    ///
+    /// Publishes both aggregate metrics (read/write totals and latencies) and
+    /// operation-specific metrics for critical operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `operation` - Name of the operation (e.g., "create_file", "get_file_by_path")
+    /// * `operation_type` - Either "read" or "write" for aggregate metrics
+    /// * `start` - Start time of the operation (from tokio::time::Instant::now())
+    /// * `is_error` - Whether the operation resulted in an error
+    /// * `is_critical` - Whether to also publish per-operation metrics
+    fn publish_metrics(
+        &self,
+        operation: &str,
+        operation_type: &str, // "read" or "write"
+        start: tokio::time::Instant,
+        is_error: bool,
+        is_critical: bool,
+    ) {
+        if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+            let elapsed = start.elapsed().as_secs_f64();
+
+            // Publish aggregate read/write total counter
+            let _ = metrics.publish_counter(
+                &format!("metadata_store.{}.total", operation_type),
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            // Publish aggregate read/write latency histogram
+            let _ = metrics.publish_histogram(
+                &format!("metadata_store.{}.latency", operation_type),
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+
+            // Publish error counter if operation failed
+            if is_error {
+                let mut labels = std::collections::HashMap::new();
+                labels.insert("operation".to_string(), operation.to_string());
+                labels.insert("type".to_string(), operation_type.to_string());
+                let _ = metrics.publish_labeled(
+                    "metadata_store.errors.total",
+                    crate::metric_service::MetricValue::Counter(1),
+                    crate::metric_service::MetricType::Counter,
+                    crate::metric_service::UnitType::Operations,
+                    labels,
+                );
+            }
+
+            // Publish per-operation metrics for critical operations
+            if is_critical {
+                let _ = metrics.publish_counter(
+                    &format!("metadata_store.{}.total", operation),
+                    1,
+                    crate::metric_service::UnitType::Operations,
+                );
+
+                let _ = metrics.publish_histogram(
+                    &format!("metadata_store.{}.latency", operation),
+                    elapsed,
+                    crate::metric_service::UnitType::Seconds,
+                );
+            }
+        }
     }
 
     /// Configure a SQLite connection with optimal settings.
@@ -278,6 +364,8 @@ impl MetadataStore for MetadataStoreImpl {
         inode: u64,
         metadata: FileMetadata,
     ) -> Result<(), Error> {
+        let start = tokio::time::Instant::now();
+
         let path_str = path.to_string_lossy().to_string();
         let parent_path = path
             .parent()
@@ -292,7 +380,8 @@ impl MetadataStore for MetadataStoreImpl {
 
         let file_type_val: i32 = metadata.file_type.into();
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 conn.execute(
@@ -324,14 +413,22 @@ impl MetadataStore for MetadataStoreImpl {
                 } else {
                     Error::QueryError(format!("Failed to create file: {}", e))
                 }
-            })
+            });
+
+        // Publish metrics (critical operation)
+        self.publish_metrics("create_file", "write", start, result.is_err(), true);
+
+        result
     }
 
     async fn get_file_by_path(&self, path: &Path) -> Result<FileRecord, Error> {
+        let start = tokio::time::Instant::now();
+
         let path_str = path.to_string_lossy().to_string();
         let path_clone = path.to_path_buf();
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
@@ -365,11 +462,19 @@ impl MetadataStore for MetadataStoreImpl {
                     Error::FileNotFoundByPath(path_clone.to_string_lossy().to_string())
                 }
                 _ => Error::QueryError(format!("Failed to query file by path: {}", e))
-            })
+            });
+
+        // Publish metrics (critical operation)
+        self.publish_metrics("get_file_by_path", "read", start, result.is_err(), true);
+
+        result
     }
 
     async fn get_file_by_inode(&self, inode: u64) -> Result<FileRecord, Error> {
-        self.inner
+        let start = tokio::time::Instant::now();
+
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
@@ -403,7 +508,12 @@ impl MetadataStore for MetadataStoreImpl {
                     Error::FileNotFoundByInode(inode)
                 }
                 _ => Error::QueryError(format!("Failed to query file by inode: {}", e))
-            })
+            });
+
+        // Publish metrics (aggregate only)
+        self.publish_metrics("get_file_by_inode", "read", start, result.is_err(), false);
+
+        result
     }
 
     async fn get_file(&self, file_id: FileId) -> Result<FileRecord, Error> {
@@ -447,58 +557,81 @@ impl MetadataStore for MetadataStoreImpl {
     }
 
     async fn update_file(&self, file_id: FileId, metadata: FileMetadata) -> Result<(), Error> {
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                Ok(conn.execute(
-                    "UPDATE files SET size = ?1, permissions = ?2, uid = ?3, gid = ?4, modified_at = ?5, accessed_at = ?6, target = ?7
-                     WHERE file_id = ?8",
-                    params![
-                        metadata.size as i64,
-                        metadata.permissions as i64,
-                        metadata.uid as i64,
-                        metadata.gid as i64,
-                        system_time_to_unix(metadata.modified_at),
-                        system_time_to_unix(metadata.accessed_at),
-                        metadata.target,
-                        file_id,
-                    ],
-                )?)
-            })
-            .await
-            .map_err(|e| {
-                Error::QueryError(format!("Failed to update file: {}", e))
-            })?;
+        let start = tokio::time::Instant::now();
 
-        if rows_affected == 0 {
-            return Err(Error::FileNotFoundByFileId(file_id));
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    Ok(conn.execute(
+                        "UPDATE files SET size = ?1, permissions = ?2, uid = ?3, gid = ?4, modified_at = ?5, accessed_at = ?6, target = ?7
+                         WHERE file_id = ?8",
+                        params![
+                            metadata.size as i64,
+                            metadata.permissions as i64,
+                            metadata.uid as i64,
+                            metadata.gid as i64,
+                            system_time_to_unix(metadata.modified_at),
+                            system_time_to_unix(metadata.accessed_at),
+                            metadata.target,
+                            file_id,
+                        ],
+                    )?)
+                })
+                .await
+                .map_err(|e| {
+                    Error::QueryError(format!("Failed to update file: {}", e))
+                })?;
+
+            if rows_affected == 0 {
+                return Err(Error::FileNotFoundByFileId(file_id));
+            }
+
+            Ok(())
         }
+        .await;
 
-        Ok(())
+        // Publish metrics (critical operation)
+        self.publish_metrics("update_file", "write", start, result.is_err(), true);
+
+        result
     }
 
     async fn delete_file(&self, file_id: FileId) -> Result<(), Error> {
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                Ok(conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?)
-            })
-            .await
-            .map_err(|e| Error::QueryError(format!("Failed to delete file: {}", e)))?;
+        let start = tokio::time::Instant::now();
 
-        if rows_affected == 0 {
-            return Err(Error::FileNotFoundByFileId(file_id));
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    Ok(conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?)
+                })
+                .await
+                .map_err(|e| Error::QueryError(format!("Failed to delete file: {}", e)))?;
+
+            if rows_affected == 0 {
+                return Err(Error::FileNotFoundByFileId(file_id));
+            }
+
+            Ok(())
         }
+        .await;
 
-        Ok(())
+        // Publish metrics (critical operation)
+        self.publish_metrics("delete_file", "write", start, result.is_err(), true);
+
+        result
     }
 
     async fn list_directory(&self, path: &Path) -> Result<Vec<FileRecord>, Error> {
+        let start = tokio::time::Instant::now();
+
         let path_str = path.to_string_lossy().to_string();
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
@@ -533,7 +666,12 @@ impl MetadataStore for MetadataStoreImpl {
             .await
             .map_err(|e| {
                 Error::QueryError(format!("Failed to list directory: {}", e))
-            })
+            });
+
+        // Publish metrics (critical operation - often slow)
+        self.publish_metrics("list_directory", "read", start, result.is_err(), true);
+
+        result
     }
 
     async fn allocate_stripes(

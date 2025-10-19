@@ -199,12 +199,15 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
 
     // Create FileSystemService via factory
     tracing::info!("Creating FileSystemService...");
-    let service = Arc::new(FileSystemServiceImplFactory::create(
-        config.filesystem_config,
-        metadata_store,
-        file_store,
-        metrics,
-    )?);
+    let service = Arc::new(
+        FileSystemServiceImplFactory::create(
+            config.filesystem_config,
+            metadata_store,
+            file_store,
+            metrics,
+        )
+        .await?,
+    );
 
     // Initialize root directory
     tracing::info!("Initializing root directory...");
@@ -212,6 +215,10 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         .initialize_root()
         .await
         .map_err(|e| Error::Internal(format!("Failed to initialize root: {}", e)))?;
+
+    // Start background tasks (StripeCache flush task, lock extension task)
+    tracing::info!("Starting background tasks...");
+    Arc::clone(&service).start_background_tasks().await;
 
     // Create FUSE adapter
     let runtime_handle = Handle::current();

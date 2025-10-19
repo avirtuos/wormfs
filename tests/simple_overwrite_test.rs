@@ -1,0 +1,133 @@
+//! Simple test to debug the overwrite hanging issue
+
+use std::sync::Arc;
+use std::time::Duration;
+use tempfile::TempDir;
+use wormfs::file_store::{Config as FileStoreConfig, FileStore, FileStoreImpl};
+use wormfs::filesystem_service::factory::FileSystemServiceImplFactory;
+use wormfs::filesystem_service::implementation::FileSystemServiceImpl;
+use wormfs::filesystem_service::FileSystemService;
+use wormfs::metadata_store::{
+    types::*, ClientId, Config as MetadataConfig, MetadataStore, MetadataStoreFactory,
+};
+
+/// Helper to create a test FileSystemService with temporary storage.
+async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
+    let chunks_dir = temp_dir.path().join("chunks");
+    std::fs::create_dir(&chunks_dir).expect("Failed to create chunks dir");
+
+    let metadata_config = MetadataConfig {
+        database_path: db_path,
+        read_pool_size: 4,
+        enable_wal: true,
+        cache_size_mb: 64,
+        enable_foreign_keys: false,
+        synchronous: SynchronousMode::Normal,
+        transaction_isolation: IsolationLevel::ReadCommitted,
+        enable_prepared_statements: true,
+        read_pool_timeout_secs: 30,
+    };
+
+    let metadata_store = MetadataStoreFactory::create_concrete(metadata_config)
+        .await
+        .expect("Failed to create MetadataStore");
+
+    metadata_store
+        .initialize_schema()
+        .await
+        .expect("Failed to initialize schema");
+
+    let file_store_config = FileStoreConfig {
+        disk_paths: vec![chunks_dir.clone()],
+        max_chunk_size: 2 * 1024 * 1024, // 2MB chunks
+        default_data_shards: 2,
+        default_parity_shards: 1,
+        max_concurrent_operations: 10,
+        verification_interval: Duration::from_secs(3600),
+        orphan_cleanup_age: Duration::from_secs(86400),
+    };
+
+    let mut file_store =
+        <FileStoreImpl as FileStore>::new(file_store_config).expect("Failed to create FileStore");
+
+    let _disk_id = file_store
+        .add_disk(chunks_dir.clone())
+        .await
+        .expect("Failed to add disk");
+
+    let file_store = Arc::new(file_store);
+
+    let fs_config = wormfs::filesystem_service::types::Config::default();
+    let service = FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None)
+        .await
+        .expect("Failed to create FileSystemService");
+
+    service
+        .initialize_root()
+        .await
+        .expect("Failed to initialize root");
+
+    (service, temp_dir)
+}
+
+#[tokio::test]
+async fn test_simple_overwrite() {
+    let (service, _temp) = create_test_filesystem_service().await;
+    let client_id = ClientId::new(1);
+
+    println!("\n=== Simple Overwrite Test ===");
+
+    // Create file
+    println!("Creating file...");
+    let attrs = service
+        .create(1, "test.dat", 0o644, 1000, 1000, client_id)
+        .await
+        .expect("Failed to create file");
+    let inode = attrs.ino;
+
+    // Open file
+    println!("Opening file...");
+    let (fh, _) = service
+        .open(inode, libc::O_RDWR as u32, 1000, 1000, client_id)
+        .await
+        .expect("Failed to open file");
+
+    // Write 8MB (2 full stripes of 4MB each)
+    println!("Writing 8MB (2 stripes)...");
+    let data_8mb = vec![0xAA; 8 * 1024 * 1024];
+    let written = service
+        .write(inode, fh, 0, data_8mb.clone(), 1000, 1000, client_id)
+        .await
+        .expect("Failed to write 8MB");
+    println!("  Wrote {} bytes", written);
+    assert_eq!(written as usize, 8 * 1024 * 1024);
+
+    // Flush to persist
+    println!("Flushing...");
+    service.flush_file(inode).await.expect("Failed to flush");
+    println!("  Flushed");
+
+    // Now try to overwrite 1MB in the middle of stripe 1 (at offset 5MB)
+    println!("Overwriting 1MB at offset 5MB...");
+    let overwrite_data = vec![0xBB; 1 * 1024 * 1024];
+
+    println!("  About to call write...");
+    let written2 = service
+        .write(
+            inode,
+            fh,
+            5 * 1024 * 1024,
+            overwrite_data,
+            1000,
+            1000,
+            client_id,
+        )
+        .await
+        .expect("Failed to overwrite");
+    println!("  Overwrote {} bytes", written2);
+    assert_eq!(written2 as usize, 1 * 1024 * 1024);
+
+    println!("✓ Test passed!");
+}

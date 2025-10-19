@@ -316,7 +316,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 </div>
                 <div class="metric-card">
                     <div class="metric-label">I/O Amplification Ratio</div>
-                    <div class="metric-value" x-text="(metrics['filestore.io_amplification.ratio'] || 0).toFixed(2) + 'x'"></div>
+                    <div class="metric-value" x-text="calculateAmplification()"></div>
                 </div>
                 <div class="metric-card">
                     <div class="metric-label">RMW Operations</div>
@@ -357,6 +357,134 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 <div class="metric-row" x-show="metrics['filestore.stripe_read.total']">
                     <span class="metric-name">filestore.stripe_read.total</span>
                     <span class="metric-val" x-text="formatNumber(metrics['filestore.stripe_read.total']) + ' stripes'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['filestore.stripe_read.bytes'] !== undefined">
+                    <span class="metric-name">filestore.stripe_read.bytes</span>
+                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filestore.stripe_read.bytes'])"></span>
+                </div>
+            </div>
+
+            <div class="metrics-section">
+                <h2 class="section-title">BufferedFileHandle Memory Usage</h2>
+                <div class="metric-row" x-show="metrics['filesystem.buffered_memory.total_bytes'] !== undefined">
+                    <span class="metric-name">filesystem.buffered_memory.total_bytes</span>
+                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filesystem.buffered_memory.total_bytes'])"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['filesystem.buffered_memory.complete_stripe_bytes'] !== undefined">
+                    <span class="metric-name">filesystem.buffered_memory.complete_stripe_bytes</span>
+                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filesystem.buffered_memory.complete_stripe_bytes'])"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['filesystem.buffered_memory.partial_stripe_bytes'] !== undefined">
+                    <span class="metric-name">filesystem.buffered_memory.partial_stripe_bytes</span>
+                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filesystem.buffered_memory.partial_stripe_bytes'])"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['filesystem.buffered_memory.handle_count'] !== undefined">
+                    <span class="metric-name">filesystem.buffered_memory.handle_count</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['filesystem.buffered_memory.handle_count']) + ' handles'"></span>
+                </div>
+            </div>
+
+            <div class="metrics-section">
+                <h2 class="section-title">StripeCache Operations</h2>
+                <div class="metric-row" x-show="metrics['stripe_cache.entries']">
+                    <span class="metric-name">stripe_cache.entries</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.entries']) + ' stripes'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.memory_bytes']">
+                    <span class="metric-name">stripe_cache.memory_bytes</span>
+                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['stripe_cache.memory_bytes'])"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.flush.total']">
+                    <span class="metric-name">stripe_cache.flush.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.flush.total']) + ' flushes'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.api.allocate_write_group']">
+                    <span class="metric-name">stripe_cache.api.allocate_write_group</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.allocate_write_group']) + ' calls'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.api.read_stripe']">
+                    <span class="metric-name">stripe_cache.api.read_stripe</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.read_stripe']) + ' calls'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.api.write_stripe']">
+                    <span class="metric-name">stripe_cache.api.write_stripe</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.write_stripe']) + ' calls'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.api.flush_write_group']">
+                    <span class="metric-name">stripe_cache.api.flush_write_group</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.flush_write_group']) + ' calls'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.api.flush_file']">
+                    <span class="metric-name">stripe_cache.api.flush_file</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.flush_file']) + ' calls'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.api.get_pending_stripe']">
+                    <span class="metric-name">stripe_cache.api.get_pending_stripe</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.get_pending_stripe']) + ' calls'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.api.inform_read']">
+                    <span class="metric-name">stripe_cache.api.inform_read</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.inform_read']) + ' calls'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['stripe_cache.api.inform']">
+                    <span class="metric-name">stripe_cache.api.inform</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.inform']) + ' calls'"></span>
+                </div>
+            </div>
+
+            <div class="metrics-section">
+                <h2 class="section-title">MetadataStore Operations</h2>
+
+                <!-- Aggregate Read Metrics -->
+                <div class="metric-row" x-show="metrics['metadata_store.read.total']">
+                    <span class="metric-name">metadata_store.read.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.read.total']) + ' operations'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.read.latency']">
+                    <span class="metric-name">metadata_store.read.latency (avg)</span>
+                    <span class="metric-val" x-text="formatLatency(metrics['metadata_store.read.latency'])"></span>
+                </div>
+
+                <!-- Aggregate Write Metrics -->
+                <div class="metric-row" x-show="metrics['metadata_store.write.total']">
+                    <span class="metric-name">metadata_store.write.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.write.total']) + ' operations'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.write.latency']">
+                    <span class="metric-name">metadata_store.write.latency (avg)</span>
+                    <span class="metric-val" x-text="formatLatency(metrics['metadata_store.write.latency'])"></span>
+                </div>
+
+                <!-- Critical File Operations -->
+                <div class="metric-row" x-show="metrics['metadata_store.create_file.total']">
+                    <span class="metric-name">metadata_store.create_file.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.create_file.total']) + ' files'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.get_file_by_path.total']">
+                    <span class="metric-name">metadata_store.get_file_by_path.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file_by_path.total']) + ' queries'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.update_file.total']">
+                    <span class="metric-name">metadata_store.update_file.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.update_file.total']) + ' updates'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.delete_file.total']">
+                    <span class="metric-name">metadata_store.delete_file.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.delete_file.total']) + ' deletions'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.list_directory.total']">
+                    <span class="metric-name">metadata_store.list_directory.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.list_directory.total']) + ' listings'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.list_directory.latency']">
+                    <span class="metric-name">metadata_store.list_directory.latency (avg)</span>
+                    <span class="metric-val" x-text="formatLatency(metrics['metadata_store.list_directory.latency'])"></span>
+                </div>
+
+                <!-- Error Metrics -->
+                <div class="metric-row" x-show="metrics['metadata_store.errors.total']">
+                    <span class="metric-name">metadata_store.errors.total</span>
+                    <span class="metric-val" style="color: #ef4444;" x-text="formatNumber(metrics['metadata_store.errors.total']) + ' errors'"></span>
                 </div>
             </div>
         </div>
@@ -471,6 +599,36 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     if (bytes === 0) return '0 B';
                     const i = Math.floor(Math.log(bytes) / Math.log(1024));
                     return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + sizes[i];
+                },
+
+                formatLatency(seconds) {
+                    if (!seconds) return '0ms';
+                    if (seconds < 0.001) {
+                        return (seconds * 1000000).toFixed(2) + 'μs';
+                    } else if (seconds < 1) {
+                        return (seconds * 1000).toFixed(2) + 'ms';
+                    } else {
+                        return seconds.toFixed(2) + 's';
+                    }
+                },
+
+                calculateAmplification() {
+                    // Physical I/O: actual bytes read/written to storage
+                    const physicalWriteBytes = this.metrics['filestore.stripe_write.bytes'] || 0;
+                    const physicalReadBytes = this.metrics['filestore.stripe_read.bytes'] || 0;
+                    const physicalBytes = physicalWriteBytes + physicalReadBytes;
+
+                    // Logical I/O: bytes requested by user operations
+                    const logicalWriteBytes = this.metrics['filesystem.write_ops.bytes'] || 0;
+                    const logicalReadBytes = this.metrics['filesystem.read_ops.bytes'] || 0;
+                    const logicalBytes = logicalWriteBytes + logicalReadBytes;
+
+                    if (logicalBytes === 0) {
+                        return '0.00x';
+                    }
+
+                    const ratio = physicalBytes / logicalBytes;
+                    return ratio.toFixed(2) + 'x';
                 }
             };
         }

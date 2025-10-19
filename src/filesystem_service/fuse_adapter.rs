@@ -527,11 +527,24 @@ impl Filesystem for FuseAdapter {
                 .create(parent, &name_str, mode, uid, gid, client_id),
         ) {
             Ok(attr) => {
-                let fuse_attr = self.to_fuse_attr(&attr);
-                // Generate file handle from inode (simple approach for Phase 1)
-                let fh = attr.ino;
-                tracing::debug!("FUSE create success: inode={}, fh={}", attr.ino, fh);
-                reply.created(&TTL, &fuse_attr, 0, fh, 0);
+                // After creating the file, open it to get a proper file handle
+                // This ensures the file is tracked in open_files and can be written to
+                let open_flags = _flags as u32;
+                match self
+                    .runtime
+                    .block_on(self.service.open(attr.ino, open_flags, uid, gid, client_id))
+                {
+                    Ok((fh, _)) => {
+                        let fuse_attr = self.to_fuse_attr(&attr);
+                        tracing::debug!("FUSE create success: inode={}, fh={}", attr.ino, fh);
+                        reply.created(&TTL, &fuse_attr, 0, fh, 0);
+                    }
+                    Err(e) => {
+                        let errno = e.to_errno();
+                        tracing::debug!("FUSE create+open error: {}, errno={}", e, errno);
+                        reply.error(errno);
+                    }
+                }
             }
             Err(e) => {
                 let errno = e.to_errno();
@@ -624,7 +637,7 @@ impl Filesystem for FuseAdapter {
         &mut self,
         req: &Request<'_>,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         data: &[u8],
         _write_flags: u32,
@@ -637,8 +650,9 @@ impl Filesystem for FuseAdapter {
         let gid = req.gid();
 
         tracing::debug!(
-            "FUSE write: ino={}, offset={}, size={}, uid={}, gid={}",
+            "FUSE write: ino={}, fh={}, offset={}, size={}, uid={}, gid={}",
             ino,
+            fh,
             offset,
             data.len(),
             uid,
@@ -653,6 +667,7 @@ impl Filesystem for FuseAdapter {
 
         match self.runtime.block_on(self.service.write(
             ino,
+            fh,
             offset as u64,
             data.to_vec(),
             uid,

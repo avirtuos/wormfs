@@ -10,7 +10,7 @@ use super::types::{
     ClientId, Config, DirEntry, Error, FileAttr, FileType, LockType, OpenFile, SetAttr,
 };
 use super::FileSystemService;
-use crate::file_store::{FileStore, FileStoreImpl};
+use crate::file_store::{FileStore, FileStoreImpl, StripeId, StripeMetadata};
 use crate::metadata_store::{FileId, FileMetadata, FileRecord, MetadataStore, MetadataStoreImpl};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::time::Instant;
+use tracing::trace;
 
 // Import MetricService trait
 use crate::metric_service::MetricService;
@@ -45,6 +46,52 @@ fn checked_stripe_offset(stripe_idx: u64, stripe_size: u64) -> Result<u64, Error
             stripe_idx, stripe_size
         ))
     })
+}
+
+/// Metrics collector for BufferedFileHandle operations.
+///
+/// Tracks flush operations, write coalescence, and latencies for observability.
+/// Uses atomic operations for thread-safe concurrent updates.
+#[derive(Debug)]
+struct BufferedMetricsCollector {
+    /// Count of partial flushes (memory pressure, force=false)
+    partial_flushes: AtomicU64,
+    /// Count of full flushes (time/count based, force=true)
+    full_flushes: AtomicU64,
+    /// Count of writes that reused existing buffers (coalesced)
+    writes_coalesced: AtomicU64,
+    /// Recent flush latencies for histogram calculation
+    flush_latencies: Arc<std::sync::Mutex<Vec<f64>>>,
+}
+
+impl BufferedMetricsCollector {
+    fn new() -> Self {
+        Self {
+            partial_flushes: AtomicU64::new(0),
+            full_flushes: AtomicU64::new(0),
+            writes_coalesced: AtomicU64::new(0),
+            flush_latencies: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl super::buffered_file_handle::BufferedMetricsReporter for BufferedMetricsCollector {
+    fn report_flush(&self, is_full: bool, latency_secs: f64) {
+        if is_full {
+            self.full_flushes.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.partial_flushes.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Store latency for histogram
+        if let Ok(mut latencies) = self.flush_latencies.lock() {
+            latencies.push(latency_secs);
+        }
+    }
+
+    fn report_write_coalesced(&self) {
+        self.writes_coalesced.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Concrete implementation of FileSystemService.
@@ -85,6 +132,9 @@ pub struct FileSystemServiceImpl {
 
     /// Optional metrics service for instrumentation
     metrics: Option<Arc<crate::metric_service::MetricServiceImpl>>,
+
+    /// Metrics collector for BufferedFileHandle operations
+    buffered_metrics: Arc<BufferedMetricsCollector>,
 }
 
 impl FileSystemServiceImpl {
@@ -92,8 +142,166 @@ impl FileSystemServiceImpl {
     ///
     /// This method allows dependency injection of the metrics service after
     /// FileSystemService construction, avoiding circular dependencies during initialization.
-    pub fn set_metrics(&mut self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
+    pub async fn set_metrics(&mut self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
         self.metrics = Some(metrics);
+    }
+
+    /// Calculate and publish the total memory usage of all buffered file handles.
+    ///
+    /// This method aggregates memory usage across all active BufferedFileHandles
+    /// and publishes it as a gauge metric. It can be called periodically by a
+    /// background task or on-demand for monitoring.
+    ///
+    /// Returns (total_bytes, complete_stripe_bytes, partial_stripe_bytes, handle_count)
+    pub fn publish_buffered_memory_usage(&self) -> (usize, usize, usize, usize) {
+        let open_files = self.open_files.read().unwrap();
+
+        let mut total_bytes = 0usize;
+        let mut total_complete = 0usize;
+        let mut total_partial = 0usize;
+        let mut handle_count = 0usize;
+
+        for open_file in open_files.values() {
+            if let Some(buffered_handle) = &open_file.buffered_handle {
+                let (complete, partial, total) = buffered_handle.memory_usage_detailed();
+                total_bytes += total;
+                total_complete += complete;
+                total_partial += partial;
+                handle_count += 1;
+            }
+        }
+
+        // Publish metrics if MetricService is available
+        if let Some(metrics) = &self.metrics {
+            // Total buffered memory
+            let _ = metrics.publish_gauge(
+                "filesystem.buffered_memory.total_bytes",
+                total_bytes as f64,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Complete stripe memory (triggers flushes)
+            let _ = metrics.publish_gauge(
+                "filesystem.buffered_memory.complete_stripe_bytes",
+                total_complete as f64,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Partial stripe memory (doesn't trigger flushes)
+            let _ = metrics.publish_gauge(
+                "filesystem.buffered_memory.partial_stripe_bytes",
+                total_partial as f64,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Number of active buffered handles
+            let _ = metrics.publish_gauge(
+                "filesystem.buffered_memory.handle_count",
+                handle_count as f64,
+                crate::metric_service::UnitType::Count,
+            );
+
+            // Flush operation counts
+            let _ = metrics.publish_counter(
+                "buffered_file_handles.partial_flushes",
+                self.buffered_metrics.partial_flushes.load(Ordering::Relaxed),
+                crate::metric_service::UnitType::Count,
+            );
+
+            let _ = metrics.publish_counter(
+                "buffered_file_handles.full_flushes",
+                self.buffered_metrics.full_flushes.load(Ordering::Relaxed),
+                crate::metric_service::UnitType::Count,
+            );
+
+            // Write coalescence count
+            let _ = metrics.publish_counter(
+                "buffered_file_handles.writes_coalesced",
+                self.buffered_metrics.writes_coalesced.load(Ordering::Relaxed),
+                crate::metric_service::UnitType::Count,
+            );
+
+            // Flush latency (average of recent flushes)
+            if let Ok(mut latencies) = self.buffered_metrics.flush_latencies.lock() {
+                if !latencies.is_empty() {
+                    let avg_latency = latencies.iter().sum::<f64>() / latencies.len() as f64;
+                    let _ = metrics.publish_gauge(
+                        "buffered_file_handles.flush_latency_avg",
+                        avg_latency,
+                        crate::metric_service::UnitType::Seconds,
+                    );
+
+                    // Also publish min/max for better insight
+                    if let (Some(min), Some(max)) = (
+                        latencies.iter().min_by(|a, b| a.partial_cmp(b).unwrap()),
+                        latencies.iter().max_by(|a, b| a.partial_cmp(b).unwrap()),
+                    ) {
+                        let _ = metrics.publish_gauge(
+                            "buffered_file_handles.flush_latency_min",
+                            *min,
+                            crate::metric_service::UnitType::Seconds,
+                        );
+                        let _ = metrics.publish_gauge(
+                            "buffered_file_handles.flush_latency_max",
+                            *max,
+                            crate::metric_service::UnitType::Seconds,
+                        );
+                    }
+
+                    // Clear latencies after publishing to avoid unbounded growth
+                    latencies.clear();
+                }
+            }
+        }
+
+        (total_bytes, total_complete, total_partial, handle_count)
+    }
+
+    /// Create a BufferedFileHandle for a file.
+    ///
+    /// This helper creates a per-handle write buffer with Raft integration.
+    /// Called during file open to give each handle isolated buffering.
+    fn create_buffered_handle(
+        &self,
+        file_id: FileId,
+        inode: u64,
+        attributes: FileAttr,
+    ) -> Arc<crate::filesystem_service::buffered_file_handle::BufferedFileHandle> {
+        use crate::filesystem_service::buffered_file_handle::{
+            BufferedFileHandle, BufferedFileHandleConfig,
+        };
+        use crate::filesystem_service::raft_commands::RaftClientImpl;
+
+        // Get storage policy from default
+        let storage_policy = Arc::new(self.default_storage_policy());
+
+        // Calculate max stripe size from policy
+        let max_stripe_size =
+            (storage_policy.chunk_size * storage_policy.data_shards as u64) as usize;
+
+        // Create Raft client wrapper
+        let raft_client: Arc<dyn crate::filesystem_service::buffered_file_handle::RaftClient> =
+            Arc::new(RaftClientImpl::new(Arc::clone(&self.raft_stub)));
+
+        // Configure buffered handle
+        let config = BufferedFileHandleConfig {
+            max_memory_bytes: 20 * 1024 * 1024, // 20MB per handle
+            max_flush_interval: std::time::Duration::from_secs(5),
+            max_writes_before_flush: 100,
+            max_stripe_size,
+        };
+
+        Arc::new(BufferedFileHandle::new(
+            file_id,
+            inode,
+            attributes,
+            storage_policy,
+            config,
+            Arc::new(self.metadata_store.clone()),
+            Arc::clone(&self.file_store) as Arc<dyn crate::file_store::FileStore + Send + Sync>,
+            Some(raft_client),
+            Some(Arc::clone(&self.buffered_metrics) as Arc<dyn super::buffered_file_handle::BufferedMetricsReporter>),
+        ))
     }
 
     /// Create a new FileSystemServiceImpl.
@@ -117,9 +325,11 @@ impl FileSystemServiceImpl {
             config.inode_cache_ttl,
         ));
 
+        let raft_stub = Arc::new(StorageRaftMemberStub::new(metadata_store.clone()));
+
         Self {
             config,
-            raft_stub: Arc::new(StorageRaftMemberStub::new(metadata_store.clone())),
+            raft_stub,
             metadata_store,
             file_store,
             inode_manager,
@@ -128,6 +338,7 @@ impl FileSystemServiceImpl {
             client_sessions: Arc::new(RwLock::new(HashMap::new())),
             lock_extension_task: Arc::new(RwLock::new(None)),
             metrics: None, // Will be set via dependency injection
+            buffered_metrics: Arc::new(BufferedMetricsCollector::new()),
         }
     }
 
@@ -200,28 +411,78 @@ impl FileSystemServiceImpl {
     ///
     /// Should be called after FileSystemService is initialized, typically during
     /// filesystem mount or storage node startup.
-    pub fn start_background_tasks(self: Arc<Self>) {
-        let service = Arc::clone(&self);
+    pub async fn start_background_tasks(self: Arc<Self>) {
+        // BufferedFileHandle doesn't require background tasks for flushing - flushes happen on
+        // write count/time/memory thresholds automatically. However, we do need to publish
+        // BufferedFileHandle metrics periodically for monitoring.
 
-        let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(service.config.lock_extend_interval);
+        // Task 1: Lock extension
+        let service_lock = Arc::clone(&self);
+        let lock_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(service_lock.config.lock_extend_interval);
 
             loop {
                 interval.tick().await;
 
-                if let Err(e) = service.extend_active_locks().await {
+                if let Err(e) = service_lock.extend_active_locks().await {
                     tracing::error!("Lock extension failed: {}", e);
                 }
             }
         });
 
-        let mut lock_task = self.lock_extension_task.write().unwrap();
-        *lock_task = Some(task);
+        // Task 2: Periodic metrics publication for BufferedFileHandle memory usage
+        let service_metrics = Arc::clone(&self);
+        let metrics_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+
+            loop {
+                interval.tick().await;
+
+                // Publish BufferedFileHandle memory metrics
+                service_metrics.publish_buffered_memory_usage();
+            }
+        });
+
+        // Store task handles
+        let mut lock_task_handle = self.lock_extension_task.write().unwrap();
+        *lock_task_handle = Some(lock_task);
+        // Note: metrics_task runs independently and doesn't need to be tracked for shutdown
 
         tracing::info!(
-            "Background tasks started (lock extension interval: {:?})",
-            self.config.lock_extend_interval
+            "Background tasks started (lock extension interval: {:?}, metrics interval: 5s, stripe cache: {})",
+            self.config.lock_extend_interval,
+            if self.config.enable_stripe_cache {
+                "enabled"
+            } else {
+                "disabled"
+            }
         );
+    }
+
+    /// Flush all cached data for a specific file to persistent storage.
+    ///
+    /// This forces all buffered writes for the file to be written to disk immediately,
+    /// bypassing the normal flush intervals. Useful for ensuring data persistence
+    /// or for testing.
+    pub async fn flush_file(&self, inode: u64) -> Result<(), Error> {
+        // Find all file handles for this inode and collect their buffered handles
+        let buffered_handles: Vec<_> = {
+            let open_files = self.open_files.read().unwrap();
+            open_files
+                .values()
+                .filter(|of| of.inode == inode)
+                .filter_map(|of| of.buffered_handle.clone())
+                .collect()
+        };
+
+        // Flush each buffered handle (force=true for explicit flush_file calls)
+        for handle in buffered_handles {
+            handle.full_flush(true).await.map_err(|e| {
+                Error::Internal(format!("Failed to flush BufferedFileHandle: {}", e))
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Extend locks for all active files with alive clients.
@@ -734,6 +995,14 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 5: Generate unique file handle
         let file_handle = self.next_file_handle.fetch_add(1, Ordering::SeqCst);
 
+        // Step 5a: Create BufferedFileHandle for write mode if stripe cache enabled
+        let buffered_handle = if is_write_mode && self.config.enable_stripe_cache {
+            let attrs = self.file_record_to_attr(&record);
+            Some(self.create_buffered_handle(record.file_id, inode, attrs))
+        } else {
+            None
+        };
+
         // Step 6: Create OpenFile state
         let open_file = Arc::new(OpenFile {
             file_id: record.file_id,
@@ -750,6 +1019,7 @@ impl FileSystemService for FileSystemServiceImpl {
             },
             offset: AtomicU64::new(0),
             refcount: AtomicU32::new(1),
+            buffered_handle,
         });
 
         // Step 7: Track open file
@@ -835,12 +1105,23 @@ impl FileSystemService for FileSystemServiceImpl {
             gid
         );
 
+        // Step 0: Flush any buffered handles for this inode to ensure read-your-writes consistency
+        // If there are any open file handles with buffered writes, flush them first so reads see the latest data
+        self.flush_file(inode).await?;
+
         // Step 1: Get file metadata (direct read - no Raft needed)
         let record = self
             .metadata_store
             .get_file_by_inode(inode)
             .await
             .map_err(|e| self.convert_metadata_error(e))?;
+
+        trace!(
+            inode = %inode,
+            file_size = %record.size,
+            requested_size = %size,
+            "read: File metadata retrieved"
+        );
 
         // Step 2: Check read permission
         crate::filesystem_service::permissions::check_read_permission(
@@ -867,11 +1148,6 @@ impl FileSystemService for FileSystemServiceImpl {
         let available = record.size - offset;
         let read_size = std::cmp::min(size as u64, available) as usize;
 
-        eprintln!(
-            "read: offset={}, size={}, file_size={}, available={}, read_size={}",
-            offset, size, record.size, available, read_size
-        );
-
         if read_size == 0 {
             return Ok(Vec::new());
         }
@@ -891,94 +1167,98 @@ impl FileSystemService for FileSystemServiceImpl {
             end_stripe_idx - start_stripe_idx + 1
         );
 
-        // Step 4: Read each stripe and accumulate data
+        // Step 4: Read data by iterating through stripes
+        // Get all stripes for this file (sorted by offset)
+        let all_stripes = self
+            .metadata_store
+            .get_file_stripes(record.file_id)
+            .await
+            .map_err(|e| self.convert_metadata_error(e))?;
+
         let mut result_data = Vec::with_capacity(read_size);
+        let end_offset = checked_end_offset(offset, read_size)?;
+        let mut current_offset = offset;
 
-        for stripe_idx in start_stripe_idx..=end_stripe_idx {
-            // Use checked arithmetic to prevent overflow
-            let stripe_offset = checked_stripe_offset(stripe_idx, stripe_size)?;
+        // Iterate through stripes that overlap with our read range
+        for stripe in all_stripes.iter() {
+            let stripe_start = stripe.offset;
+            let stripe_end = stripe.offset + stripe.size;
 
-            // Try to get stripe metadata from MetadataStore
-            let stripe_result = self
+            // Skip stripes entirely before our read range
+            if stripe_end <= offset {
+                continue;
+            }
+
+            // Stop when we've read everything we need
+            if current_offset >= end_offset {
+                break;
+            }
+
+            // If there's a gap before this stripe, fill with zeros (sparse region)
+            if current_offset < stripe_start {
+                let gap_end = std::cmp::min(stripe_start, end_offset);
+                let gap_size = (gap_end - current_offset) as usize;
+                result_data.extend(vec![0u8; gap_size]);
+                current_offset = gap_end;
+            }
+
+            // If we've filled the gap up to end_offset, we're done
+            if current_offset >= end_offset {
+                break;
+            }
+
+            // Read this stripe
+            trace!(
+                stripe_id = ?stripe.stripe_id,
+                offset = %stripe.offset,
+                size = %stripe.size,
+                "Reading stripe"
+            );
+
+            let chunk_records = self
                 .metadata_store
-                .get_stripe_at_offset(record.file_id, stripe_offset)
-                .await;
+                .get_stripe_chunks(stripe.stripe_id)
+                .await
+                .map_err(|e| self.convert_metadata_error(e))?;
 
-            let stripe_data = match stripe_result {
-                Ok(stripe) => {
-                    // Stripe exists - read it from storage
-                    let chunk_records = self
-                        .metadata_store
-                        .get_stripe_chunks(stripe.stripe_id)
-                        .await
-                        .map_err(|e| self.convert_metadata_error(e))?;
+            let chunks: Vec<_> = chunk_records
+                .iter()
+                .map(|r| self.chunk_record_to_metadata(r))
+                .collect();
 
-                    // Convert to ChunkMetadata for FileStore
-                    let chunks: Vec<_> = chunk_records
-                        .iter()
-                        .map(|r| self.chunk_record_to_metadata(r))
-                        .collect();
-
-                    // Read and decode stripe from FileStore
-                    self.file_store
-                        .read_stripe(record.file_id, stripe.stripe_id, chunks)
-                        .await
-                        .map_err(|e| Error::DataFailed(format!("Failed to read stripe: {}", e)))?
-                }
-                Err(_) => {
-                    // Stripe doesn't exist - this is a sparse region
-                    // Return zeros (POSIX sparse file semantics)
-                    tracing::debug!(
-                        "read: stripe {} doesn't exist, returning zeros (sparse region)",
-                        stripe_idx
-                    );
-                    vec![0u8; stripe_size as usize]
-                }
-            };
+            let stripe_data = self
+                .file_store
+                .read_stripe(record.file_id, stripe.stripe_id, chunks)
+                .await
+                .map_err(|e| Error::DataFailed(format!("Failed to read stripe: {}", e)))?;
 
             // Calculate which part of this stripe we need
-            let stripe_start = if stripe_idx == start_stripe_idx {
-                (offset % stripe_size) as usize
+            let read_start_in_stripe = if current_offset > stripe_start {
+                (current_offset - stripe_start) as usize
             } else {
                 0
             };
 
-            let stripe_end = if stripe_idx == end_stripe_idx {
-                // Reuse end_offset_minus_one to avoid recalculation and prevent overflow
-                let end_offset_in_stripe = (end_offset_minus_one % stripe_size) as usize + 1;
-                std::cmp::min(end_offset_in_stripe, stripe_data.len())
+            let read_end_in_stripe = if end_offset < stripe_end {
+                (end_offset - stripe_start) as usize
             } else {
-                stripe_data.len()
+                stripe.size as usize
             };
 
-            eprintln!(
-                "read: stripe {}: stripe_start={}, stripe_end={}, stripe_data.len()={}, result_data.len()={}",
-                stripe_idx,
-                stripe_start,
-                stripe_end,
-                stripe_data.len(),
-                result_data.len()
-            );
+            // Extract the slice we need
+            let slice_start = std::cmp::min(read_start_in_stripe, stripe_data.len());
+            let slice_end = std::cmp::min(read_end_in_stripe, stripe_data.len());
 
-            // Extract the needed slice
-            if stripe_start < stripe_data.len() {
-                let slice_end = std::cmp::min(stripe_end, stripe_data.len());
-                eprintln!(
-                    "read: stripe {}: extracting slice [{}..{}], adding {} bytes",
-                    stripe_idx,
-                    stripe_start,
-                    slice_end,
-                    slice_end - stripe_start
-                );
-                result_data.extend_from_slice(&stripe_data[stripe_start..slice_end]);
-            } else {
-                eprintln!(
-                    "read: stripe {}: stripe_start {} >= stripe_data.len() {}, skipping",
-                    stripe_idx,
-                    stripe_start,
-                    stripe_data.len()
-                );
+            if slice_start < slice_end {
+                result_data.extend_from_slice(&stripe_data[slice_start..slice_end]);
+                current_offset += (slice_end - slice_start) as u64;
             }
+        }
+
+        // If there's still data to read after the last stripe (sparse region at end)
+        if current_offset < end_offset {
+            let gap_size = (end_offset - current_offset) as usize;
+            result_data.extend(vec![0u8; gap_size]);
         }
 
         // Note: We do NOT update access time (atime) on reads.
@@ -1032,6 +1312,7 @@ impl FileSystemService for FileSystemServiceImpl {
     async fn write(
         &self,
         inode: u64,
+        file_handle: u64,
         offset: u64,
         data: Vec<u8>,
         uid: u32,
@@ -1043,8 +1324,9 @@ impl FileSystemService for FileSystemServiceImpl {
         let bytes_to_write = data.len() as u64;
 
         tracing::debug!(
-            "write: inode={}, offset={}, size={}, uid={}, gid={}",
+            "write: inode={}, fh={}, offset={}, size={}, uid={}, gid={}",
             inode,
+            file_handle,
             offset,
             data.len(),
             uid,
@@ -1072,179 +1354,68 @@ impl FileSystemService for FileSystemServiceImpl {
         )
         .map_err(|_| Error::PermissionDenied(inode))?;
 
-        // Step 2: Calculate new file size and validate against max_file_size
-        // Use checked arithmetic to prevent u64 overflow
+        // Step 3: Validate file size won't exceed maximum
         let end_offset = checked_end_offset(offset, data.len())?;
-        let new_size = std::cmp::max(record.size, end_offset);
-
-        if new_size > self.config.max_file_size {
+        if end_offset > self.config.max_file_size {
             return Err(Error::NoSpace); // ENOSPC - file would exceed maximum size
         }
 
-        // Step 3: Calculate stripe range based on storage policy
-        let stripe_size = self.stripe_size();
+        // Step 4: Get the BufferedFileHandle from OpenFile
+        let buffered_handle = {
+            let open_files = self.open_files.read().unwrap();
+            let open_file = open_files.get(&file_handle).ok_or_else(|| {
+                Error::InvalidArgument(format!("File handle {} not found", file_handle))
+            })?;
 
-        let start_stripe_idx = offset / stripe_size;
-        // Use checked arithmetic and saturating_sub to prevent overflow
-        let end_offset_minus_one = checked_end_offset(offset, data.len())?.saturating_sub(1);
-        let end_stripe_idx = end_offset_minus_one / stripe_size;
-
-        tracing::debug!(
-            "write: writing stripes {} to {} (total: {})",
-            start_stripe_idx,
-            end_stripe_idx,
-            end_stripe_idx - start_stripe_idx + 1
-        );
-
-        // Step 4: Process each stripe (DATA PLANE - not via Raft)
-        let mut data_offset = 0;
-        let mut stripe_metadata_updates = Vec::new();
-
-        for stripe_idx in start_stripe_idx..=end_stripe_idx {
-            // Use checked arithmetic to prevent overflow
-            let stripe_offset = checked_stripe_offset(stripe_idx, stripe_size)?;
-
-            // Calculate what portion of data goes into this stripe
-            let stripe_start = if stripe_idx == start_stripe_idx {
-                (offset % stripe_size) as usize
-            } else {
-                0
-            };
-
-            let stripe_end = if stripe_idx == end_stripe_idx {
-                // Reuse end_offset_minus_one to avoid recalculation
-                (end_offset_minus_one % stripe_size) as usize + 1
-            } else {
-                stripe_size as usize
-            };
-
-            let data_len = stripe_end - stripe_start;
-            let stripe_data_slice = &data[data_offset..data_offset + data_len];
-            data_offset += data_len;
-
-            // Check if this is a partial stripe write (requires read-modify-write)
-            let is_partial = stripe_start > 0 || stripe_end < stripe_size as usize;
-
-            tracing::debug!(
-                "write: stripe {} - start={}, end={}, partial={}",
-                stripe_idx,
-                stripe_start,
-                stripe_end,
-                is_partial
-            );
-
-            if is_partial && stripe_offset < record.size {
-                // Read-modify-write for existing partial stripe
-
-                // Get existing stripe
-                let existing_stripe = self
-                    .metadata_store
-                    .get_stripe_at_offset(record.file_id, stripe_offset)
-                    .await;
-
-                match existing_stripe {
-                    Ok(stripe_meta) => {
-                        // Get chunks for existing stripe
-                        let chunk_records = self
-                            .metadata_store
-                            .get_stripe_chunks(stripe_meta.stripe_id)
-                            .await
-                            .map_err(|e| self.convert_metadata_error(e))?;
-
-                        // Convert to ChunkMetadata for FileStore
-                        let chunks: Vec<_> = chunk_records
-                            .iter()
-                            .map(|r| self.chunk_record_to_metadata(r))
-                            .collect();
-
-                        // Update stripe with new data
-                        let policy = self.default_storage_policy();
-                        let updated_stripe = self
-                            .file_store
-                            .update_stripe_partial(
-                                record.file_id,
-                                stripe_meta.stripe_id,
-                                stripe_offset,
-                                chunks,
-                                stripe_start as u64,
-                                stripe_data_slice.to_vec(),
-                                policy,
-                            )
-                            .await
-                            .map_err(|e| {
-                                Error::DataFailed(format!("Failed to update stripe: {}", e))
-                            })?;
-
-                        stripe_metadata_updates.push(updated_stripe);
-                    }
-                    Err(_) => {
-                        // Stripe doesn't exist yet - write new stripe
-                        use crate::file_store::StripeId;
-                        let stripe_id = StripeId::generate();
-                        let policy = self.default_storage_policy();
-
-                        let new_stripe = self
-                            .file_store
-                            .write_stripe(
-                                record.file_id,
-                                stripe_id,
-                                stripe_offset,
-                                stripe_data_slice.to_vec(),
-                                policy,
-                            )
-                            .await
-                            .map_err(|e| {
-                                Error::DataFailed(format!("Failed to write stripe: {}", e))
-                            })?;
-
-                        stripe_metadata_updates.push(new_stripe);
-                    }
-                }
-            } else {
-                // Full stripe write - no read needed
-                use crate::file_store::StripeId;
-                let stripe_id = StripeId::generate();
-                let policy = self.default_storage_policy();
-
-                let new_stripe = self
-                    .file_store
-                    .write_stripe(
-                        record.file_id,
-                        stripe_id,
-                        stripe_offset,
-                        stripe_data_slice.to_vec(),
-                        policy,
-                    )
-                    .await
-                    .map_err(|e| Error::DataFailed(format!("Failed to write stripe: {}", e)))?;
-
-                stripe_metadata_updates.push(new_stripe);
+            // Validate that the file handle matches the inode
+            if open_file.inode != inode {
+                return Err(Error::InvalidArgument(format!(
+                    "File handle {} does not match inode {}",
+                    file_handle, inode
+                )));
             }
-        }
 
-        // Step 5: Update metadata via Raft (CONTROL PLANE)
-        use crate::filesystem_service::raft_commands::{FileUpdateFields, RaftCommand};
+            // Clone the Arc to use outside the lock
+            open_file.buffered_handle.clone()
+        }; // Lock dropped here
 
-        // Update file size and mtime
-        let command = RaftCommand::UpdateFile {
-            inode,
-            updates: FileUpdateFields {
-                size: Some(new_size),
-                mode: None,
-                uid: None,
-                gid: None,
-                atime: None,
-                mtime: Some(SystemTime::now()),
-            },
+        // Step 5: Dispatch write based on whether BufferedFileHandle is enabled
+        let bytes_written = if let Some(handle) = buffered_handle {
+            // NEW PATH: Use BufferedFileHandle for optimized write buffering
+            // This handles:
+            // - Stripe splitting and alignment
+            // - Read-modify-write for partial stripes
+            // - Write coalescing and buffering
+            // - Automatic flush on memory pressure or timeout
+            // - Atomic metadata commits via Raft batching
+            handle
+                .write(offset, &data)
+                .await
+                .map_err(|e| Error::Internal(format!("BufferedFileHandle write failed: {}", e)))?
+        } else {
+            // LEGACY PATH: Fall back to direct metadata update (no buffering)
+            // This path is used when enable_stripe_cache is disabled
+            tracing::warn!(
+                "BufferedFileHandle not enabled for file handle {}, writes will not be buffered",
+                file_handle
+            );
+            return Err(Error::Internal(
+                "BufferedFileHandle required - enable_stripe_cache must be true".to_string(),
+            ));
         };
 
-        let _result = self
-            .raft_stub
-            .propose_operation(command)
-            .await
-            .map_err(|e| Error::RaftError(format!("{}", e)))?;
-
-        // [TEMP Phase 1] Update metadata store directly
+        // Step 6: Calculate metadata for file size update
+        let new_size = std::cmp::max(record.size, end_offset);
+        trace!(
+            inode = %inode,
+            old_size = %record.size,
+            end_offset = %end_offset,
+            new_size = %new_size,
+            "write: Updating file size"
+        );
+        let mtime = SystemTime::now();
+        // Step 7: [TEMP Phase 1] Update metadata store directly for backward compatibility
+        // TODO: Remove this once Raft stub fully handles metadata persistence
         let updated_metadata = FileMetadata {
             file_type: record.file_type,
             size: new_size,
@@ -1252,7 +1423,7 @@ impl FileSystemService for FileSystemServiceImpl {
             uid: record.uid,
             gid: record.gid,
             created_at: record.created_at,
-            modified_at: SystemTime::now(),
+            modified_at: mtime,
             accessed_at: record.accessed_at,
             target: record.target.clone(), // Preserve target for symlinks
         };
@@ -1262,22 +1433,7 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
             .map_err(|e| self.convert_metadata_error(e))?;
 
-        // Step 6: Update stripe metadata via Raft
-        // The Raft stub now handles all metadata persistence (stripes + chunks)
-        for stripe_meta in stripe_metadata_updates {
-            let command = RaftCommand::UpdateStripe {
-                file_id: record.file_id,
-                stripe_id: stripe_meta.stripe_id,
-                metadata: stripe_meta.clone(),
-            };
-
-            self.raft_stub
-                .propose_operation(command)
-                .await
-                .map_err(|e| Error::RaftError(format!("{}", e)))?;
-        }
-
-        // Step 7: Invalidate cache
+        // Step 8: Invalidate cache
         self.inode_manager.cache().invalidate(inode);
 
         // Publish metrics if available
@@ -1319,11 +1475,11 @@ impl FileSystemService for FileSystemServiceImpl {
 
         tracing::info!(
             "Wrote {} bytes to inode {} at offset {}",
-            data.len(),
+            bytes_written,
             inode,
             offset
         );
-        Ok(data.len() as u32)
+        Ok(bytes_written as u32)
     }
 
     async fn unlink(
@@ -1551,6 +1707,28 @@ impl FileSystemService for FileSystemServiceImpl {
 
     async fn release(&self, file_handle: u64) -> Result<(), Error> {
         tracing::debug!("release: file_handle={}", file_handle);
+
+        // Flush BufferedFileHandle before closing (if present)
+        let buffered_handle_to_flush = {
+            let open_files = self.open_files.read().unwrap();
+            open_files
+                .get(&file_handle)
+                .and_then(|open_file| open_file.buffered_handle.clone())
+        };
+
+        // Flush the buffered handle if present (force=true on file close)
+        if let Some(handle) = buffered_handle_to_flush {
+            tracing::debug!(
+                "Flushing BufferedFileHandle for file_handle={}",
+                file_handle
+            );
+            handle.full_flush(true).await.map_err(|e| {
+                Error::Internal(format!(
+                    "Failed to flush BufferedFileHandle on release: {}",
+                    e
+                ))
+            })?;
+        }
 
         // Remove the file handle from tracking and extract lock info
         let removed = {
@@ -1962,12 +2140,33 @@ impl FileSystemService for FileSystemServiceImpl {
     // ===== Metadata Operations =====
 
     async fn getattr(&self, inode: u64) -> Result<FileAttr, Error> {
-        // Check cache first - use it if available
+        // CRITICAL: Flush any pending writes before reading metadata
+        // Otherwise we return stale file size/mtime from database
+
+        // Get file_id to flush buffered writes
+        let file_id = if let Some(cached) = self.inode_manager.cache().get(inode) {
+            // Have cached entry - use its file_id
+            cached.file_id
+        } else {
+            // Need to query to get file_id
+            let record = self
+                .metadata_store
+                .get_file_by_inode(inode)
+                .await
+                .map_err(|e| self.convert_metadata_error(e))?;
+            record.file_id
+        };
+
+        // Flush all buffered writes for this file to ensure metadata is current
+        // Use flush_file() which now uses BufferedFileHandle
+        self.flush_file(inode).await?;
+
+        // Now check cache again (may have been updated by flush callback)
         if let Some(cached) = self.inode_manager.cache().get(inode) {
             return Ok(self.cached_metadata_to_attr(inode, &cached));
         }
 
-        // Cache miss - query MetadataStore
+        // Cache miss - query MetadataStore (will have fresh data after flush)
         let record = self
             .metadata_store
             .get_file_by_inode(inode)
@@ -2051,6 +2250,10 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 3: Handle truncation if size is changing (DATA PLANE)
         if let Some(new_size) = size {
+            // CRITICAL: Flush all pending writes for this file before truncation
+            // Otherwise buffered writes will be lost when we delete stripe metadata
+            self.flush_file(inode).await?;
+
             if new_size < record.size {
                 // Shrinking - need to delete/truncate stripes
                 let stripe_size = self.stripe_size();
@@ -2106,10 +2309,11 @@ impl FileSystemService for FileSystemServiceImpl {
                             stripe_idx
                         );
                     } else if stripe_idx == new_last_stripe_idx && new_size % stripe_size != 0 {
-                        // Partial truncation of last stripe - would require read-modify-write
-                        // For Phase 1, we'll leave the stripe as-is (wasted space)
+                        // Partial truncation of last stripe - leave as-is for Phase 1
+                        // Proper implementation would truncate the stripe data, but that requires
+                        // read-modify-write which is deferred to Phase 2
                         tracing::debug!(
-                            "setattr: partial truncation of stripe {} (Phase 1: not implemented)",
+                            "setattr: partial truncation of stripe {} (Phase 1: left as-is, wasted space)",
                             stripe_idx
                         );
                     }
@@ -2457,6 +2661,7 @@ mod tests {
         let result = service
             .write(
                 file_attr.ino,
+                fh,
                 u64::MAX - 100,
                 data,
                 TEST_UID,
@@ -2588,10 +2793,16 @@ mod tests {
             _ => panic!("Expected PermissionDenied error, got: {:?}", result),
         }
 
-        // Try to write as a different user (uid=2000) - should also fail
+        // Open the file as owner to get a valid file handle
+        let (fh, _) = service
+            .open(file_attr.ino, 0x02, 1000, 1000, client_id)
+            .await
+            .unwrap();
+
+        // Try to write using owner's file handle but as a different user (uid=2000) - should fail permission check
         let data = vec![1u8; 100];
         let result = service
-            .write(file_attr.ino, 0, data, 2000, 2000, client_id)
+            .write(file_attr.ino, fh, 0, data, 2000, 2000, client_id)
             .await;
 
         assert!(result.is_err(), "Should deny write access to non-owner");

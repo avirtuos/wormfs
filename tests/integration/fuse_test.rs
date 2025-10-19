@@ -59,6 +59,7 @@ async fn create_test_fs() -> (FileSystemServiceImpl, TempDir) {
     };
 
     let service = FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None)
+        .await
         .expect("Failed to create FileSystemService");
 
     (service, temp_dir)

@@ -69,6 +69,7 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
     // Create FileSystemService using the factory
     let fs_config = wormfs::filesystem_service::types::Config::default();
     let service = FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None)
+        .await
         .expect("Failed to create FileSystemService");
 
     // Initialize root directory
@@ -108,7 +109,7 @@ async fn create_test_file(service: &FileSystemServiceImpl, name: &str, initial_d
 
         // Write data
         service
-            .write(inode, 0, initial_data.to_vec(), 1000, 1000, client_id)
+            .write(inode, fh, 0, initial_data.to_vec(), 1000, 1000, client_id)
             .await
             .expect("Failed to write initial data");
 
@@ -305,7 +306,7 @@ async fn test_concurrent_read_during_write_should_succeed() {
 
         let new_data = b"Updated data from writer";
         service_clone
-            .write(inode, 0, new_data.to_vec(), 1000, 1000, client_id)
+            .write(inode, fh, 0, new_data.to_vec(), 1000, 1000, client_id)
             .await
             .expect("Writer failed to write");
 

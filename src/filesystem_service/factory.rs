@@ -5,7 +5,6 @@
 //! construction with concrete dependency types.
 
 use super::implementation::FileSystemServiceImpl;
-use super::raft_commands::StorageRaftMemberStub;
 use super::{Config, Error};
 use crate::file_store::FileStoreImpl;
 use crate::metadata_store::MetadataStoreImpl;
@@ -65,7 +64,7 @@ impl FileSystemServiceImplFactory {
     ///     Some(metrics),
     /// )?;
     /// ```
-    pub fn create(
+    pub async fn create(
         config: Config,
         metadata_store: MetadataStoreImpl,
         file_store: Arc<FileStoreImpl>,
@@ -78,8 +77,11 @@ impl FileSystemServiceImplFactory {
 
         // Inject metrics if provided
         if let Some(metrics_arc) = metrics {
-            // Set metrics on FileSystemService
-            service.set_metrics(metrics_arc.clone());
+            // Set metrics on FileSystemService (async to propagate to StripeCache)
+            service.set_metrics(metrics_arc.clone()).await;
+
+            // Set metrics on MetadataStore
+            service.metadata_store().set_metrics(metrics_arc.clone());
 
             // Set metrics on FileStore
             file_store.set_metrics(metrics_arc);

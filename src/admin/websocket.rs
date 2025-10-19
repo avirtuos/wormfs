@@ -34,6 +34,8 @@ impl WsState {
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
+        tracing::debug!("Creating new WsState instance");
+
         Self {
             metrics,
             broadcast_tx,
@@ -48,6 +50,8 @@ impl WsState {
         let tx = self.broadcast_tx.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
+        tracing::info!("Starting WebSocket broadcast task (interval: 2s)");
+
         let task_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
 
@@ -56,6 +60,7 @@ impl WsState {
                     _ = interval.tick() => {
                         // Get metrics snapshot
                         let snapshot = metrics.snapshot();
+                        tracing::debug!("WebSocket broadcast tick - {} metrics available", snapshot.metrics.len());
 
                         // Convert to JSON
                         let mut metrics_json = serde_json::Map::new();
@@ -82,8 +87,25 @@ impl WsState {
 
                         if let Ok(json_str) = serde_json::to_string(&payload) {
                             // Send to all connected clients
-                            // Ignore send errors (happens when no receivers are connected)
-                            let _ = tx.send(json_str);
+                            let receiver_count = tx.receiver_count();
+                            tracing::debug!(
+                                "Broadcasting metrics to {} WebSocket clients ({} bytes)",
+                                receiver_count,
+                                json_str.len()
+                            );
+
+                            match tx.send(json_str) {
+                                Ok(_) => {
+                                    if receiver_count > 0 {
+                                        tracing::trace!("Metrics broadcast sent successfully");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to broadcast metrics: {}", e);
+                                }
+                            }
+                        } else {
+                            tracing::error!("Failed to serialize metrics to JSON");
                         }
                     }
                     _ = shutdown_rx.recv() => {
@@ -102,11 +124,19 @@ impl WsState {
 
 impl Drop for WsState {
     fn drop(&mut self) {
-        // Send shutdown signal (non-blocking)
-        // We don't wait for the task to complete to avoid blocking Drop
-        let _ = self.shutdown_tx.send(());
-
-        tracing::debug!("WsState dropped, shutdown signal sent");
+        // Only send shutdown signal if this is the last clone
+        // (Arc::strong_count returns the number of references)
+        if Arc::strong_count(&self.shutdown_tx) == 1 {
+            tracing::info!(
+                "Last WsState instance dropped, sending shutdown signal to broadcast task"
+            );
+            let _ = self.shutdown_tx.send(());
+        } else {
+            tracing::debug!(
+                "WsState clone dropped, {} references remaining",
+                Arc::strong_count(&self.shutdown_tx) - 1
+            );
+        }
     }
 }
 
@@ -117,18 +147,60 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<WsState>) -> R
 
 /// Handle an individual WebSocket connection
 async fn handle_socket(socket: WebSocket, state: WsState) {
+    tracing::info!("New WebSocket connection established");
+
     let (mut sender, mut receiver) = socket.split();
+
+    // Send initial metrics snapshot immediately upon connection
+    let initial_snapshot = state.metrics.snapshot();
+    let mut metrics_json = serde_json::Map::new();
+    for (name, metric) in initial_snapshot.metrics.iter() {
+        let metric_obj = serde_json::json!({
+            "value": metric.value,
+            "type": format!("{:?}", metric.metric_type),
+            "unit": format!("{:?}", metric.unit),
+            "timestamp": initial_snapshot.timestamp
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+        metrics_json.insert(name.clone(), metric_obj);
+    }
+
+    let initial_payload = serde_json::json!({
+        "metrics": metrics_json,
+        "timestamp": initial_snapshot.timestamp
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    });
+
+    if let Ok(json_str) = serde_json::to_string(&initial_payload) {
+        tracing::debug!(
+            "Sending initial metrics snapshot ({} metrics, {} bytes)",
+            initial_snapshot.metrics.len(),
+            json_str.len()
+        );
+        if let Err(e) = sender.send(Message::Text(json_str.into())).await {
+            tracing::error!("Failed to send initial snapshot: {}", e);
+            return;
+        }
+    }
 
     // Subscribe to broadcast channel
     let mut rx = state.broadcast_tx.subscribe();
+    tracing::debug!("WebSocket client subscribed to broadcast channel");
 
     // Spawn task to forward broadcast messages to this WebSocket
     let mut send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
+            tracing::trace!("Forwarding broadcast message to WebSocket client");
             if sender.send(Message::Text(msg.into())).await.is_err() {
+                tracing::debug!("WebSocket send failed, client disconnected");
                 break;
             }
         }
+        tracing::debug!("WebSocket send task ending");
     });
 
     // Spawn task to handle incoming WebSocket messages (mostly pings/pongs)
