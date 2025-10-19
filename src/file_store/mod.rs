@@ -73,11 +73,13 @@
 
 pub mod erasure_coding;
 pub mod implementation;
+pub mod stripe_builder;
 pub mod types;
 
 use async_trait::async_trait;
 pub use implementation::FileStoreImpl;
 use std::path::PathBuf;
+pub use stripe_builder::StripeBuilder;
 pub use types::{
     ChunkCacheEntry, ChunkData, ChunkHeader, ChunkId, ChunkMetadata, CompressionAlgorithm, Config,
     DiskId, DiskStats, ErasureAlgorithm, Error, FileId, NodeId, PrefetchPolicy, PrepareVote,

@@ -5,8 +5,11 @@
 
 use crate::file_store::{FileId, StripeId, StripeMetadata};
 use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::SystemTime;
+use tracing::trace;
 
 /// Commands that modify metadata and must go through Raft consensus.
 ///
@@ -710,6 +713,266 @@ impl StorageRaftMemberStub {
     /// Check if this node is the leader (stub - always true)
     pub fn is_leader(&self) -> bool {
         true
+    }
+
+    /// Propose a batch of stripe operations atomically.
+    ///
+    /// This method executes multiple stripe operations (creates, updates, deletes)
+    /// as a single atomic batch. All operations succeed or all fail together.
+    ///
+    /// # Arguments
+    ///
+    /// * `operations` - Vector of stripe operations to execute atomically
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if all operations succeeded, Err otherwise
+    pub async fn propose_stripe_batch(
+        &self,
+        operations: Vec<crate::filesystem_service::buffered_file_handle::StripeOperation>,
+    ) -> Result<(), RaftError> {
+        use crate::filesystem_service::buffered_file_handle::StripeOperation;
+        use crate::metadata_store::types::StripeRecord;
+
+        // Group operations by type
+        let mut creates: Vec<(FileId, StripeMetadata)> = Vec::new();
+        let mut updates: Vec<(FileId, StripeMetadata)> = Vec::new();
+        let mut deletes: Vec<StripeId> = Vec::new();
+
+        for op in operations {
+            match op {
+                StripeOperation::Create { file_id, stripe } => {
+                    creates.push((file_id, stripe));
+                }
+                StripeOperation::Update { file_id, stripe } => {
+                    updates.push((file_id, stripe));
+                }
+                StripeOperation::Delete { stripe_id } => {
+                    deletes.push(stripe_id);
+                }
+                StripeOperation::UpdateAttributes {
+                    file_id,
+                    inode,
+                    attributes,
+                } => {
+                    tracing::debug!(
+                        "Updating attributes for file_id={:?}, inode={}, size={}",
+                        file_id,
+                        inode,
+                        attributes.size
+                    );
+                    // For now, skip attribute updates in stub
+                    // In real implementation, this would update file metadata
+                }
+            }
+        }
+
+        // Execute deletes FIRST (before creates) to ensure tombstoned stripes are removed
+        // This prevents the CREATE idempotency check from finding old stripes that should be replaced
+        for stripe_id in deletes {
+            trace!(
+                stripe_id = ?stripe_id,
+                "Deleting stripe (tombstone)"
+            );
+            self.metadata_store
+                .delete_stripe(stripe_id)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to delete stripe: {}", e))
+                })?;
+            trace!(
+                stripe_id = ?stripe_id,
+                "Successfully deleted stripe"
+            );
+        }
+
+        // Execute creates with create-or-update logic to handle idempotent flushes
+        const STRIPE_SIZE: u64 = 4 * 1024 * 1024; // 4MB stripes
+        for (file_id, stripe_meta) in creates {
+            let stripe_index = (stripe_meta.offset / STRIPE_SIZE) as u32;
+
+            // Check if stripe already exists at this offset
+            trace!(
+                offset = %stripe_meta.offset,
+                file_id = ?file_id,
+                "Checking if stripe exists at offset"
+            );
+            let stripe_exists_result = self
+                .metadata_store
+                .get_stripe_at_offset(file_id, stripe_meta.offset)
+                .await;
+
+            match &stripe_exists_result {
+                Ok(existing) => {
+                    // Stripe exists - check if it's the same one (idempotent) or different (error)
+                    if existing.stripe_id == stripe_meta.stripe_id {
+                        trace!(
+                            stripe_id = ?existing.stripe_id,
+                            offset = %stripe_meta.offset,
+                            "Stripe already exists (idempotent) - skipping create"
+                        );
+                        // Idempotent operation - this is OK, skip the create
+                        continue;
+                    } else {
+                        // Different stripe at same offset - this is an error!
+                        return Err(RaftError::OperationFailed(format!(
+                            "Cannot create stripe {:?} at offset {}: different stripe {:?} already exists at this offset",
+                            stripe_meta.stripe_id, stripe_meta.offset, existing.stripe_id
+                        )));
+                    }
+                }
+                Err(_) => {
+                    // No stripe exists - proceed with create
+                    trace!(
+                        stripe_id = ?stripe_meta.stripe_id,
+                        file_id = ?file_id,
+                        offset = %stripe_meta.offset,
+                        size = %stripe_meta.size,
+                        chunks = %stripe_meta.chunks.len(),
+                        "Creating new stripe"
+                    );
+
+                    // Create new stripe record
+                    let stripe_record = StripeRecord {
+                        stripe_id: stripe_meta.stripe_id,
+                        file_id,
+                        stripe_index,
+                        offset: stripe_meta.offset,
+                        size: stripe_meta.size,
+                        checksum: stripe_meta.checksum,
+                        created_at: SystemTime::now(),
+                    };
+                    self.metadata_store
+                        .allocate_stripes(file_id, vec![stripe_record])
+                        .await
+                        .map_err(|e| {
+                            RaftError::OperationFailed(format!("Failed to create stripe: {}", e))
+                        })?;
+
+                    trace!(
+                        stripe_id = ?stripe_meta.stripe_id,
+                        "Successfully created stripe in MetadataStore"
+                    );
+
+                    // Allocate chunks for new stripe
+                    let chunk_records: Vec<_> = stripe_meta
+                        .chunks
+                        .iter()
+                        .map(|chunk| crate::metadata_store::ChunkRecord {
+                            chunk_id: chunk.chunk_id,
+                            stripe_id: stripe_meta.stripe_id,
+                            chunk_index: chunk.chunk_index,
+                            node_id: chunk.node_id,
+                            disk_id: chunk.disk_id,
+                            checksum: stripe_meta.checksum,
+                            status: crate::metadata_store::ChunkStatus::Healthy,
+                            created_at: SystemTime::now(),
+                            last_verified: None,
+                        })
+                        .collect();
+
+                    self.metadata_store
+                        .allocate_chunks(stripe_meta.stripe_id, chunk_records.clone())
+                        .await
+                        .map_err(|e| {
+                            RaftError::OperationFailed(format!("Failed to allocate chunks: {}", e))
+                        })?;
+
+                    trace!(
+                        chunk_count = %chunk_records.len(),
+                        stripe_id = ?stripe_meta.stripe_id,
+                        "Allocated chunks for stripe"
+                    );
+                }
+            }
+        }
+
+        // Execute updates (delete + recreate for now)
+        for (file_id, stripe_meta) in updates {
+            let stripe_index = (stripe_meta.offset / STRIPE_SIZE) as u32;
+
+            // Delete old version
+            self.metadata_store
+                .delete_stripe(stripe_meta.stripe_id)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to delete stripe for update: {}", e))
+                })?;
+
+            // Create new version
+            let stripe_record = StripeRecord {
+                stripe_id: stripe_meta.stripe_id,
+                file_id,
+                stripe_index,
+                offset: stripe_meta.offset,
+                size: stripe_meta.size,
+                checksum: stripe_meta.checksum,
+                created_at: SystemTime::now(),
+            };
+            self.metadata_store
+                .allocate_stripes(file_id, vec![stripe_record])
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!("Failed to recreate stripe: {}", e))
+                })?;
+
+            // Allocate chunks for updated stripe
+            let chunk_records: Vec<_> = stripe_meta
+                .chunks
+                .iter()
+                .map(|chunk| crate::metadata_store::ChunkRecord {
+                    chunk_id: chunk.chunk_id,
+                    stripe_id: stripe_meta.stripe_id,
+                    chunk_index: chunk.chunk_index,
+                    node_id: chunk.node_id,
+                    disk_id: chunk.disk_id,
+                    checksum: stripe_meta.checksum,
+                    status: crate::metadata_store::ChunkStatus::Healthy,
+                    created_at: SystemTime::now(),
+                    last_verified: None,
+                })
+                .collect();
+
+            self.metadata_store
+                .allocate_chunks(stripe_meta.stripe_id, chunk_records)
+                .await
+                .map_err(|e| {
+                    RaftError::OperationFailed(format!(
+                        "Failed to allocate chunks for update: {}",
+                        e
+                    ))
+                })?;
+        }
+
+        Ok(())
+    }
+}
+
+/// RaftClient implementation that wraps StorageRaftMemberStub.
+///
+/// This provides the RaftClient trait implementation for BufferedFileHandle
+/// to use for atomic metadata operations.
+pub struct RaftClientImpl {
+    stub: Arc<StorageRaftMemberStub>,
+}
+
+impl RaftClientImpl {
+    /// Create a new RaftClient wrapping the given stub
+    pub fn new(stub: Arc<StorageRaftMemberStub>) -> Self {
+        Self { stub }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::filesystem_service::buffered_file_handle::RaftClient for RaftClientImpl {
+    async fn propose_stripe_batch(
+        &self,
+        operations: Vec<crate::filesystem_service::buffered_file_handle::StripeOperation>,
+    ) -> Result<(), crate::filesystem_service::types::Error> {
+        self.stub
+            .propose_stripe_batch(operations)
+            .await
+            .map_err(|e| crate::filesystem_service::types::Error::Internal(format!("{}", e)))
     }
 }
 

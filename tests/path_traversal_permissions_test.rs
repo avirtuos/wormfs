@@ -66,6 +66,7 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
 
     let fs_config = wormfs::filesystem_service::types::Config::default();
     let service = FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None)
+        .await
         .expect("Failed to create FileSystemService");
 
     service
@@ -107,15 +108,25 @@ async fn test_access_file_with_no_execute_on_intermediate_dir() {
         .expect("Failed to create file");
 
     // Write some data to the file as owner
-    service
+    let (fh, _) = service
         .open(file.ino, libc::O_WRONLY as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to open file for writing");
 
     service
-        .write(file.ino, 0, b"test data".to_vec(), 1000, 1000, client_id)
+        .write(
+            file.ino,
+            fh,
+            0,
+            b"test data".to_vec(),
+            1000,
+            1000,
+            client_id,
+        )
         .await
         .expect("Failed to write to file");
+
+    service.release(fh).await.expect("Failed to release");
 
     // Now try to access the file as user 2000 (not owner, not in group)
     // User 2000 has:
@@ -169,15 +180,25 @@ async fn test_access_file_with_execute_on_all_dirs() {
         .expect("Failed to create file");
 
     // Write some data as owner
-    service
+    let (fh, _) = service
         .open(file.ino, libc::O_WRONLY as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to open file for writing");
 
     service
-        .write(file.ino, 0, b"test data".to_vec(), 1000, 1000, client_id)
+        .write(
+            file.ino,
+            fh,
+            0,
+            b"test data".to_vec(),
+            1000,
+            1000,
+            client_id,
+        )
         .await
         .expect("Failed to write to file");
+
+    service.release(fh).await.expect("Failed to release");
 
     // Now access the file as user 2000
     // User 2000 has execute on all directories and read on the file

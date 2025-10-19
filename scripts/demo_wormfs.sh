@@ -4,7 +4,9 @@
 # Demonstrates full Phase 1 capabilities (Steps 1-11)
 # Shows configuration file loading, component initialization, and filesystem operations
 
-set -e  # Exit on error
+# Error handling: Don't exit immediately, but trap errors
+set -E  # Inherit ERR trap in functions
+set +e  # Don't exit on error (we'll handle errors manually)
 
 # Colors for output
 RED='\033[0;31m'
@@ -62,10 +64,41 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1"
             echo "Use --help for usage information"
-            exit 1
+            fail "Unknown option: $1"
             ;;
     esac
 done
+
+error_handler() {
+    local exit_code=$?
+    echo ""
+    echo -e "${RED}===============================================${NC}"
+    echo -e "${RED}ERROR DETECTED (Exit code: $exit_code)${NC}"
+    echo -e "${RED}===============================================${NC}"
+    echo ""
+    echo -e "${YELLOW}An error occurred. Press Enter to cleanup and exit...${NC}"
+    read -r
+    cleanup
+    exit $exit_code
+}
+
+# Function to handle explicit failures with user prompt
+fail() {
+    local message="$1"
+    local exit_code="${2:-1}"
+    echo ""
+    echo -e "${RED}===============================================${NC}"
+    echo -e "${RED}ERROR: $message${NC}"
+    echo -e "${RED}===============================================${NC}"
+    echo ""
+    echo -e "${YELLOW}Press Enter to cleanup and exit...${NC}"
+    read -r
+    cleanup
+    exit $exit_code
+}
+
+# Trap errors and pause for inspection
+trap 'error_handler' ERR
 
 # Cleanup function - always cleanup on exit
 cleanup() {
@@ -162,6 +195,7 @@ main() {
     echo "  • Configuration Management (TOML + CLI overrides)"
     echo "  • Metadata Persistence (MetadataStore + SQLite)"
     echo "  • Erasure Coding (FileStore + Reed-Solomon)"
+    echo "  • StripeCache (Write Buffering & I/O Amplification Reduction)"
     echo "  • FUSE Filesystem (FileSystemService)"
     echo "  • File & Directory Operations"
     echo "  • Metrics Collection (I/O Amplification Tracking)"
@@ -177,7 +211,7 @@ main() {
         print_success "FUSE is available"
     else
         print_error "FUSE not found. Please install fuse3 or macfuse."
-        exit 1
+        fail "FUSE not found. Please install fuse3 or macfuse."
     fi
 
     # Check if binary exists, build if not
@@ -249,6 +283,13 @@ enable_xattr = false
 uid = $(id -u)
 gid = $(id -g)
 
+# StripeCache: Write buffering to dramatically reduce I/O amplification
+# Buffers partial stripe writes in memory, coalesces them into full stripes
+# Reduces I/O amplification from ~990x to ~3x for typical workloads
+enable_stripe_cache = true
+stripe_cache_max_memory_bytes = 268435456  # 256MB cache
+stripe_cache_dirty_timeout = 5  # Flush dirty stripes after 5 seconds
+
 [metrics]
 enabled = true
 aggregation_window_secs = 10
@@ -281,8 +322,9 @@ EOF
     echo "WormFS uses the following Phase 1 components:"
     print_component "1. MetadataStore      (SQLite + WAL for metadata persistence)"
     print_component "2. FileStore          (Reed-Solomon erasure coding + chunk storage)"
-    print_component "3. FileSystemService  (FUSE integration for filesystem ops)"
-    print_component "4. MetricService      (I/O amplification & performance metrics)"
+    print_component "3. StripeCache        (Write buffering for I/O amplification reduction)"
+    print_component "4. FileSystemService  (FUSE integration for filesystem ops)"
+    print_component "5. MetricService      (I/O amplification & performance metrics)"
     echo ""
 
     # Clean up any stale mount before attempting to mount
@@ -297,20 +339,22 @@ EOF
         print_success "Stale mount cleaned up"
     fi
 
-    WORMFS_LOG=$(mktemp -t wormfs-demo-fuse-log.XXXXXX)
-    print_command "$WORMFS_BINARY mount --config $CONFIG_FILE --mount-point $MOUNT_POINT --foreground --verbose"
+    # Use a known location for logs that user can easily find
+    WORMFS_LOG="$DATA_DIR/wormfs.log"
+    print_command "RUST_LOG=wormfs=debug $WORMFS_BINARY mount --config $CONFIG_FILE --mount-point $MOUNT_POINT --foreground --verbose"
     echo ""
     echo "Mounting WormFS with config file..."
+    echo -e "${CYAN}Logs will be written to: $WORMFS_LOG${NC}"
 
     # Start FUSE mount in background with config file and verbose logging
-    "$WORMFS_BINARY" mount \
+    RUST_LOG=wormfs=debug "$WORMFS_BINARY" mount \
         --config "$CONFIG_FILE" \
         --mount-point "$MOUNT_POINT" \
         --foreground \
         --verbose > "$WORMFS_LOG" 2>&1 &
     WORMFS_PID=$!
-    verbose "FUSE PID: $WORMFS_PID"
-    verbose "FUSE log: $WORMFS_LOG"
+    print_info "FUSE PID: $WORMFS_PID"
+    print_info "Logs: $WORMFS_LOG"
 
     # Wait for mount
     echo -n "Waiting for mount to complete"
@@ -330,7 +374,7 @@ EOF
         echo ""
         echo "Log output:"
         cat "$WORMFS_LOG"
-        exit 1
+        fail "Failed to mount filesystem"
     fi
 
     # Verify mount
@@ -353,7 +397,7 @@ EOF
         echo ""
     fi
 
-    # Display Admin UI link
+    # Display Admin UI link and log information
     echo ""
     echo "=========================================="
     echo -e "${BOLD}${GREEN}🌐 Admin Web UI Available!${NC}"
@@ -367,6 +411,18 @@ EOF
     echo -e "    • ${GREEN}⚙️  Configuration Viewer${NC}"
     echo -e "    • ${GREEN}❤️  Health & Status Dashboard${NC}"
     echo -e "    • ${GREEN}📝 Live Log Streaming${NC}"
+    echo ""
+    echo "=========================================="
+    echo ""
+    echo -e "${BOLD}${YELLOW}📋 Debug Logs:${NC}"
+    echo -e "  ${CYAN}Log file location:${NC}"
+    echo -e "  ${BOLD}$WORMFS_LOG${NC}"
+    echo ""
+    echo -e "  ${CYAN}Watch logs in real-time:${NC}"
+    echo -e "  ${BOLD}tail -f $WORMFS_LOG${NC}"
+    echo ""
+    echo -e "  ${CYAN}Filter for WebSocket activity:${NC}"
+    echo -e "  ${BOLD}tail -f $WORMFS_LOG | grep -i websocket${NC}"
     echo ""
     echo "=========================================="
     echo ""
@@ -480,19 +536,31 @@ EOF
 
     # Stage file in /tmp first
     STAGING_FILE=$(mktemp -t wormfs-demo-staging.XXXXXX.dat)
-    print_command "dd if=/dev/urandom of=$STAGING_FILE bs=1M count=30"
-    dd if=/dev/urandom of="$STAGING_FILE" bs=1M count=30 2>&1 | tail -1
-    print_success "Created 30MB file in staging area"
+    print_command "dd if=/dev/urandom of=$STAGING_FILE bs=1M count=300"
+    dd if=/dev/urandom of="$STAGING_FILE" bs=1M count=300 2>&1 | tail -1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}ERROR: Failed to create test file with dd${NC}"
+        fail "Failed to create test file with dd"
+    fi
+    print_success "Created 300MB file in staging area"
 
     # Calculate checksum of original file
     print_command "md5sum $STAGING_FILE"
     ORIGINAL_CHECKSUM=$(md5sum "$STAGING_FILE" | awk '{print $1}')
+    if [ -z "$ORIGINAL_CHECKSUM" ]; then
+        echo -e "${RED}ERROR: Failed to calculate checksum of staging file${NC}"
+        fail "Failed to calculate checksum of staging file"
+    fi
     echo -e "${CYAN}Original MD5: $ORIGINAL_CHECKSUM${NC}"
     print_success "Calculated checksum of staged file"
 
     # Copy file to WormFS
     print_command "cp $STAGING_FILE $MOUNT_POINT/random.dat"
     cp "$STAGING_FILE" "$MOUNT_POINT/random.dat"
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}ERROR: Failed to copy file to WormFS${NC}"
+        fail "Failed to copy file to WormFS"
+    fi
     print_success "Copied file to WormFS"
 
     # Verify size
@@ -502,6 +570,10 @@ EOF
     # Calculate checksum of file in WormFS
     print_command "md5sum $MOUNT_POINT/random.dat"
     WORMFS_CHECKSUM=$(md5sum "$MOUNT_POINT/random.dat" | awk '{print $1}')
+    if [ -z "$WORMFS_CHECKSUM" ]; then
+        echo -e "${RED}ERROR: Failed to calculate checksum from WormFS (read failed or file corrupted)${NC}"
+        fail "Failed to calculate checksum from WormFS (read failed or file corrupted)"
+    fi
     echo -e "${CYAN}WormFS MD5:  $WORMFS_CHECKSUM${NC}"
     print_success "Calculated checksum from WormFS"
 
@@ -519,7 +591,7 @@ EOF
         echo -e "${RED}  WormFS:   $WORMFS_CHECKSUM${NC}"
         print_error "Data integrity check FAILED - checksums do not match!"
         rm -f "$STAGING_FILE"
-        exit 1
+        fail "Data integrity check FAILED - checksums do not match"
     fi
 
     # Clean up staging file

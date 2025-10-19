@@ -92,6 +92,7 @@
 //! - **Lock leases**: Time-bound with automatic expiration
 //! - **Lock extension**: Clients can extend before expiration
 
+pub mod buffered_file_handle;
 pub mod factory;
 pub mod fuse_adapter;
 pub mod implementation;
@@ -212,6 +213,7 @@ pub trait FileSystemService: Send + Sync {
     /// # Arguments
     ///
     /// * `inode` - File inode
+    /// * `file_handle` - File handle from open() (used to track write groups for coalescing)
     /// * `offset` - Byte offset in file
     /// * `data` - Data to write
     /// * `uid` - User ID of the requesting process
@@ -231,6 +233,7 @@ pub trait FileSystemService: Send + Sync {
     async fn write(
         &self,
         inode: u64,
+        file_handle: u64,
         offset: u64,
         data: Vec<u8>,
         uid: u32,
@@ -660,8 +663,11 @@ impl FileSystemServiceImpl {
     async fn write(
         &self,
         _inode: u64,
+        _file_handle: u64,
         _offset: u64,
         _data: Vec<u8>,
+        _uid: u32,
+        _gid: u32,
         _client_id: ClientId,
     ) -> Result<u32, Error> {
         unimplemented!("write will be implemented")

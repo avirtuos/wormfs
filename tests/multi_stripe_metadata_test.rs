@@ -64,6 +64,7 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
 
     let fs_config = wormfs::filesystem_service::types::Config::default();
     let service = FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None)
+        .await
         .expect("Failed to create FileSystemService");
 
     service
@@ -91,8 +92,8 @@ async fn test_multi_stripe_metadata_persistence() {
     let inode = attrs.ino;
 
     // Open file
-    service
-        .open(inode, 0, 1000, 1000, client_id)
+    let (fh, _) = service
+        .open(inode, libc::O_RDWR as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -106,7 +107,7 @@ async fn test_multi_stripe_metadata_persistence() {
     let mut offset = 0u64;
     for chunk in data.chunks(STRIPE_SIZE) {
         let bytes_written = service
-            .write(inode, offset, chunk.to_vec(), 1000, 1000, client_id)
+            .write(inode, fh, offset, chunk.to_vec(), 1000, 1000, client_id)
             .await
             .expect("Failed to write");
 
@@ -154,8 +155,8 @@ async fn test_stripe_lookup_at_boundaries() {
         .expect("Failed to create file");
     let inode = attrs.ino;
 
-    service
-        .open(inode, 0, 1000, 1000, client_id)
+    let (fh, _) = service
+        .open(inode, libc::O_RDWR as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -165,7 +166,7 @@ async fn test_stripe_lookup_at_boundaries() {
         let data = vec![(i as u8 + 10); STRIPE_SIZE]; // Patterns: 10, 11, 12
 
         service
-            .write(inode, offset, data, 1000, 1000, client_id)
+            .write(inode, fh, offset, data, 1000, 1000, client_id)
             .await
             .expect("Failed to write");
     }
@@ -219,8 +220,8 @@ async fn test_stripe_metadata_after_truncation() {
         .expect("Failed to create file");
     let inode = attrs.ino;
 
-    service
-        .open(inode, 0, 1000, 1000, client_id)
+    let (fh, _) = service
+        .open(inode, libc::O_RDWR as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -230,7 +231,7 @@ async fn test_stripe_metadata_after_truncation() {
         let data = vec![(i as u8 + 20); STRIPE_SIZE];
 
         service
-            .write(inode, offset, data, 1000, 1000, client_id)
+            .write(inode, fh, offset, data, 1000, 1000, client_id)
             .await
             .expect("Failed to write");
     }
@@ -290,8 +291,8 @@ async fn test_large_file_stripe_consistency() {
         .expect("Failed to create file");
     let inode = attrs.ino;
 
-    service
-        .open(inode, 0, 1000, 1000, client_id)
+    let (fh, _) = service
+        .open(inode, libc::O_RDWR as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -303,7 +304,7 @@ async fn test_large_file_stripe_consistency() {
         let data = vec![pattern; STRIPE_SIZE];
 
         service
-            .write(inode, offset, data.clone(), 1000, 1000, client_id)
+            .write(inode, fh, offset, data.clone(), 1000, 1000, client_id)
             .await
             .expect("Failed to write");
 

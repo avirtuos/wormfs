@@ -74,6 +74,10 @@ pub struct Config {
 
     /// Default GID for filesystem operations
     pub gid: u32,
+
+    /// Enable stripe write buffering via BufferedFileHandle to reduce I/O amplification
+    /// When enabled, each file handle gets a per-handle write buffer (20MB default)
+    pub enable_stripe_cache: bool,
 }
 
 /// Serde helper module for Duration serialization/deserialization as seconds.
@@ -169,6 +173,8 @@ impl Default for Config {
             enable_xattr: true,
             uid: 1000,
             gid: 1000,
+            // BufferedFileHandle enabled by default to reduce I/O amplification
+            enable_stripe_cache: true,
         }
     }
 }
@@ -383,6 +389,10 @@ pub struct OpenFile {
     /// Reference count for deferred deletion
     /// When a file is unlinked while still open, this tracks how many handles remain
     pub refcount: std::sync::atomic::AtomicU32,
+    /// Buffered file handle for per-handle write buffering
+    /// Each file handle gets its own isolated buffer for metadata and data changes
+    pub buffered_handle:
+        Option<std::sync::Arc<crate::filesystem_service::buffered_file_handle::BufferedFileHandle>>,
 }
 
 /// Open flags parsed from FUSE.

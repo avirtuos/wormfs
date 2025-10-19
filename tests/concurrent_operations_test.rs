@@ -22,7 +22,7 @@ use wormfs::metadata_store::{
 };
 
 /// Helper to create a test filesystem service with proper setup
-async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
+async fn create_test_filesystem_service() -> (Arc<FileSystemServiceImpl>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("metadata.db");
     let chunks_dir = temp_dir.path().join("chunks");
@@ -64,10 +64,18 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
 
     let fs_config = wormfs::filesystem_service::Config::default();
 
-    let service =
-        FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None).unwrap();
+    let service = Arc::new(
+        FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None)
+            .await
+            .unwrap(),
+    );
 
     service.initialize_root().await.unwrap();
+
+    // NOTE: We do NOT start background tasks in tests because:
+    // 1. Tests explicitly call flush_file() instead of relying on dirty timeout
+    // 2. Background tasks create Arc reference cycles that prevent cleanup
+    // 3. Tests don't use file locks that need extension
 
     (service, temp_dir)
 }
@@ -109,7 +117,7 @@ async fn test_concurrent_writes_different_files() {
             // Write data
             let data = vec![i as u8; 1024 * 100]; // 100KB
             let bytes_written = service_clone
-                .write(attrs.ino, 0, data, 1000, 1000, client_id)
+                .write(attrs.ino, fh, 0, data, 1000, 1000, client_id)
                 .await
                 .expect("Failed to write");
 
@@ -167,7 +175,7 @@ async fn test_writes_to_multiple_stripes() {
         println!("Writing stripe {} at offset {}", i, offset);
 
         let written = service
-            .write(attrs.ino, offset, data, 1000, 1000, client_id)
+            .write(attrs.ino, fh, offset, data, 1000, 1000, client_id)
             .await
             .expect("Failed to write stripe");
 
@@ -178,14 +186,25 @@ async fn test_writes_to_multiple_stripes() {
         );
     }
 
+    // Flush buffered writes to ensure they're persisted (WriteBack mode)
+    println!("Flushing buffered writes...");
+    service
+        .flush_file(attrs.ino)
+        .await
+        .expect("Failed to flush file");
+    println!("Flush returned successfully");
+    println!("Starting verification...");
+
     // Verify data integrity - read back each stripe
     for i in 0..NUM_STRIPES {
         let offset = (i as u64) * STRIPE_SIZE;
+        println!("Reading stripe {} at offset {}", i, offset);
         let data = service
             .read(attrs.ino, offset, STRIPE_SIZE as u32, 1000, 1000, client_id)
             .await
             .expect("Failed to read stripe");
 
+        println!("Stripe {} returned {} bytes", i, data.len());
         assert_eq!(data.len(), STRIPE_SIZE as usize, "Stripe {} wrong size", i);
         assert!(
             data.iter().all(|&b| b == i as u8),
@@ -307,12 +326,19 @@ async fn test_write_spanning_many_stripes() {
     let data: Vec<u8> = (0..TOTAL_SIZE).map(|i| (i % 256) as u8).collect();
 
     let bytes_written = service
-        .write(attrs.ino, 0, data.clone(), 1000, 1000, client_id)
+        .write(attrs.ino, fh, 0, data.clone(), 1000, 1000, client_id)
         .await
         .expect("Failed to write large file");
 
     assert_eq!(bytes_written as usize, TOTAL_SIZE);
     println!("✓ Wrote {} bytes", bytes_written);
+
+    // Flush buffered writes to ensure they're persisted (WriteBack mode)
+    println!("Flushing buffered writes...");
+    service
+        .flush_file(attrs.ino)
+        .await
+        .expect("Failed to flush file");
 
     // Read back and verify
     let read_data = service
@@ -359,7 +385,7 @@ async fn test_interleaved_stripe_writes() {
         let data = vec![i as u8; STRIPE_SIZE as usize];
 
         service
-            .write(attrs.ino, offset, data, 1000, 1000, client_id)
+            .write(attrs.ino, fh, offset, data, 1000, 1000, client_id)
             .await
             .expect("Failed to write odd stripe");
 
@@ -373,12 +399,19 @@ async fn test_interleaved_stripe_writes() {
         let data = vec![i as u8; STRIPE_SIZE as usize];
 
         service
-            .write(attrs.ino, offset, data, 1000, 1000, client_id)
+            .write(attrs.ino, fh, offset, data, 1000, 1000, client_id)
             .await
             .expect("Failed to write even stripe");
 
         println!("  ✓ Wrote stripe {}", i);
     }
+
+    // Flush buffered writes to ensure they're persisted (WriteBack mode)
+    println!("Flushing buffered writes...");
+    service
+        .flush_file(attrs.ino)
+        .await
+        .expect("Failed to flush file");
 
     // Verify all stripes
     println!("Verifying all stripes...");
@@ -439,7 +472,7 @@ async fn test_multiple_users_different_permissions() {
 
         let data = b"owner data".to_vec();
         service_clone
-            .write(inode, 0, data, 1000, 1000, ClientId::new(10))
+            .write(inode, fh, 0, data, 1000, 1000, ClientId::new(10))
             .await
             .expect("Owner write failed");
 
@@ -466,9 +499,29 @@ async fn test_multiple_users_different_permissions() {
 
         // Try to write (should fail)
         println!("User 2 (group): Attempting write");
-        let write_result = service_clone
-            .write(inode, 10, b"bad".to_vec(), 2000, 1000, ClientId::new(20))
+
+        // Need to open file for writing first
+        let open_result = service_clone
+            .open(inode, libc::O_WRONLY as u32, 2000, 1000, ClientId::new(20))
             .await;
+
+        let write_result = if let Ok((fh, _)) = open_result {
+            let result = service_clone
+                .write(
+                    inode,
+                    fh,
+                    10,
+                    b"bad".to_vec(),
+                    2000,
+                    1000,
+                    ClientId::new(20),
+                )
+                .await;
+            service_clone.release(fh).await.ok();
+            result
+        } else {
+            open_result.map(|_| 0).map_err(|e| e)
+        };
 
         assert!(
             write_result.is_err(),
@@ -557,7 +610,15 @@ async fn test_permission_change_during_open() {
         println!("Task 1: Writing after permission change");
         // File handle is valid, write should still work even if permissions changed
         let write_result = service_clone
-            .write(inode, 0, b"data".to_vec(), 2000, 2000, ClientId::new(10))
+            .write(
+                inode,
+                fh,
+                0,
+                b"data".to_vec(),
+                2000,
+                2000,
+                ClientId::new(10),
+            )
             .await;
 
         // This might succeed (file handle acquired before chmod) or fail (permissions checked on every write)

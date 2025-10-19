@@ -274,6 +274,14 @@ impl FileStore for FileStoreImpl {
         data: Vec<u8>,
         policy: StoragePolicy,
     ) -> Result<StripeMetadata, Error> {
+        eprintln!(
+            "[FileStore] Writing stripe: stripe_id={:?}, file_id={:?}, offset={}, size={} bytes",
+            stripe_id,
+            file_id,
+            stripe_offset,
+            data.len()
+        );
+
         // Start timing for latency metric
         let start = Instant::now();
         let data_size = data.len() as u64;
@@ -330,6 +338,11 @@ impl FileStore for FileStoreImpl {
             self.write_chunk_to_disk(&disk_path, file_id, stripe_id, chunk_id, &chunk_data)
                 .await?;
 
+            eprintln!(
+                "[FileStore] Wrote chunk: chunk_id={:?}, stripe_id={:?}, index={}, disk_id={:?}",
+                chunk_id, stripe_id, chunk_index, disk_id
+            );
+
             // Add to metadata
             chunk_metadata.push(ChunkMetadata::new(
                 chunk_id,
@@ -338,6 +351,12 @@ impl FileStore for FileStoreImpl {
                 chunk_index as u8,
             ));
         }
+
+        eprintln!(
+            "[FileStore] Successfully wrote {} chunks for stripe_id={:?}",
+            chunk_metadata.len(),
+            stripe_id
+        );
 
         // Create stripe metadata
         let stripe_metadata = StripeMetadata::new(
@@ -355,21 +374,21 @@ impl FileStore for FileStoreImpl {
 
             // Track stripe write operation
             let _ = metrics.publish_counter(
-                "filestore.stripe_writes.total",
+                "filestore.stripe_write.total",
                 1,
                 crate::metric_service::UnitType::Operations,
             );
 
             // Track bytes written
             let _ = metrics.publish_counter(
-                "filestore.stripe_writes.bytes",
+                "filestore.stripe_write.bytes",
                 data_size,
                 crate::metric_service::UnitType::Bytes,
             );
 
             // Track write latency
             let _ = metrics.publish_histogram(
-                "filestore.stripe_writes.latency",
+                "filestore.stripe_write.latency",
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
             );
@@ -378,7 +397,7 @@ impl FileStore for FileStoreImpl {
             let mut labels = std::collections::HashMap::new();
             labels.insert("file_id".to_string(), file_id.0.to_string());
             let _ = metrics.publish_labeled(
-                "filestore.stripe_writes.by_file",
+                "filestore.stripe_write.by_file",
                 crate::metric_service::MetricValue::Counter(1),
                 crate::metric_service::MetricType::Counter,
                 crate::metric_service::UnitType::Operations,
@@ -395,6 +414,13 @@ impl FileStore for FileStoreImpl {
         stripe_id: StripeId,
         chunks: Vec<ChunkMetadata>,
     ) -> Result<Vec<u8>, Error> {
+        eprintln!(
+            "[FileStore] Reading stripe: stripe_id={:?}, file_id={:?}, chunks={}",
+            stripe_id,
+            file_id,
+            chunks.len()
+        );
+
         // Start timing for latency metric
         let start = Instant::now();
 
@@ -419,9 +445,18 @@ impl FileStore for FileStoreImpl {
                 .await
             {
                 Ok(chunk_data) => {
+                    eprintln!(
+                        "[FileStore] Read chunk: chunk_id={:?}, stripe_id={:?}, index={}, disk_id={:?}",
+                        chunk_meta.chunk_id, stripe_id, chunk_meta.chunk_index, chunk_meta.disk_id
+                    );
+
                     // Verify checksum
                     let computed = ChunkHeader::compute_checksum(&chunk_data.data);
                     if computed != chunk_data.header.chunk_checksum {
+                        eprintln!(
+                            "[FileStore] Chunk checksum mismatch: chunk_id={:?}, will reconstruct",
+                            chunk_meta.chunk_id
+                        );
                         // Corrupt, will reconstruct
                         shards.push(None);
                     } else {
@@ -440,12 +475,22 @@ impl FileStore for FileStoreImpl {
                         shards.push(Some(chunk_data.data));
                     }
                 }
-                Err(_) => {
+                Err(e) => {
+                    eprintln!(
+                        "[FileStore] Failed to read chunk: chunk_id={:?}, error={}, will reconstruct",
+                        chunk_meta.chunk_id, e
+                    );
                     // Missing, will reconstruct
                     shards.push(None);
                 }
             }
         }
+
+        eprintln!(
+            "[FileStore] Read {} chunks for stripe_id={:?}, reconstructing...",
+            shards.len(),
+            stripe_id
+        );
 
         drop(disks);
 
@@ -457,6 +502,12 @@ impl FileStore for FileStoreImpl {
         // Decode stripe from shards
         let data = erasure_coding::decode_stripe(shards, &policy, original_size)?;
 
+        eprintln!(
+            "[FileStore] Successfully decoded stripe: stripe_id={:?}, returned {} bytes",
+            stripe_id,
+            data.len()
+        );
+
         // Publish metrics if available
         if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
             let elapsed = start.elapsed().as_secs_f64();
@@ -464,21 +515,21 @@ impl FileStore for FileStoreImpl {
 
             // Track stripe read operation
             let _ = metrics.publish_counter(
-                "filestore.stripe_reads.total",
+                "filestore.stripe_read.total",
                 1,
                 crate::metric_service::UnitType::Operations,
             );
 
             // Track bytes read
             let _ = metrics.publish_counter(
-                "filestore.stripe_reads.bytes",
+                "filestore.stripe_read.bytes",
                 data_size,
                 crate::metric_service::UnitType::Bytes,
             );
 
             // Track read latency
             let _ = metrics.publish_histogram(
-                "filestore.stripe_reads.latency",
+                "filestore.stripe_read.latency",
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
             );
@@ -487,7 +538,7 @@ impl FileStore for FileStoreImpl {
             let mut labels = std::collections::HashMap::new();
             labels.insert("file_id".to_string(), file_id.0.to_string());
             let _ = metrics.publish_labeled(
-                "filestore.stripe_reads.by_file",
+                "filestore.stripe_read.by_file",
                 crate::metric_service::MetricValue::Counter(1),
                 crate::metric_service::MetricType::Counter,
                 crate::metric_service::UnitType::Operations,
