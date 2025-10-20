@@ -761,8 +761,70 @@ impl StorageRaftMemberStub {
                         inode,
                         attributes.size
                     );
-                    // For now, skip attribute updates in stub
-                    // In real implementation, this would update file metadata
+
+                    // Convert filesystem_service::FileAttr to metadata_store::FileMetadata
+                    // Note: We need to preserve the target field for symlinks since FileAttr doesn't include it
+                    use crate::filesystem_service::types::FileType as FsFileType;
+                    use crate::metadata_store::types::FileType as MetaFileType;
+                    use crate::metadata_store::MetadataStore;
+
+                    let file_type = match attributes.kind {
+                        FsFileType::RegularFile => MetaFileType::RegularFile,
+                        FsFileType::Directory => MetaFileType::Directory,
+                        FsFileType::Symlink => MetaFileType::Symlink,
+                        FsFileType::NamedPipe | FsFileType::BlockDevice | FsFileType::CharDevice | FsFileType::Socket => {
+                            // Special files don't have data in WormFS, so they shouldn't reach here
+                            trace!(
+                                file_type = ?attributes.kind,
+                                "Skipping attribute update for special file (no data storage)"
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Try to fetch existing file to preserve target field
+                    // If the file doesn't exist yet (e.g., during initial creation with buffering),
+                    // skip the update - it will be created when the file is first persisted
+                    match self.metadata_store.get_file_by_inode(inode).await {
+                        Ok(existing) => {
+                            let metadata = crate::metadata_store::FileMetadata {
+                                file_type,
+                                size: attributes.size,
+                                permissions: attributes.perm as u32,
+                                uid: attributes.uid,
+                                gid: attributes.gid,
+                                created_at: attributes.crtime,
+                                modified_at: attributes.mtime,
+                                accessed_at: attributes.atime,
+                                target: existing.target, // Preserve existing target
+                            };
+
+                            self.metadata_store
+                                .update_file(file_id, metadata)
+                                .await
+                                .map_err(|e| {
+                                    RaftError::OperationFailed(format!("Failed to update file attributes: {}", e))
+                                })?;
+
+                            trace!(
+                                file_id = ?file_id,
+                                inode = %inode,
+                                size = %attributes.size,
+                                "Successfully updated file attributes"
+                            );
+                        }
+                        Err(_) => {
+                            // File doesn't exist yet in metadata store - this is expected during
+                            // initial creation when BufferedFileHandle buffers attributes before
+                            // the file record is created. The attributes will be applied when
+                            // the file is actually created.
+                            trace!(
+                                file_id = ?file_id,
+                                inode = %inode,
+                                "Skipping attribute update - file not yet persisted to metadata store"
+                            );
+                        }
+                    }
                 }
             }
         }

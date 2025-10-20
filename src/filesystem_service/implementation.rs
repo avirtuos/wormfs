@@ -1404,36 +1404,9 @@ impl FileSystemService for FileSystemServiceImpl {
             ));
         };
 
-        // Step 6: Calculate metadata for file size update
-        let new_size = std::cmp::max(record.size, end_offset);
-        trace!(
-            inode = %inode,
-            old_size = %record.size,
-            end_offset = %end_offset,
-            new_size = %new_size,
-            "write: Updating file size"
-        );
-        let mtime = SystemTime::now();
-        // Step 7: [TEMP Phase 1] Update metadata store directly for backward compatibility
-        // TODO: Remove this once Raft stub fully handles metadata persistence
-        let updated_metadata = FileMetadata {
-            file_type: record.file_type,
-            size: new_size,
-            permissions: record.permissions,
-            uid: record.uid,
-            gid: record.gid,
-            created_at: record.created_at,
-            modified_at: mtime,
-            accessed_at: record.accessed_at,
-            target: record.target.clone(), // Preserve target for symlinks
-        };
-
-        self.metadata_store
-            .update_file(record.file_id, updated_metadata)
-            .await
-            .map_err(|e| self.convert_metadata_error(e))?;
-
-        // Step 8: Invalidate cache
+        // Step 6: Invalidate cache
+        // Note: Metadata updates (size, mtime) are handled by BufferedFileHandle.full_flush()
+        // which atomically commits both data and metadata changes through RaftClient
         self.inode_manager.cache().invalidate(inode);
 
         // Publish metrics if available
