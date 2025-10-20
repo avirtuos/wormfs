@@ -626,7 +626,7 @@ EOF
     # Fetch metrics from HTTP endpoint (disable exit-on-error temporarily)
     METRICS_URL="http://localhost:9090/api/metrics"
     set +e  # Temporarily disable exit on error for metrics fetching
-    METRICS_JSON=$(curl -s "$METRICS_URL" 2>/dev/null)
+    METRICS_JSON=$(curl -s --connect-timeout 5 --max-time 10 "$METRICS_URL" 2>/dev/null)
     CURL_EXIT=$?
     set -e  # Re-enable exit on error
 
@@ -724,10 +724,17 @@ EOF
 
         set -e  # Re-enable exit on error
     else
-        print_info "Could not fetch metrics from Admin API (this is normal if jq is not installed)"
-        echo "  • The Admin UI may still be accessible at: http://127.0.0.1:9090/"
-        echo "  • You can check it manually in your browser"
-        echo ""
+        if [ $CURL_EXIT -eq 7 ] || [ $CURL_EXIT -eq 28 ]; then
+            print_info "Could not connect to Admin API (curl exit code: $CURL_EXIT)"
+            echo "  • The admin server may not be running"
+            echo "  • Check the WormFS logs at: $WORMFS_LOG"
+            echo ""
+        else
+            print_info "Could not fetch metrics from Admin API (this is normal if jq is not installed)"
+            echo "  • The Admin UI may still be accessible at: http://127.0.0.1:9090/"
+            echo "  • You can check it manually in your browser"
+            echo ""
+        fi
     fi
 
     # Demo Complete - Display summary and wait for user

@@ -1292,17 +1292,6 @@ impl FileSystemService for FileSystemServiceImpl {
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
             );
-
-            // Track with inode-specific labels
-            let mut labels = std::collections::HashMap::new();
-            labels.insert("inode".to_string(), inode.to_string());
-            let _ = metrics.publish_labeled(
-                "filesystem.read_ops.by_inode",
-                crate::metric_service::MetricValue::Counter(1),
-                crate::metric_service::MetricType::Counter,
-                crate::metric_service::UnitType::Operations,
-                labels,
-            );
         }
 
         tracing::debug!("read: returning {} bytes", result_data.len());
@@ -1432,17 +1421,6 @@ impl FileSystemService for FileSystemServiceImpl {
                 "filesystem.write_ops.latency",
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
-            );
-
-            // Track with inode-specific labels
-            let mut labels = std::collections::HashMap::new();
-            labels.insert("inode".to_string(), inode.to_string());
-            let _ = metrics.publish_labeled(
-                "filesystem.write_ops.by_inode",
-                crate::metric_service::MetricValue::Counter(1),
-                crate::metric_service::MetricType::Counter,
-                crate::metric_service::UnitType::Operations,
-                labels,
             );
         }
 

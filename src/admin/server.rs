@@ -4,7 +4,10 @@
 //! and a web-based UI for monitoring and managing WormFS.
 
 use super::{
-    handlers::{config_handler, health_handler, logs_handler, metrics_handler, status_handler},
+    handlers::{
+        component_metrics_handler, components_handler, config_handler, health_handler,
+        logs_handler, metrics_handler, status_handler,
+    },
     types::{Config, Error},
     ui::templates::INDEX_HTML,
     websocket::{ws_handler, WsState},
@@ -101,6 +104,8 @@ impl AdminServer {
             .route("/", get(index_handler))
             // API routes
             .route("/api/metrics", get(metrics_handler))
+            .route("/api/metrics/components", get(components_handler))
+            .route("/api/metrics/{component}", get(component_metrics_handler))
             .route("/api/health", get(health_handler))
             .route("/api/status", get(status_handler))
             .route("/api/config", get(config_handler))
