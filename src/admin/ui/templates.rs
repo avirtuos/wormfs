@@ -334,259 +334,81 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
             <div class="metrics-section">
                 <h2 class="section-title">Filesystem Operations</h2>
-                <div class="metric-row" x-show="metrics['filesystem.write_ops.bytes']">
-                    <span class="metric-name">filesystem.write_ops.bytes</span>
-                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filesystem.write_ops.bytes'])"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['filesystem.read_ops.bytes']">
-                    <span class="metric-name">filesystem.read_ops.bytes</span>
-                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filesystem.read_ops.bytes'])"></span>
+
+                <!-- All metrics dynamically discovered from API -->
+                <template x-for="metric in filesystemMetrics" :key="metric">
+                    <div class="metric-row" x-show="metrics[metric] !== undefined && metrics[metric] !== 0">
+                        <span class="metric-name" x-text="metric"></span>
+                        <span class="metric-val"
+                              :style="(metric.includes('error') || metric.includes('failed')) ? 'color: #ef4444;' : ''"
+                              x-text="formatMetricValue(metric)"></span>
+                    </div>
+                </template>
+
+                <!-- Fallback message if no metrics discovered -->
+                <div x-show="filesystemMetrics.length === 0" class="metric-row">
+                    <span class="metric-name" style="color: var(--text-secondary);">No metrics available</span>
+                    <span class="metric-val">—</span>
                 </div>
             </div>
 
             <div class="metrics-section">
-                <h2 class="section-title">FileStore Stripe Operations</h2>
-                <div class="metric-row" x-show="metrics['filestore.stripe_write.total']">
-                    <span class="metric-name">filestore.stripe_write.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['filestore.stripe_write.total']) + ' stripes'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['filestore.stripe_write.bytes']">
-                    <span class="metric-name">filestore.stripe_write.bytes</span>
-                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filestore.stripe_write.bytes'])"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['filestore.stripe_read.total']">
-                    <span class="metric-name">filestore.stripe_read.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['filestore.stripe_read.total']) + ' stripes'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['filestore.stripe_read.bytes'] !== undefined">
-                    <span class="metric-name">filestore.stripe_read.bytes</span>
-                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filestore.stripe_read.bytes'])"></span>
+                <h2 class="section-title">FileStore Operations</h2>
+
+                <!-- All metrics dynamically discovered from API -->
+                <template x-for="metric in filestoreMetrics" :key="metric">
+                    <div class="metric-row" x-show="metrics[metric] !== undefined && metrics[metric] !== 0">
+                        <span class="metric-name" x-text="metric"></span>
+                        <span class="metric-val"
+                              :style="(metric.includes('error') || metric.includes('failed')) ? 'color: #ef4444;' : ''"
+                              x-text="formatMetricValue(metric)"></span>
+                    </div>
+                </template>
+
+                <!-- Fallback message if no metrics discovered -->
+                <div x-show="filestoreMetrics.length === 0" class="metric-row">
+                    <span class="metric-name" style="color: var(--text-secondary);">No metrics available</span>
+                    <span class="metric-val">—</span>
                 </div>
             </div>
 
             <div class="metrics-section">
                 <h2 class="section-title">BufferedFileHandle Memory Usage</h2>
-                <div class="metric-row" x-show="metrics['filesystem.buffered_memory.total_bytes'] !== undefined">
-                    <span class="metric-name">filesystem.buffered_memory.total_bytes</span>
-                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filesystem.buffered_memory.total_bytes'])"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['filesystem.buffered_memory.complete_stripe_bytes'] !== undefined">
-                    <span class="metric-name">filesystem.buffered_memory.complete_stripe_bytes</span>
-                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filesystem.buffered_memory.complete_stripe_bytes'])"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['filesystem.buffered_memory.partial_stripe_bytes'] !== undefined">
-                    <span class="metric-name">filesystem.buffered_memory.partial_stripe_bytes</span>
-                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['filesystem.buffered_memory.partial_stripe_bytes'])"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['filesystem.buffered_memory.handle_count'] !== undefined">
-                    <span class="metric-name">filesystem.buffered_memory.handle_count</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['filesystem.buffered_memory.handle_count']) + ' handles'"></span>
-                </div>
-            </div>
 
-            <div class="metrics-section">
-                <h2 class="section-title">StripeCache Operations</h2>
-                <div class="metric-row" x-show="metrics['stripe_cache.entries']">
-                    <span class="metric-name">stripe_cache.entries</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.entries']) + ' stripes'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.memory_bytes']">
-                    <span class="metric-name">stripe_cache.memory_bytes</span>
-                    <span class="metric-val format-bytes" x-text="formatBytes(metrics['stripe_cache.memory_bytes'])"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.flush.total']">
-                    <span class="metric-name">stripe_cache.flush.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.flush.total']) + ' flushes'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.api.allocate_write_group']">
-                    <span class="metric-name">stripe_cache.api.allocate_write_group</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.allocate_write_group']) + ' calls'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.api.read_stripe']">
-                    <span class="metric-name">stripe_cache.api.read_stripe</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.read_stripe']) + ' calls'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.api.write_stripe']">
-                    <span class="metric-name">stripe_cache.api.write_stripe</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.write_stripe']) + ' calls'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.api.flush_write_group']">
-                    <span class="metric-name">stripe_cache.api.flush_write_group</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.flush_write_group']) + ' calls'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.api.flush_file']">
-                    <span class="metric-name">stripe_cache.api.flush_file</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.flush_file']) + ' calls'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.api.get_pending_stripe']">
-                    <span class="metric-name">stripe_cache.api.get_pending_stripe</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.get_pending_stripe']) + ' calls'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.api.inform_read']">
-                    <span class="metric-name">stripe_cache.api.inform_read</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.inform_read']) + ' calls'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['stripe_cache.api.inform']">
-                    <span class="metric-name">stripe_cache.api.inform</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['stripe_cache.api.inform']) + ' calls'"></span>
+                <!-- All metrics dynamically discovered from API -->
+                <template x-for="metric in bufferedMemoryMetrics" :key="metric">
+                    <div class="metric-row" x-show="metrics[metric] !== undefined && metrics[metric] !== 0">
+                        <span class="metric-name" x-text="metric"></span>
+                        <span class="metric-val"
+                              :style="(metric.includes('error') || metric.includes('failed')) ? 'color: #ef4444;' : ''"
+                              x-text="formatMetricValue(metric)"></span>
+                    </div>
+                </template>
+
+                <!-- Fallback message if no metrics discovered -->
+                <div x-show="bufferedMemoryMetrics.length === 0" class="metric-row">
+                    <span class="metric-name" style="color: var(--text-secondary);">No metrics available</span>
+                    <span class="metric-val">—</span>
                 </div>
             </div>
 
             <div class="metrics-section">
                 <h2 class="section-title">MetadataStore Operations</h2>
 
-                <!-- Aggregate Read Metrics -->
-                <div class="metric-row" x-show="metrics['metadata_store.read.total']">
-                    <span class="metric-name">metadata_store.read.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.read.total']) + ' operations'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.read.latency']">
-                    <span class="metric-name">metadata_store.read.latency (avg)</span>
-                    <span class="metric-val" x-text="formatLatency(metrics['metadata_store.read.latency'])"></span>
-                </div>
+                <!-- All metrics dynamically discovered from API -->
+                <template x-for="metric in metadataMetrics" :key="metric">
+                    <div class="metric-row" x-show="metrics[metric] !== undefined && metrics[metric] !== 0">
+                        <span class="metric-name" x-text="metric"></span>
+                        <span class="metric-val"
+                              :style="(metric.includes('error') || metric.includes('corrupt')) ? 'color: #ef4444;' : ''"
+                              x-text="formatMetricValue(metric)"></span>
+                    </div>
+                </template>
 
-                <!-- Aggregate Write Metrics -->
-                <div class="metric-row" x-show="metrics['metadata_store.write.total']">
-                    <span class="metric-name">metadata_store.write.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.write.total']) + ' operations'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.write.latency']">
-                    <span class="metric-name">metadata_store.write.latency (avg)</span>
-                    <span class="metric-val" x-text="formatLatency(metrics['metadata_store.write.latency'])"></span>
-                </div>
-
-                <!-- Critical File Operations -->
-                <div class="metric-row" x-show="metrics['metadata_store.create_file.total']">
-                    <span class="metric-name">metadata_store.create_file.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.create_file.total']) + ' files'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.get_file_by_path.total']">
-                    <span class="metric-name">metadata_store.get_file_by_path.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file_by_path.total']) + ' queries'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.update_file.total']">
-                    <span class="metric-name">metadata_store.update_file.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.update_file.total']) + ' updates'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.delete_file.total']">
-                    <span class="metric-name">metadata_store.delete_file.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.delete_file.total']) + ' deletions'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.list_directory.total']">
-                    <span class="metric-name">metadata_store.list_directory.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.list_directory.total']) + ' listings'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.list_directory.latency']">
-                    <span class="metric-name">metadata_store.list_directory.latency (avg)</span>
-                    <span class="metric-val" x-text="formatLatency(metrics['metadata_store.list_directory.latency'])"></span>
-                </div>
-
-                <!-- Additional File Operations -->
-                <div class="metric-row" x-show="metrics['metadata_store.get_file_by_inode.total']">
-                    <span class="metric-name">metadata_store.get_file_by_inode.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file_by_inode.total']) + ' queries'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.get_file.total']">
-                    <span class="metric-name">metadata_store.get_file.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file.total']) + ' queries'"></span>
-                </div>
-
-                <!-- Stripe Operations -->
-                <div class="metric-row" x-show="metrics['metadata_store.allocate_stripes.total']">
-                    <span class="metric-name">metadata_store.allocate_stripes.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.allocate_stripes.total']) + ' allocations'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.get_stripe.total']">
-                    <span class="metric-name">metadata_store.get_stripe.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_stripe.total']) + ' queries'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.get_file_stripes.total']">
-                    <span class="metric-name">metadata_store.get_file_stripes.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file_stripes.total']) + ' queries'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.get_stripe_at_offset.total']">
-                    <span class="metric-name">metadata_store.get_stripe_at_offset.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_stripe_at_offset.total']) + ' queries'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.delete_stripe.total']">
-                    <span class="metric-name">metadata_store.delete_stripe.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.delete_stripe.total']) + ' deletions'"></span>
-                </div>
-
-                <!-- Chunk Operations -->
-                <div class="metric-row" x-show="metrics['metadata_store.allocate_chunks.total']">
-                    <span class="metric-name">metadata_store.allocate_chunks.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.allocate_chunks.total']) + ' allocations'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.get_chunk.total']">
-                    <span class="metric-name">metadata_store.get_chunk.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_chunk.total']) + ' queries'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.get_stripe_chunks.total']">
-                    <span class="metric-name">metadata_store.get_stripe_chunks.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_stripe_chunks.total']) + ' queries'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.update_chunk_location.total']">
-                    <span class="metric-name">metadata_store.update_chunk_location.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.update_chunk_location.total']) + ' updates'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.mark_chunk_corrupt.total']">
-                    <span class="metric-name">metadata_store.mark_chunk_corrupt.total</span>
-                    <span class="metric-val" style="color: #ef4444;" x-text="formatNumber(metrics['metadata_store.mark_chunk_corrupt.total']) + ' marks'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.update_chunk_verification.total']">
-                    <span class="metric-name">metadata_store.update_chunk_verification.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.update_chunk_verification.total']) + ' updates'"></span>
-                </div>
-
-                <!-- Lock Operations -->
-                <div class="metric-row" x-show="metrics['metadata_store.acquire_read_lock.total']">
-                    <span class="metric-name">metadata_store.acquire_read_lock.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.acquire_read_lock.total']) + ' acquisitions'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.acquire_write_lock.total']">
-                    <span class="metric-name">metadata_store.acquire_write_lock.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.acquire_write_lock.total']) + ' acquisitions'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.release_lock.total']">
-                    <span class="metric-name">metadata_store.release_lock.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.release_lock.total']) + ' releases'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.extend_lock.total']">
-                    <span class="metric-name">metadata_store.extend_lock.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.extend_lock.total']) + ' extensions'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.get_file_locks.total']">
-                    <span class="metric-name">metadata_store.get_file_locks.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file_locks.total']) + ' queries'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.cleanup_expired_locks.total']">
-                    <span class="metric-name">metadata_store.cleanup_expired_locks.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.cleanup_expired_locks.total']) + ' cleanups'"></span>
-                </div>
-
-                <!-- Inode Reservation Operations -->
-                <div class="metric-row" x-show="metrics['metadata_store.reserve_inode.total']">
-                    <span class="metric-name">metadata_store.reserve_inode.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.reserve_inode.total']) + ' reservations'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.confirm_inode.total']">
-                    <span class="metric-name">metadata_store.confirm_inode.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.confirm_inode.total']) + ' confirmations'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.release_inode.total']">
-                    <span class="metric-name">metadata_store.release_inode.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.release_inode.total']) + ' releases'"></span>
-                </div>
-                <div class="metric-row" x-show="metrics['metadata_store.cleanup_expired_inode_reservations.total']">
-                    <span class="metric-name">metadata_store.cleanup_expired_inode_reservations.total</span>
-                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.cleanup_expired_inode_reservations.total']) + ' cleanups'"></span>
-                </div>
-
-                <!-- Error Metrics -->
-                <div class="metric-row" x-show="metrics['metadata_store.errors.total']">
-                    <span class="metric-name">metadata_store.errors.total</span>
-                    <span class="metric-val" style="color: #ef4444;" x-text="formatNumber(metrics['metadata_store.errors.total']) + ' errors'"></span>
+                <!-- Fallback message if no metrics discovered -->
+                <div x-show="metadataMetrics.length === 0" class="metric-row">
+                    <span class="metric-name" style="color: var(--text-secondary);">No metrics available</span>
+                    <span class="metric-val">—</span>
                 </div>
             </div>
         </div>
@@ -626,10 +448,16 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 droppedMetrics: 0,
                 wsConnected: false,
                 ws: null,
+                components: {},  // Component-based metric discovery
+                metadataMetrics: [],  // All metadata_store metrics
+                filesystemMetrics: [],  // All filesystem metrics
+                filestoreMetrics: [],  // All filestore metrics
+                bufferedMemoryMetrics: [],  // All filesystem.buffered_memory metrics
 
                 init() {
                     this.connectWebSocket();
                     this.fetchMetrics();  // Initial fetch
+                    this.fetchComponents();  // Fetch available components
                 },
 
                 connectWebSocket() {
@@ -679,6 +507,40 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     }
                 },
 
+                async fetchComponents() {
+                    try {
+                        const response = await fetch('/api/metrics/components');
+                        const data = await response.json();
+                        if (data.components) {
+                            this.components = data.components;
+
+                            // Extract metadata_store metrics
+                            this.metadataMetrics = (data.components['metadata_store'] || [])
+                                .map(suffix => 'metadata_store.' + suffix)
+                                .sort();
+
+                            // Extract filesystem metrics (excluding buffered_memory which we'll handle separately)
+                            this.filesystemMetrics = (data.components['filesystem'] || [])
+                                .filter(suffix => !suffix.startsWith('buffered_memory.'))
+                                .map(suffix => 'filesystem.' + suffix)
+                                .sort();
+
+                            // Extract filestore metrics
+                            this.filestoreMetrics = (data.components['filestore'] || [])
+                                .map(suffix => 'filestore.' + suffix)
+                                .sort();
+
+                            // Extract buffered_memory metrics (subcomponent of filesystem)
+                            this.bufferedMemoryMetrics = (data.components['filesystem'] || [])
+                                .filter(suffix => suffix.startsWith('buffered_memory.'))
+                                .map(suffix => 'filesystem.' + suffix)
+                                .sort();
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch components:', e);
+                    }
+                },
+
                 updateMetrics(newMetrics) {
                     // Extract values from metric objects
                     Object.keys(newMetrics).forEach(key => {
@@ -711,6 +573,20 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                         return (seconds * 1000).toFixed(2) + 'ms';
                     } else {
                         return seconds.toFixed(2) + 's';
+                    }
+                },
+
+                // Smart formatting based on metric name
+                formatMetricValue(metricName) {
+                    const value = this.metrics[metricName];
+                    if (!value) return '0';
+
+                    if (metricName.endsWith('.bytes')) {
+                        return this.formatBytes(value);
+                    } else if (metricName.endsWith('.latency')) {
+                        return this.formatLatency(value);
+                    } else {
+                        return this.formatNumber(value) + ' operations';
                     }
                 },
 

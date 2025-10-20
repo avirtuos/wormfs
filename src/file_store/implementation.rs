@@ -392,17 +392,6 @@ impl FileStore for FileStoreImpl {
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
             );
-
-            // Track with file-specific labels
-            let mut labels = std::collections::HashMap::new();
-            labels.insert("file_id".to_string(), file_id.0.to_string());
-            let _ = metrics.publish_labeled(
-                "filestore.stripe_write.by_file",
-                crate::metric_service::MetricValue::Counter(1),
-                crate::metric_service::MetricType::Counter,
-                crate::metric_service::UnitType::Operations,
-                labels,
-            );
         }
 
         Ok(stripe_metadata)
@@ -533,17 +522,6 @@ impl FileStore for FileStoreImpl {
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
             );
-
-            // Track with file-specific labels
-            let mut labels = std::collections::HashMap::new();
-            labels.insert("file_id".to_string(), file_id.0.to_string());
-            let _ = metrics.publish_labeled(
-                "filestore.stripe_read.by_file",
-                crate::metric_service::MetricValue::Counter(1),
-                crate::metric_service::MetricType::Counter,
-                crate::metric_service::UnitType::Operations,
-                labels,
-            );
         }
 
         Ok(data)
@@ -626,17 +604,6 @@ impl FileStore for FileStoreImpl {
                 "filestore.rmw_operations.latency",
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
-            );
-
-            // Track with file-specific labels for debugging
-            let mut labels = std::collections::HashMap::new();
-            labels.insert("file_id".to_string(), file_id.0.to_string());
-            let _ = metrics.publish_labeled(
-                "filestore.rmw_operations.by_file",
-                crate::metric_service::MetricValue::Counter(1),
-                crate::metric_service::MetricType::Counter,
-                crate::metric_service::UnitType::Operations,
-                labels,
             );
         }
 
