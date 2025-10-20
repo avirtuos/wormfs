@@ -563,6 +563,8 @@ EOF
     fi
     print_success "Copied file to WormFS"
 
+    sleep 10
+
     # Verify size
     SIZE=$(stat -f%z "$MOUNT_POINT/random.dat" 2>/dev/null || stat -c%s "$MOUNT_POINT/random.dat" 2>/dev/null)
     print_info "File size in WormFS: $(numfmt --to=iec-i --suffix=B $SIZE)"

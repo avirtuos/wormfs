@@ -481,6 +481,108 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     <span class="metric-val" x-text="formatLatency(metrics['metadata_store.list_directory.latency'])"></span>
                 </div>
 
+                <!-- Additional File Operations -->
+                <div class="metric-row" x-show="metrics['metadata_store.get_file_by_inode.total']">
+                    <span class="metric-name">metadata_store.get_file_by_inode.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file_by_inode.total']) + ' queries'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.get_file.total']">
+                    <span class="metric-name">metadata_store.get_file.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file.total']) + ' queries'"></span>
+                </div>
+
+                <!-- Stripe Operations -->
+                <div class="metric-row" x-show="metrics['metadata_store.allocate_stripes.total']">
+                    <span class="metric-name">metadata_store.allocate_stripes.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.allocate_stripes.total']) + ' allocations'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.get_stripe.total']">
+                    <span class="metric-name">metadata_store.get_stripe.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_stripe.total']) + ' queries'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.get_file_stripes.total']">
+                    <span class="metric-name">metadata_store.get_file_stripes.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file_stripes.total']) + ' queries'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.get_stripe_at_offset.total']">
+                    <span class="metric-name">metadata_store.get_stripe_at_offset.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_stripe_at_offset.total']) + ' queries'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.delete_stripe.total']">
+                    <span class="metric-name">metadata_store.delete_stripe.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.delete_stripe.total']) + ' deletions'"></span>
+                </div>
+
+                <!-- Chunk Operations -->
+                <div class="metric-row" x-show="metrics['metadata_store.allocate_chunks.total']">
+                    <span class="metric-name">metadata_store.allocate_chunks.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.allocate_chunks.total']) + ' allocations'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.get_chunk.total']">
+                    <span class="metric-name">metadata_store.get_chunk.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_chunk.total']) + ' queries'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.get_stripe_chunks.total']">
+                    <span class="metric-name">metadata_store.get_stripe_chunks.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_stripe_chunks.total']) + ' queries'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.update_chunk_location.total']">
+                    <span class="metric-name">metadata_store.update_chunk_location.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.update_chunk_location.total']) + ' updates'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.mark_chunk_corrupt.total']">
+                    <span class="metric-name">metadata_store.mark_chunk_corrupt.total</span>
+                    <span class="metric-val" style="color: #ef4444;" x-text="formatNumber(metrics['metadata_store.mark_chunk_corrupt.total']) + ' marks'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.update_chunk_verification.total']">
+                    <span class="metric-name">metadata_store.update_chunk_verification.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.update_chunk_verification.total']) + ' updates'"></span>
+                </div>
+
+                <!-- Lock Operations -->
+                <div class="metric-row" x-show="metrics['metadata_store.acquire_read_lock.total']">
+                    <span class="metric-name">metadata_store.acquire_read_lock.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.acquire_read_lock.total']) + ' acquisitions'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.acquire_write_lock.total']">
+                    <span class="metric-name">metadata_store.acquire_write_lock.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.acquire_write_lock.total']) + ' acquisitions'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.release_lock.total']">
+                    <span class="metric-name">metadata_store.release_lock.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.release_lock.total']) + ' releases'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.extend_lock.total']">
+                    <span class="metric-name">metadata_store.extend_lock.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.extend_lock.total']) + ' extensions'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.get_file_locks.total']">
+                    <span class="metric-name">metadata_store.get_file_locks.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.get_file_locks.total']) + ' queries'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.cleanup_expired_locks.total']">
+                    <span class="metric-name">metadata_store.cleanup_expired_locks.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.cleanup_expired_locks.total']) + ' cleanups'"></span>
+                </div>
+
+                <!-- Inode Reservation Operations -->
+                <div class="metric-row" x-show="metrics['metadata_store.reserve_inode.total']">
+                    <span class="metric-name">metadata_store.reserve_inode.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.reserve_inode.total']) + ' reservations'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.confirm_inode.total']">
+                    <span class="metric-name">metadata_store.confirm_inode.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.confirm_inode.total']) + ' confirmations'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.release_inode.total']">
+                    <span class="metric-name">metadata_store.release_inode.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.release_inode.total']) + ' releases'"></span>
+                </div>
+                <div class="metric-row" x-show="metrics['metadata_store.cleanup_expired_inode_reservations.total']">
+                    <span class="metric-name">metadata_store.cleanup_expired_inode_reservations.total</span>
+                    <span class="metric-val" x-text="formatNumber(metrics['metadata_store.cleanup_expired_inode_reservations.total']) + ' cleanups'"></span>
+                </div>
+
                 <!-- Error Metrics -->
                 <div class="metric-row" x-show="metrics['metadata_store.errors.total']">
                     <span class="metric-name">metadata_store.errors.total</span>

@@ -132,14 +132,12 @@ impl MetadataStoreImpl {
     /// * `operation_type` - Either "read" or "write" for aggregate metrics
     /// * `start` - Start time of the operation (from tokio::time::Instant::now())
     /// * `is_error` - Whether the operation resulted in an error
-    /// * `is_critical` - Whether to also publish per-operation metrics
     fn publish_metrics(
         &self,
         operation: &str,
         operation_type: &str, // "read" or "write"
         start: tokio::time::Instant,
         is_error: bool,
-        is_critical: bool,
     ) {
         if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
             let elapsed = start.elapsed().as_secs_f64();
@@ -172,20 +170,18 @@ impl MetadataStoreImpl {
                 );
             }
 
-            // Publish per-operation metrics for critical operations
-            if is_critical {
-                let _ = metrics.publish_counter(
-                    &format!("metadata_store.{}.total", operation),
-                    1,
-                    crate::metric_service::UnitType::Operations,
-                );
+            // Publish per-operation metrics (for all operations)
+            let _ = metrics.publish_counter(
+                &format!("metadata_store.{}.total", operation),
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
 
-                let _ = metrics.publish_histogram(
-                    &format!("metadata_store.{}.latency", operation),
-                    elapsed,
-                    crate::metric_service::UnitType::Seconds,
-                );
-            }
+            let _ = metrics.publish_histogram(
+                &format!("metadata_store.{}.latency", operation),
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
         }
     }
 
@@ -415,8 +411,8 @@ impl MetadataStore for MetadataStoreImpl {
                 }
             });
 
-        // Publish metrics (critical operation)
-        self.publish_metrics("create_file", "write", start, result.is_err(), true);
+        // Publish metrics
+        self.publish_metrics("create_file", "write", start, result.is_err());
 
         result
     }
@@ -464,8 +460,8 @@ impl MetadataStore for MetadataStoreImpl {
                 _ => Error::QueryError(format!("Failed to query file by path: {}", e))
             });
 
-        // Publish metrics (critical operation)
-        self.publish_metrics("get_file_by_path", "read", start, result.is_err(), true);
+        // Publish metrics
+        self.publish_metrics("get_file_by_path", "read", start, result.is_err());
 
         result
     }
@@ -510,16 +506,18 @@ impl MetadataStore for MetadataStoreImpl {
                 _ => Error::QueryError(format!("Failed to query file by inode: {}", e))
             });
 
-        // Publish metrics (aggregate only)
-        self.publish_metrics("get_file_by_inode", "read", start, result.is_err(), false);
+        // Publish metrics
+        self.publish_metrics("get_file_by_inode", "read", start, result.is_err());
 
         result
     }
 
     async fn get_file(&self, file_id: FileId) -> Result<FileRecord, Error> {
+        let start = tokio::time::Instant::now();
         let file_id_clone = file_id;
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
@@ -553,7 +551,12 @@ impl MetadataStore for MetadataStoreImpl {
                     Error::FileNotFoundByFileId(file_id_clone)
                 }
                 _ => Error::QueryError(format!("Failed to query file by ID: {}", e))
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("get_file", "read", start, result.is_err());
+
+        result
     }
 
     async fn update_file(&self, file_id: FileId, metadata: FileMetadata) -> Result<(), Error> {
@@ -592,8 +595,8 @@ impl MetadataStore for MetadataStoreImpl {
         }
         .await;
 
-        // Publish metrics (critical operation)
-        self.publish_metrics("update_file", "write", start, result.is_err(), true);
+        // Publish metrics
+        self.publish_metrics("update_file", "write", start, result.is_err());
 
         result
     }
@@ -619,8 +622,8 @@ impl MetadataStore for MetadataStoreImpl {
         }
         .await;
 
-        // Publish metrics (critical operation)
-        self.publish_metrics("delete_file", "write", start, result.is_err(), true);
+        // Publish metrics
+        self.publish_metrics("delete_file", "write", start, result.is_err());
 
         result
     }
@@ -668,8 +671,8 @@ impl MetadataStore for MetadataStoreImpl {
                 Error::QueryError(format!("Failed to list directory: {}", e))
             });
 
-        // Publish metrics (critical operation - often slow)
-        self.publish_metrics("list_directory", "read", start, result.is_err(), true);
+        // Publish metrics
+        self.publish_metrics("list_directory", "read", start, result.is_err());
 
         result
     }
@@ -679,7 +682,10 @@ impl MetadataStore for MetadataStoreImpl {
         file_id: FileId,
         stripes: Vec<StripeRecord>,
     ) -> Result<(), Error> {
-        self.inner
+        let start = tokio::time::Instant::now();
+
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 let tx = conn.transaction()?;
@@ -706,13 +712,20 @@ impl MetadataStore for MetadataStoreImpl {
             .await
             .map_err(|e| {
                 Error::QueryError(format!("Failed to allocate stripes: {}", e))
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("allocate_stripes", "write", start, result.is_err());
+
+        result
     }
 
     async fn get_stripe(&self, stripe_id: StripeId) -> Result<StripeRecord, Error> {
+        let start = tokio::time::Instant::now();
         let stripe_id_clone = stripe_id;
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
@@ -738,11 +751,19 @@ impl MetadataStore for MetadataStoreImpl {
                     Error::StripeNotFound(stripe_id_clone)
                 }
                 _ => Error::QueryError(format!("Failed to query stripe: {}", e)),
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("get_stripe", "read", start, result.is_err());
+
+        result
     }
 
     async fn get_file_stripes(&self, file_id: FileId) -> Result<Vec<StripeRecord>, Error> {
-        self.inner
+        let start = tokio::time::Instant::now();
+
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
@@ -767,7 +788,12 @@ impl MetadataStore for MetadataStoreImpl {
                 Ok(stripes)
             })
             .await
-            .map_err(|e| Error::QueryError(format!("Failed to get file stripes: {}", e)))
+            .map_err(|e| Error::QueryError(format!("Failed to get file stripes: {}", e)));
+
+        // Publish metrics
+        self.publish_metrics("get_file_stripes", "read", start, result.is_err());
+
+        result
     }
 
     async fn get_stripe_at_offset(
@@ -775,9 +801,11 @@ impl MetadataStore for MetadataStoreImpl {
         file_id: FileId,
         offset: u64,
     ) -> Result<StripeRecord, Error> {
+        let start = tokio::time::Instant::now();
         let file_id_clone = file_id;
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
@@ -808,11 +836,19 @@ impl MetadataStore for MetadataStoreImpl {
                     ))
                 }
                 _ => Error::QueryError(format!("Failed to query stripe at offset: {}", e)),
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("get_stripe_at_offset", "read", start, result.is_err());
+
+        result
     }
 
     async fn delete_stripe(&self, stripe_id: StripeId) -> Result<(), Error> {
-        self.inner
+        let start = tokio::time::Instant::now();
+
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 let tx = conn.transaction()?;
@@ -844,7 +880,12 @@ impl MetadataStore for MetadataStoreImpl {
                     Error::QueryError(format!("Stripe {:?} not found", stripe_id))
                 }
                 _ => Error::QueryError(format!("Failed to delete stripe: {}", e)),
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("delete_stripe", "write", start, result.is_err());
+
+        result
     }
 
     async fn allocate_chunks(
@@ -852,7 +893,10 @@ impl MetadataStore for MetadataStoreImpl {
         stripe_id: StripeId,
         chunks: Vec<ChunkRecord>,
     ) -> Result<(), Error> {
-        self.inner
+        let start = tokio::time::Instant::now();
+
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 let tx = conn.transaction()?;
@@ -888,13 +932,20 @@ impl MetadataStore for MetadataStoreImpl {
             .await
             .map_err(|e| {
                 Error::QueryError(format!("Failed to allocate chunks: {}", e))
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("allocate_chunks", "write", start, result.is_err());
+
+        result
     }
 
     async fn get_chunk(&self, chunk_id: ChunkId) -> Result<ChunkRecord, Error> {
+        let start = tokio::time::Instant::now();
         let chunk_id_clone = chunk_id;
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 Ok(conn.query_row(
@@ -931,11 +982,19 @@ impl MetadataStore for MetadataStoreImpl {
                     Error::ChunkNotFound(chunk_id_clone)
                 }
                 _ => Error::QueryError(format!("Failed to query chunk: {}", e))
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("get_chunk", "read", start, result.is_err());
+
+        result
     }
 
     async fn get_stripe_chunks(&self, stripe_id: StripeId) -> Result<Vec<ChunkRecord>, Error> {
-        self.inner
+        let start = tokio::time::Instant::now();
+
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
@@ -973,7 +1032,12 @@ impl MetadataStore for MetadataStoreImpl {
             .await
             .map_err(|e| {
                 Error::QueryError(format!("Failed to get stripe chunks: {}", e))
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("get_stripe_chunks", "read", start, result.is_err());
+
+        result
     }
 
     async fn update_chunk_location(
@@ -982,46 +1046,65 @@ impl MetadataStore for MetadataStoreImpl {
         node_id: NodeId,
         disk_id: DiskId,
     ) -> Result<(), Error> {
+        let start = tokio::time::Instant::now();
         let node_id_val = node_id.as_u64();
         let disk_id_val = disk_id.as_u64();
 
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                Ok(conn.execute(
-                    "UPDATE chunks SET node_id = ?1, disk_id = ?2 WHERE chunk_id = ?3",
-                    params![node_id_val as i64, disk_id_val as i64, chunk_id,],
-                )?)
-            })
-            .await
-            .map_err(|e| Error::QueryError(format!("Failed to update chunk location: {}", e)))?;
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    Ok(conn.execute(
+                        "UPDATE chunks SET node_id = ?1, disk_id = ?2 WHERE chunk_id = ?3",
+                        params![node_id_val as i64, disk_id_val as i64, chunk_id,],
+                    )?)
+                })
+                .await
+                .map_err(|e| Error::QueryError(format!("Failed to update chunk location: {}", e)))?;
 
-        if rows_affected == 0 {
-            return Err(Error::ChunkNotFound(chunk_id));
+            if rows_affected == 0 {
+                return Err(Error::ChunkNotFound(chunk_id));
+            }
+
+            Ok(())
         }
+        .await;
 
-        Ok(())
+        // Publish metrics
+        self.publish_metrics("update_chunk_location", "write", start, result.is_err());
+
+        result
     }
 
     async fn mark_chunk_corrupt(&self, chunk_id: ChunkId) -> Result<(), Error> {
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                Ok(conn.execute(
-                    "UPDATE chunks SET status = 1 WHERE chunk_id = ?1",
-                    params![chunk_id],
-                )?)
-            })
-            .await
-            .map_err(|e| Error::QueryError(format!("Failed to mark chunk corrupt: {}", e)))?;
+        let start = tokio::time::Instant::now();
 
-        if rows_affected == 0 {
-            return Err(Error::ChunkNotFound(chunk_id));
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    Ok(conn.execute(
+                        "UPDATE chunks SET status = 1 WHERE chunk_id = ?1",
+                        params![chunk_id],
+                    )?)
+                })
+                .await
+                .map_err(|e| Error::QueryError(format!("Failed to mark chunk corrupt: {}", e)))?;
+
+            if rows_affected == 0 {
+                return Err(Error::ChunkNotFound(chunk_id));
+            }
+
+            Ok(())
         }
+        .await;
 
-        Ok(())
+        // Publish metrics
+        self.publish_metrics("mark_chunk_corrupt", "write", start, result.is_err());
+
+        result
     }
 
     async fn update_chunk_verification(
@@ -1029,27 +1112,36 @@ impl MetadataStore for MetadataStoreImpl {
         chunk_id: ChunkId,
         verified_at: SystemTime,
     ) -> Result<(), Error> {
+        let start = tokio::time::Instant::now();
         let verified_at_unix = system_time_to_unix(verified_at);
 
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                Ok(conn.execute(
-                    "UPDATE chunks SET last_verified = ?1 WHERE chunk_id = ?2",
-                    params![verified_at_unix, chunk_id],
-                )?)
-            })
-            .await
-            .map_err(|e| {
-                Error::QueryError(format!("Failed to update chunk verification: {}", e))
-            })?;
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    Ok(conn.execute(
+                        "UPDATE chunks SET last_verified = ?1 WHERE chunk_id = ?2",
+                        params![verified_at_unix, chunk_id],
+                    )?)
+                })
+                .await
+                .map_err(|e| {
+                    Error::QueryError(format!("Failed to update chunk verification: {}", e))
+                })?;
 
-        if rows_affected == 0 {
-            return Err(Error::ChunkNotFound(chunk_id));
+            if rows_affected == 0 {
+                return Err(Error::ChunkNotFound(chunk_id));
+            }
+
+            Ok(())
         }
+        .await;
 
-        Ok(())
+        // Publish metrics
+        self.publish_metrics("update_chunk_verification", "write", start, result.is_err());
+
+        result
     }
 
     async fn acquire_read_lock(
@@ -1058,10 +1150,12 @@ impl MetadataStore for MetadataStoreImpl {
         client_id: ClientId,
         expires_at: SystemTime,
     ) -> Result<u64, Error> {
+        let start = tokio::time::Instant::now();
         let client_id_val = client_id.as_u64();
         let expires_at_unix = system_time_to_unix(expires_at);
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 // Use IMMEDIATE transaction to prevent race conditions
@@ -1106,7 +1200,12 @@ impl MetadataStore for MetadataStoreImpl {
                 } else {
                     Error::QueryError(format!("Failed to acquire read lock: {}", e))
                 }
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("acquire_read_lock", "write", start, result.is_err());
+
+        result
     }
 
     async fn acquire_write_lock(
@@ -1116,11 +1215,13 @@ impl MetadataStore for MetadataStoreImpl {
         node_id: u64,
         expires_at: SystemTime,
     ) -> Result<u64, Error> {
+        let start = tokio::time::Instant::now();
         let client_id_val = client_id.as_u64();
         let node_id_val = node_id;
         let expires_at_unix = system_time_to_unix(expires_at);
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 // Use IMMEDIATE transaction to prevent race conditions
@@ -1167,29 +1268,43 @@ impl MetadataStore for MetadataStoreImpl {
                 } else {
                     Error::QueryError(format!("Failed to acquire write lock: {}", e))
                 }
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("acquire_write_lock", "write", start, result.is_err());
+
+        result
     }
 
     async fn release_lock(&self, file_id: FileId, client_id: ClientId) -> Result<(), Error> {
+        let start = tokio::time::Instant::now();
         let client_id_val = client_id.as_u64();
 
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                Ok(conn.execute(
-                    "DELETE FROM locks WHERE file_id = ?1 AND client_id = ?2",
-                    params![file_id, client_id_val as i64],
-                )?)
-            })
-            .await
-            .map_err(|e| Error::QueryError(format!("Failed to release lock: {}", e)))?;
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    Ok(conn.execute(
+                        "DELETE FROM locks WHERE file_id = ?1 AND client_id = ?2",
+                        params![file_id, client_id_val as i64],
+                    )?)
+                })
+                .await
+                .map_err(|e| Error::QueryError(format!("Failed to release lock: {}", e)))?;
 
-        if rows_affected == 0 {
-            return Err(Error::LockNotFound { file_id, client_id });
+            if rows_affected == 0 {
+                return Err(Error::LockNotFound { file_id, client_id });
+            }
+
+            Ok(())
         }
+        .await;
 
-        Ok(())
+        // Publish metrics
+        self.publish_metrics("release_lock", "write", start, result.is_err());
+
+        result
     }
 
     async fn extend_lock(
@@ -1198,30 +1313,42 @@ impl MetadataStore for MetadataStoreImpl {
         client_id: ClientId,
         new_expiry: SystemTime,
     ) -> Result<(), Error> {
+        let start = tokio::time::Instant::now();
         let client_id_val = client_id.as_u64();
         let new_expiry_unix = system_time_to_unix(new_expiry);
 
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                Ok(conn.execute(
-                    "UPDATE locks SET expires_at = ?1 WHERE file_id = ?2 AND client_id = ?3",
-                    params![new_expiry_unix, file_id, client_id_val as i64,],
-                )?)
-            })
-            .await
-            .map_err(|e| Error::QueryError(format!("Failed to extend lock: {}", e)))?;
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    Ok(conn.execute(
+                        "UPDATE locks SET expires_at = ?1 WHERE file_id = ?2 AND client_id = ?3",
+                        params![new_expiry_unix, file_id, client_id_val as i64,],
+                    )?)
+                })
+                .await
+                .map_err(|e| Error::QueryError(format!("Failed to extend lock: {}", e)))?;
 
-        if rows_affected == 0 {
-            return Err(Error::LockNotFound { file_id, client_id });
+            if rows_affected == 0 {
+                return Err(Error::LockNotFound { file_id, client_id });
+            }
+
+            Ok(())
         }
+        .await;
 
-        Ok(())
+        // Publish metrics
+        self.publish_metrics("extend_lock", "write", start, result.is_err());
+
+        result
     }
 
     async fn get_file_locks(&self, file_id: FileId) -> Result<Vec<LockRecord>, Error> {
-        self.inner
+        let start = tokio::time::Instant::now();
+
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
@@ -1252,26 +1379,44 @@ impl MetadataStore for MetadataStoreImpl {
                 Ok(locks)
             })
             .await
-            .map_err(|e| Error::QueryError(format!("Failed to get file locks: {}", e)))
+            .map_err(|e| Error::QueryError(format!("Failed to get file locks: {}", e)));
+
+        // Publish metrics
+        self.publish_metrics("get_file_locks", "read", start, result.is_err());
+
+        result
     }
 
     async fn cleanup_expired_locks(&self) -> Result<u64, Error> {
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                // Capture time inside the call to ensure consistency
-                let now = system_time_to_unix(SystemTime::now());
-                Ok(conn.execute("DELETE FROM locks WHERE expires_at <= ?1", params![now])?)
-            })
-            .await
-            .map_err(|e| Error::QueryError(format!("Failed to cleanup expired locks: {}", e)))?;
+        let start = tokio::time::Instant::now();
 
-        Ok(rows_affected as u64)
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    // Capture time inside the call to ensure consistency
+                    let now = system_time_to_unix(SystemTime::now());
+                    Ok(conn.execute("DELETE FROM locks WHERE expires_at <= ?1", params![now])?)
+                })
+                .await
+                .map_err(|e| Error::QueryError(format!("Failed to cleanup expired locks: {}", e)))?;
+
+            Ok(rows_affected as u64)
+        }
+        .await;
+
+        // Publish metrics
+        self.publish_metrics("cleanup_expired_locks", "write", start, result.is_err());
+
+        result
     }
 
     async fn reserve_inode(&self) -> Result<u64, Error> {
-        self.inner
+        let start = tokio::time::Instant::now();
+
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 let tx = conn.transaction()?;
@@ -1317,13 +1462,20 @@ impl MetadataStore for MetadataStoreImpl {
                 } else {
                     Error::QueryError(format!("Failed to reserve inode: {}", e))
                 }
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("reserve_inode", "write", start, result.is_err());
+
+        result
     }
 
     async fn confirm_inode(&self, inode: u64) -> Result<(), Error> {
+        let start = tokio::time::Instant::now();
         let now = system_time_to_unix(SystemTime::now());
 
-        self.inner
+        let result = self
+            .inner
             .conn
             .call(move |conn| {
                 // Check if inode is reserved and not expired
@@ -1359,27 +1511,42 @@ impl MetadataStore for MetadataStoreImpl {
                 } else {
                     Error::QueryError(format!("Failed to confirm inode: {}", e))
                 }
-            })
+            });
+
+        // Publish metrics
+        self.publish_metrics("confirm_inode", "write", start, result.is_err());
+
+        result
     }
 
     async fn release_inode(&self, inode: u64) -> Result<(), Error> {
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                Ok(conn.execute(
-                    "DELETE FROM inode_reservations WHERE inode = ?1",
-                    params![inode as i64],
-                )?)
-            })
-            .await
-            .map_err(|e| Error::QueryError(format!("Failed to release inode: {}", e)))?;
+        let start = tokio::time::Instant::now();
 
-        if rows_affected == 0 {
-            return Err(Error::InodeNotReserved(inode));
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    Ok(conn.execute(
+                        "DELETE FROM inode_reservations WHERE inode = ?1",
+                        params![inode as i64],
+                    )?)
+                })
+                .await
+                .map_err(|e| Error::QueryError(format!("Failed to release inode: {}", e)))?;
+
+            if rows_affected == 0 {
+                return Err(Error::InodeNotReserved(inode));
+            }
+
+            Ok(())
         }
+        .await;
 
-        Ok(())
+        // Publish metrics
+        self.publish_metrics("release_inode", "write", start, result.is_err());
+
+        result
     }
 
     async fn cleanup_expired_inode_reservations(&self) -> Result<u64, Error> {
@@ -1389,26 +1556,35 @@ impl MetadataStore for MetadataStoreImpl {
         // 2. This cleanup method is manually invoked (only happens in tests currently)
         // 3. Phase 2: Implement periodic background task to call this every 10-15 minutes
 
+        let start = tokio::time::Instant::now();
         let now = system_time_to_unix(SystemTime::now());
 
-        let rows_affected = self
-            .inner
-            .conn
-            .call(move |conn| {
-                Ok(conn.execute(
-                    "DELETE FROM inode_reservations WHERE expires_at <= ?1",
-                    params![now],
-                )?)
-            })
-            .await
-            .map_err(|e| {
-                Error::QueryError(format!(
-                    "Failed to cleanup expired inode reservations: {}",
-                    e
-                ))
-            })?;
+        let result = async {
+            let rows_affected = self
+                .inner
+                .conn
+                .call(move |conn| {
+                    Ok(conn.execute(
+                        "DELETE FROM inode_reservations WHERE expires_at <= ?1",
+                        params![now],
+                    )?)
+                })
+                .await
+                .map_err(|e| {
+                    Error::QueryError(format!(
+                        "Failed to cleanup expired inode reservations: {}",
+                        e
+                    ))
+                })?;
 
-        Ok(rows_affected as u64)
+            Ok(rows_affected as u64)
+        }
+        .await;
+
+        // Publish metrics
+        self.publish_metrics("cleanup_expired_inode_reservations", "write", start, result.is_err());
+
+        result
     }
 
     async fn create_snapshot(&self, snapshot_path: &Path) -> Result<(), Error> {
