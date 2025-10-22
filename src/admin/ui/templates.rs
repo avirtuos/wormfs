@@ -114,8 +114,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
         .metrics-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 1.5rem;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
             margin-bottom: 2rem;
         }
 
@@ -123,24 +123,24 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             background: var(--card-bg);
             border: 1px solid var(--border);
             border-radius: 0.5rem;
-            padding: 1.5rem;
+            padding: 1rem;
             box-shadow: var(--shadow);
         }
 
         .metric-label {
-            font-size: 0.875rem;
+            font-size: 0.8rem;
             color: var(--text-secondary);
             margin-bottom: 0.5rem;
         }
 
         .metric-value {
-            font-size: 2rem;
+            font-size: 1.5rem;
             font-weight: 700;
             color: var(--text);
         }
 
         .metric-unit {
-            font-size: 1rem;
+            font-size: 0.875rem;
             color: var(--text-secondary);
             margin-left: 0.25rem;
         }

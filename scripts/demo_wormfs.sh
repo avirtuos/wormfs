@@ -423,6 +423,8 @@ EOF
     echo "=========================================="
     echo ""
 
+     sleep 10
+
     if [ "$SKIP_TESTS" -eq 1 ]; then
         print_info "Skipping file/directory operation tests (--skip-tests flag)"
         print_header "Demo Complete (Basic Mount Only)"
@@ -567,8 +569,6 @@ EOF
 
     print_success "Copied file to WormFS in ${CP_ELAPSED}s"
     echo -e "${GREEN}Write speed: ${CP_THROUGHPUT_MBPS} MB/s (${CP_THROUGHPUT_MBITS} Mbit/s)${NC}"
-
-    sleep 30
 
     # Verify size
     SIZE=$(stat -f%z "$MOUNT_POINT/random.dat" 2>/dev/null || stat -c%s "$MOUNT_POINT/random.dat" 2>/dev/null)
