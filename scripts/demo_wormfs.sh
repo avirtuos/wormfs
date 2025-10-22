@@ -534,13 +534,13 @@ EOF
 
     # Stage file in /tmp first
     STAGING_FILE=$(mktemp -t wormfs-demo-staging.XXXXXX.dat)
-    print_command "dd if=/dev/urandom of=$STAGING_FILE bs=1M count=300"
-    dd if=/dev/urandom of="$STAGING_FILE" bs=1M count=300 2>&1 | tail -1
+    print_command "dd if=/dev/urandom of=$STAGING_FILE bs=1M count=1000"
+    dd if=/dev/urandom of="$STAGING_FILE" bs=1M count=1000 2>&1 | tail -1
     if [ $? -ne 0 ]; then
         echo -e "${RED}ERROR: Failed to create test file with dd${NC}"
         fail "Failed to create test file with dd"
     fi
-    print_success "Created 300MB file in staging area"
+    print_success "Created 1000MB file in staging area"
 
     # Calculate checksum of original file
     print_command "md5sum $STAGING_FILE"

@@ -482,6 +482,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 previousWriteBytes: 0,
                 rateUpdateInterval: null,
                 graphInitialized: false,
+                componentRefreshInterval: null,
 
                 init() {
                     this.connectWebSocket();
@@ -489,6 +490,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     this.fetchComponents();  // Fetch available components
                     this.initGraph();  // Initialize Plotly graph
                     this.startByteRateTracking();  // Start byte rate updates every second
+                    this.startComponentRefresh();  // Discover new metrics every 30 seconds
                 },
 
                 connectWebSocket() {
@@ -570,6 +572,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     } catch (e) {
                         console.error('Failed to fetch components:', e);
                     }
+                },
+
+                startComponentRefresh() {
+                    // Refresh component list every 30 seconds to discover new metrics
+                    this.componentRefreshInterval = setInterval(() => {
+                        this.fetchComponents();
+                    }, 30000);  // 30 seconds
                 },
 
                 initGraph() {

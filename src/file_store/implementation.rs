@@ -438,6 +438,13 @@ impl FileStore for FileStoreImpl {
                     1,
                     crate::metric_service::UnitType::Operations,
                 );
+
+                // Publish bytes read from cache
+                let _ = metrics.publish_counter(
+                    "filestore.stripe_cache.bytes_read_from_cache",
+                    cached_data.len() as u64,
+                    crate::metric_service::UnitType::Bytes,
+                );
             }
 
             return Ok(cached_data);
@@ -563,6 +570,13 @@ impl FileStore for FileStoreImpl {
                 "filestore.stripe_cache.misses",
                 1,
                 crate::metric_service::UnitType::Operations,
+            );
+
+            // Publish bytes read from disk
+            let _ = metrics.publish_counter(
+                "filestore.stripe_cache.bytes_read_from_disk",
+                data.len() as u64,
+                crate::metric_service::UnitType::Bytes,
             );
 
             // Publish cache size metrics
