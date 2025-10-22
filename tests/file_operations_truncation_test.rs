@@ -641,7 +641,7 @@ async fn test_truncate_grow_does_not_expose_old_data() {
     service
         .setattr(
             inode,
-            None,                       // file_handle
+            Some(fh),                   // file_handle - use the open file handle
             None,                       // mode
             None,                       // uid
             None,                       // gid
@@ -661,7 +661,7 @@ async fn test_truncate_grow_does_not_expose_old_data() {
     service
         .setattr(
             inode,
-            None,                     // file_handle
+            Some(fh),                 // file_handle - use the open file handle
             None,                     // mode
             None,                     // uid
             None,                     // gid
@@ -677,9 +677,9 @@ async fn test_truncate_grow_does_not_expose_old_data() {
 
     println!("✓ Truncated up from 4MB to 6MB");
 
-    // Read the entire file
+    // Read the entire file using the open file handle
     let read_data = service
-        .read(inode, 0, 0, TRUNCATE_UP as u32, 1000, 1000, client_id)
+        .read(inode, fh, 0, TRUNCATE_UP as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read file");
 

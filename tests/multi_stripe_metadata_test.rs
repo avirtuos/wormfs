@@ -117,9 +117,9 @@ async fn test_multi_stripe_metadata_persistence() {
 
     println!("✓ Wrote {} bytes in {} stripes", TOTAL_SIZE, NUM_STRIPES);
 
-    // Read back and verify
+    // Read back and verify (use file handle to read from BufferedFileHandle)
     let read_data = service
-        .read(inode, 0, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, fh, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read");
 
@@ -189,7 +189,7 @@ async fn test_stripe_lookup_at_boundaries() {
 
     for (offset, size, expected_byte, description) in test_cases {
         let data = service
-            .read(inode, 0, offset, size, 1000, 1000, client_id)
+            .read(inode, fh, offset, size, 1000, 1000, client_id)
             .await
             .expect(&format!("Failed to read at {}", description));
 
@@ -312,9 +312,9 @@ async fn test_large_file_stripe_consistency() {
         expected_data.extend_from_slice(&data);
     }
 
-    // Read entire file
+    // Read entire file (use file handle to read from BufferedFileHandle)
     let read_data = service
-        .read(inode, 0, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, fh, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read full file");
 
@@ -326,7 +326,7 @@ async fn test_large_file_stripe_consistency() {
     let middle_size = STRIPE_SIZE as u32; // Read 4MB starting at 6MB
 
     let middle_data = service
-        .read(inode, 0, middle_offset, middle_size, 1000, 1000, client_id)
+        .read(inode, fh, middle_offset, middle_size, 1000, 1000, client_id)
         .await
         .expect("Failed to read middle section");
 
