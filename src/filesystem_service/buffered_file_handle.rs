@@ -264,7 +264,7 @@ pub struct BufferedFileHandle {
     /// Dependencies (outside mutex to avoid lock during async calls)
     metadata_store: Arc<MetadataStoreImpl>,
     file_store: Arc<dyn FileStore + Send + Sync>,
-    raft_client: Option<Arc<dyn RaftClient>>,
+    raft_client: Arc<dyn RaftClient>,
 
     /// Optional metrics reporter for observability
     metrics_reporter: Option<Arc<dyn BufferedMetricsReporter>>,
@@ -274,7 +274,7 @@ pub struct BufferedFileHandle {
 impl std::fmt::Debug for BufferedFileHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BufferedFileHandle")
-            .field("has_raft_client", &self.raft_client.is_some())
+            .field("has_raft_client", &true)
             .finish_non_exhaustive()
     }
 }
@@ -291,7 +291,7 @@ impl BufferedFileHandle {
     /// * `config` - Buffer configuration
     /// * `metadata_store` - MetadataStore for reading committed state
     /// * `file_store` - FileStore for writing stripe data
-    /// * `raft_client` - Optional Raft client for metadata updates (None for testing)
+    /// * `raft_client` - Raft client for metadata updates (use MockRaftClient for testing)
     /// * `metrics_reporter` - Optional metrics reporter for observability
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -302,7 +302,7 @@ impl BufferedFileHandle {
         config: BufferedFileHandleConfig,
         metadata_store: Arc<MetadataStoreImpl>,
         file_store: Arc<dyn FileStore + Send + Sync>,
-        raft_client: Option<Arc<dyn RaftClient>>,
+        raft_client: Arc<dyn RaftClient>,
         metrics_reporter: Option<Arc<dyn BufferedMetricsReporter>>,
     ) -> Self {
         let inner = BufferedFileHandleInner {
@@ -1136,13 +1136,11 @@ impl BufferedFileHandle {
             (ops, flushed_set)
         };
 
-        // 3. Submit atomically via Raft (if configured)
-        // Note: If no RaftClient, stripes stay in memory as cache for reads
-        if let Some(raft) = &self.raft_client {
-            raft.propose_stripe_batch(operations)
-                .await
-                .map_err(|e| Error::Internal(format!("Failed to propose stripe batch: {}", e)))?;
-        }
+        // 3. Submit atomically via Raft
+        self.raft_client
+            .propose_stripe_batch(operations)
+            .await
+            .map_err(|e| Error::Internal(format!("Failed to propose stripe batch: {}", e)))?;
 
         // 4. Update origin and clear dirty flags ONLY for flushed stripes
         {
@@ -1209,6 +1207,9 @@ impl BufferedFileHandle {
                     Ok(())
                 }
             }
+            OperationType::Flush => self.full_flush(false).await, // false = flush complete stripes only
+            OperationType::Fsync => self.full_flush(true).await, // true = flush everything including partial
+            OperationType::Release => self.full_flush(true).await, // true = flush everything on close
             OperationType::Rename => Ok(()),
             OperationType::Lock => Ok(()),
         }
@@ -1287,16 +1288,52 @@ impl BufferedFileHandle {
     /// This allows external code (like setattr()) to update the cached attributes
     /// when metadata changes occur outside of normal write operations.
     ///
+    /// If the file size has decreased, this will also invalidate cached stripe
+    /// metadata beyond the new file size to prevent reading stale data.
+    ///
     /// # Arguments
     ///
     /// * `attrs` - The new file attributes to cache
     pub fn update_attributes(&self, attrs: FileAttr) {
         let mut inner = self.inner.lock().unwrap();
+        let old_size = inner.attributes.size;
+        let new_size = attrs.size;
+
+        // Update attributes first
         inner.attributes = attrs;
+
+        // If file size decreased, invalidate cached stripes beyond the new size
+        if new_size < old_size {
+            let stripe_size = inner.config.max_stripe_size as u64;
+
+            // Calculate the last valid stripe index
+            let last_valid_stripe_idx = if new_size == 0 {
+                0
+            } else {
+                ((new_size - 1) / stripe_size) as u32
+            };
+
+            // Remove cached stripes beyond the new size
+            inner
+                .stripes
+                .retain(|&stripe_idx, _| stripe_idx <= last_valid_stripe_idx);
+
+            // Remove builders beyond the new size
+            inner
+                .builders
+                .retain(|&stripe_idx, _| stripe_idx <= last_valid_stripe_idx);
+
+            trace!(
+                old_size = %old_size,
+                new_size = %new_size,
+                last_valid_stripe = %last_valid_stripe_idx,
+                "Invalidated cached stripes beyond new file size"
+            );
+        }
     }
 }
 
-/// Types of operations that may require pre-flush.
+/// Types of operations that may require pre-flush or cache invalidation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationType {
     /// File truncation
@@ -1307,6 +1344,12 @@ pub enum OperationType {
     Rename,
     /// Lock acquisition
     Lock,
+    /// Flush file data
+    Flush,
+    /// Synchronize file data to storage
+    Fsync,
+    /// Release (close) file handle
+    Release,
 }
 
 #[cfg(test)]
@@ -1452,6 +1495,20 @@ mod tests {
         }
     }
 
+    // Mock RaftClient for tests that always succeeds
+    struct MockRaftClient;
+
+    #[async_trait::async_trait]
+    impl RaftClient for MockRaftClient {
+        async fn propose_stripe_batch(
+            &self,
+            _operations: Vec<StripeOperation>,
+        ) -> Result<(), crate::filesystem_service::types::Error> {
+            // Mock implementation - always succeeds
+            Ok(())
+        }
+    }
+
     async fn create_test_handle() -> BufferedFileHandle {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
@@ -1513,7 +1570,7 @@ mod tests {
             config,
             metadata_store,
             file_store,
-            None, // No Raft client for unit tests
+            Arc::new(MockRaftClient),
             None, // No metrics reporter for unit tests
         )
     }
@@ -1657,7 +1714,7 @@ mod tests {
             config,
             metadata_store.clone(),
             file_store,
-            Some(raft_client),
+            raft_client,
             None, // No metrics reporter for unit tests
         );
 

@@ -310,7 +310,7 @@ impl FileSystemServiceImpl {
             config,
             Arc::new(self.metadata_store.clone()),
             Arc::clone(&self.file_store) as Arc<dyn crate::file_store::FileStore + Send + Sync>,
-            Some(raft_client),
+            raft_client,
             Some(Arc::clone(&self.buffered_metrics)
                 as Arc<
                     dyn super::buffered_file_handle::BufferedMetricsReporter,
@@ -1790,19 +1790,22 @@ impl FileSystemService for FileSystemServiceImpl {
                 .and_then(|open_file| open_file.buffered_handle.clone())
         };
 
-        // Flush the buffered handle (force=false for non-blocking flush)
+        // Inform BufferedFileHandle about flush operation
         // This is called on each close() of a file descriptor (dup, dup2, fork)
         if let Some(handle) = buffered_handle {
             tracing::debug!(
-                "Flushing BufferedFileHandle for file_handle={}",
+                "Informing BufferedFileHandle for file_handle={}",
                 file_handle
             );
-            handle.full_flush(false).await.map_err(|e| {
-                Error::Internal(format!(
-                    "Failed to flush file_handle {}: {}",
-                    file_handle, e
-                ))
-            })?;
+            handle
+                .inform(crate::filesystem_service::buffered_file_handle::OperationType::Flush)
+                .await
+                .map_err(|e| {
+                    Error::Internal(format!(
+                        "Failed to flush file_handle {}: {}",
+                        file_handle, e
+                    ))
+                })?;
         } else {
             tracing::debug!(
                 "No BufferedFileHandle found for file_handle={}",
@@ -1824,13 +1827,19 @@ impl FileSystemService for FileSystemServiceImpl {
                 .and_then(|open_file| open_file.buffered_handle.clone())
         };
 
-        // Force synchronous flush (force=true ensures durability)
+        // Inform BufferedFileHandle about fsync operation
         // fsync() must guarantee data reaches persistent storage
         if let Some(handle) = buffered_handle {
-            tracing::debug!("Syncing BufferedFileHandle for file_handle={}", file_handle);
-            handle.full_flush(true).await.map_err(|e| {
-                Error::Internal(format!("Failed to sync file_handle {}: {}", file_handle, e))
-            })?;
+            tracing::debug!(
+                "Informing BufferedFileHandle for file_handle={}",
+                file_handle
+            );
+            handle
+                .inform(crate::filesystem_service::buffered_file_handle::OperationType::Fsync)
+                .await
+                .map_err(|e| {
+                    Error::Internal(format!("Failed to sync file_handle {}: {}", file_handle, e))
+                })?;
         } else {
             tracing::debug!(
                 "No BufferedFileHandle found for file_handle={}",
@@ -1844,7 +1853,7 @@ impl FileSystemService for FileSystemServiceImpl {
     async fn release(&self, file_handle: u64) -> Result<(), Error> {
         tracing::debug!("release: file_handle={}", file_handle);
 
-        // Flush BufferedFileHandle before closing (if present)
+        // Inform BufferedFileHandle about release before closing (if present)
         let buffered_handle_to_flush = {
             let open_files = self.open_files.read().unwrap();
             open_files
@@ -1852,18 +1861,21 @@ impl FileSystemService for FileSystemServiceImpl {
                 .and_then(|open_file| open_file.buffered_handle.clone())
         };
 
-        // Flush the buffered handle if present (force=true on file close)
+        // Inform the buffered handle about release (will flush everything)
         if let Some(handle) = buffered_handle_to_flush {
             tracing::debug!(
-                "Flushing BufferedFileHandle for file_handle={}",
+                "Informing BufferedFileHandle for file_handle={}",
                 file_handle
             );
-            handle.full_flush(true).await.map_err(|e| {
-                Error::Internal(format!(
-                    "Failed to flush BufferedFileHandle on release: {}",
-                    e
-                ))
-            })?;
+            handle
+                .inform(crate::filesystem_service::buffered_file_handle::OperationType::Release)
+                .await
+                .map_err(|e| {
+                    Error::Internal(format!(
+                        "Failed to flush BufferedFileHandle on release: {}",
+                        e
+                    ))
+                })?;
         }
 
         // Remove the file handle from tracking and extract lock info
@@ -2375,11 +2387,38 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 3: Handle truncation if size is changing (DATA PLANE)
         if let Some(new_size) = size {
-            // CRITICAL: Flush all pending writes for this file before truncation
+            // CRITICAL: Inform BufferedFileHandle about truncation so it can flush pending writes
             // Otherwise buffered writes will be lost when we delete stripe metadata
-            self.flush_file(inode).await?;
+            let buffered_handle = if let Some(fh) = file_handle {
+                // Look up by file handle
+                let open_files = self.open_files.read().unwrap();
+                open_files
+                    .get(&fh)
+                    .and_then(|of| of.buffered_handle.clone())
+            } else {
+                // Look up by inode
+                self.get_buffered_handle_by_inode(inode)
+            };
 
-            if new_size < record.size {
+            if let Some(ref handle) = buffered_handle {
+                handle
+                    .inform(
+                        crate::filesystem_service::buffered_file_handle::OperationType::Truncate,
+                    )
+                    .await
+                    .map_err(|e| {
+                        Error::Internal(format!("Failed to inform BufferedFileHandle: {}", e))
+                    })?;
+            }
+
+            // Get the current effective size (BufferedFileHandle knows about unflushed writes)
+            let current_size = if let Some(ref handle) = buffered_handle {
+                handle.attributes().size
+            } else {
+                record.size
+            };
+
+            if new_size < current_size {
                 // Shrinking - need to delete/truncate stripes
                 let stripe_size = self.stripe_size();
 
@@ -2389,10 +2428,10 @@ impl FileSystemService for FileSystemServiceImpl {
                     (new_size - 1) / stripe_size
                 };
 
-                let old_last_stripe_idx = if record.size == 0 {
+                let old_last_stripe_idx = if current_size == 0 {
                     0
                 } else {
-                    (record.size - 1) / stripe_size
+                    (current_size - 1) / stripe_size
                 };
 
                 tracing::debug!(
