@@ -644,6 +644,14 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     const currentWriteBytes = this.metrics['filesystem.write_ops.bytes'] || 0;
                     const now = Date.now();
 
+                    // Skip first sample - only establish baseline
+                    // This prevents artificially large "peak" values from UI starting after system
+                    if (this.previousReadBytes === 0 && this.previousWriteBytes === 0) {
+                        this.previousReadBytes = currentReadBytes;
+                        this.previousWriteBytes = currentWriteBytes;
+                        return;
+                    }
+
                     // Calculate rates in bits per second
                     const readBytesPerSecond = currentReadBytes - this.previousReadBytes;
                     const writeBytesPerSecond = currentWriteBytes - this.previousWriteBytes;

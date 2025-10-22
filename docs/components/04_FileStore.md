@@ -111,6 +111,63 @@ Background task `cleanup_orphaned_chunks()` handles crash recovery:
 
 **Rationale**: If coordinator crashes after PREPARE but before COMMIT/ABORT, orphaned chunks are eventually cleaned up automatically.
 
+## Stripe Cache
+
+FileStore implements an in-memory LRU cache for decoded stripe data to avoid expensive erasure decoding operations on frequently accessed stripes.
+
+### Cache Architecture
+
+- **Cached Data**: Decoded stripe data (not encoded chunks)
+- **Cache Key**: StripeId
+- **Eviction Policy**:
+  - Size-based: LRU eviction when cache exceeds configured size
+  - Time-based: TTL (time-to-live) for absolute expiration
+  - Time-based: TTI (time-to-idle) for idle entries
+- **Implementation**: moka crate with async support
+
+### Cache Behavior
+
+**Cache Hit**:
+1. Check cache by StripeId
+2. Return cached data immediately (no decoding)
+3. Update access time (resets TTI)
+4. Publish cache hit metric
+
+**Cache Miss**:
+1. Read chunks from storage
+2. Decode stripe using erasure coding
+3. Store decoded data in cache
+4. Publish cache miss metric
+5. Return decoded data
+
+**Cache Invalidation**:
+- Stripe updates via `update_stripe_partial()` invalidate the cache entry
+- Automatic eviction based on LRU, TTL, and TTI policies
+
+### Configuration
+
+```toml
+[filestore]
+# Stripe cache settings
+stripe_cache_size_mb = 256       # Maximum cache size in MB
+stripe_cache_ttl_secs = 3600     # Evict after 1 hour regardless
+stripe_cache_tti_secs = 600      # Evict if idle for 10 minutes
+```
+
+### Metrics
+
+- `filestore.stripe_cache.hits` - Cache hit counter
+- `filestore.stripe_cache.misses` - Cache miss counter
+- `filestore.stripe_cache.size_bytes` - Current cache size in bytes
+- `filestore.stripe_cache.entry_count` - Number of cached stripes
+
+### Benefits
+
+1. **Performance**: Eliminates redundant erasure decoding for hot stripes
+2. **Predictable Memory**: Size-based eviction prevents unbounded growth
+3. **Time-based Cleanup**: TTL/TTI ensure stale data is evicted
+4. **Observability**: Metrics track cache effectiveness
+
 
 ### Chunk File Format
 
@@ -653,7 +710,7 @@ hash_buckets = 1000
 
 11. **Partial Stripe Writes**: How should we handle the last stripe of a file that's smaller than stripe_size? Pad or use variable-sized encoding? Answer: We should reduce the Chunk size such that we do not require more than 10% padding. This may require storing additional metadata in the ChunkHeader.
 
-12. **Chunk Caching**: Should FileStore implement a chunk cache for frequently accessed data? What eviction policy? Answer: No Chunk caching is needed at this time. We may add it in a future release.
+12. **Chunk Caching**: Should FileStore implement a chunk cache for frequently accessed data? What eviction policy? Answer: Chunk caching (caching encoded chunks) is not implemented. However, we do implement **stripe caching** which caches decoded stripe data using an LRU cache with configurable size and time-based eviction (TTL/TTI). This avoids expensive erasure decoding for frequently accessed stripes while keeping memory usage bounded.
 
 13. **Disk Balancing**: Should we implement active rebalancing when disk usage becomes imbalanced, or only balance new writes? Answer: Yes, this is one of the responsibilities we expect to be added to the StorageWatchdog's background anti-entropy and storage optimization processes.
 

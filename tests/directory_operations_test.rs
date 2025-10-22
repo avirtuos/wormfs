@@ -50,6 +50,9 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
         max_concurrent_operations: 10,
         verification_interval: Duration::from_secs(3600),
         orphan_cleanup_age: Duration::from_secs(86400),
+        stripe_cache_size_mb: 256,
+        stripe_cache_ttl_secs: 3600,
+        stripe_cache_tti_secs: 600,
     };
 
     let mut file_store =

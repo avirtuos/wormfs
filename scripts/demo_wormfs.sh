@@ -256,6 +256,9 @@ default_parity_shards = 1
 max_concurrent_operations = 100
 verification_interval = 3600
 orphan_cleanup_age = 3600
+stripe_cache_size_mb = 256
+stripe_cache_ttl_secs = 3600
+stripe_cache_tti_secs = 600
 
 [filesystem]
 node_id = 1

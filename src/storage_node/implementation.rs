@@ -90,6 +90,9 @@ impl StorageNodeImpl {
             max_concurrent_operations: 100, // Phase 1 default
             verification_interval: std::time::Duration::from_secs(3600), // 1 hour
             orphan_cleanup_age: std::time::Duration::from_secs(3600), // 1 hour
+            stripe_cache_size_mb: 256,      // 256 MB cache
+            stripe_cache_ttl_secs: 3600,    // 1 hour TTL
+            stripe_cache_tti_secs: 600,     // 10 minutes TTI
         };
 
         let file_store =
