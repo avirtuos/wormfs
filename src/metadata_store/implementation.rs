@@ -1061,7 +1061,9 @@ impl MetadataStore for MetadataStoreImpl {
                     )?)
                 })
                 .await
-                .map_err(|e| Error::QueryError(format!("Failed to update chunk location: {}", e)))?;
+                .map_err(|e| {
+                    Error::QueryError(format!("Failed to update chunk location: {}", e))
+                })?;
 
             if rows_affected == 0 {
                 return Err(Error::ChunkNotFound(chunk_id));
@@ -1400,7 +1402,9 @@ impl MetadataStore for MetadataStoreImpl {
                     Ok(conn.execute("DELETE FROM locks WHERE expires_at <= ?1", params![now])?)
                 })
                 .await
-                .map_err(|e| Error::QueryError(format!("Failed to cleanup expired locks: {}", e)))?;
+                .map_err(|e| {
+                    Error::QueryError(format!("Failed to cleanup expired locks: {}", e))
+                })?;
 
             Ok(rows_affected as u64)
         }
@@ -1582,7 +1586,12 @@ impl MetadataStore for MetadataStoreImpl {
         .await;
 
         // Publish metrics
-        self.publish_metrics("cleanup_expired_inode_reservations", "write", start, result.is_err());
+        self.publish_metrics(
+            "cleanup_expired_inode_reservations",
+            "write",
+            start,
+            result.is_err(),
+        );
 
         result
     }

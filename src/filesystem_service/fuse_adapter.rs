@@ -587,7 +587,7 @@ impl Filesystem for FuseAdapter {
         &mut self,
         req: &Request<'_>,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         size: u32,
         _flags: i32,
@@ -599,8 +599,9 @@ impl Filesystem for FuseAdapter {
         let gid = req.gid();
 
         tracing::debug!(
-            "FUSE read: ino={}, offset={}, size={}, uid={}, gid={}",
+            "FUSE read: ino={}, fh={}, offset={}, size={}, uid={}, gid={}",
             ino,
+            fh,
             offset,
             size,
             uid,
@@ -615,6 +616,7 @@ impl Filesystem for FuseAdapter {
 
         match self.runtime.block_on(self.service.read(
             ino,
+            fh,
             offset as u64,
             size,
             uid,
@@ -681,6 +683,110 @@ impl Filesystem for FuseAdapter {
             Err(e) => {
                 let errno = e.to_errno();
                 tracing::debug!("FUSE write error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn flush(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _lock_owner: u64,
+        reply: fuser::ReplyEmpty,
+    ) {
+        tracing::debug!("FUSE flush: fh={}", fh);
+
+        match self.runtime.block_on(self.service.flush(fh)) {
+            Ok(_) => {
+                tracing::debug!("FUSE flush success");
+                reply.ok();
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE flush error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn fsync(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _datasync: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        tracing::debug!("FUSE fsync: fh={}", fh);
+
+        match self.runtime.block_on(self.service.fsync(fh)) {
+            Ok(_) => {
+                tracing::debug!("FUSE fsync success");
+                reply.ok();
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE fsync error: {}, errno={}", e, errno);
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn setattr(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let client_id = self.get_client_id(req);
+        let req_uid = req.uid();
+        let req_gid = req.gid();
+
+        tracing::debug!(
+            "FUSE setattr: ino={}, mode={:?}, uid={:?}, gid={:?}, size={:?}, fh={:?}",
+            ino,
+            mode,
+            uid,
+            gid,
+            size,
+            fh
+        );
+
+        // Convert TimeOrNow to Option<SystemTime>
+        let atime_sys = atime.and_then(|t| match t {
+            TimeOrNow::SpecificTime(st) => Some(st),
+            TimeOrNow::Now => Some(SystemTime::now()),
+        });
+
+        let mtime_sys = mtime.and_then(|t| match t {
+            TimeOrNow::SpecificTime(st) => Some(st),
+            TimeOrNow::Now => Some(SystemTime::now()),
+        });
+
+        match self.runtime.block_on(self.service.setattr(
+            ino, fh, mode, uid, gid, size, atime_sys, mtime_sys, req_uid, req_gid, client_id,
+        )) {
+            Ok(attr) => {
+                tracing::debug!("FUSE setattr success");
+                reply.attr(&TTL, &self.to_fuse_attr(&attr));
+            }
+            Err(e) => {
+                let errno = e.to_errno();
+                tracing::debug!("FUSE setattr error: {}, errno={}", e, errno);
                 reply.error(errno);
             }
         }

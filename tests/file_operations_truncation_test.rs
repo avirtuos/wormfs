@@ -201,6 +201,7 @@ async fn test_partial_stripe_truncation_middle() {
     service
         .setattr(
             inode,
+            None, // file_handle
             None,
             None,
             None,
@@ -222,7 +223,7 @@ async fn test_partial_stripe_truncation_middle() {
 
     // Read entire file - should get exactly 6MB
     let read_data = service
-        .read(inode, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read file");
 
@@ -246,7 +247,7 @@ async fn test_partial_stripe_truncation_middle() {
 
     // Read from offset beyond truncation point - should return empty
     let beyond_read = service
-        .read(inode, TRUNCATE_SIZE as u64, 1024, 1000, 1000, client_id)
+        .read(inode, 0, TRUNCATE_SIZE as u64, 1024, 1000, 1000, client_id)
         .await
         .expect("Failed to read beyond truncation");
 
@@ -260,7 +261,7 @@ async fn test_partial_stripe_truncation_middle() {
     // Read from offset within truncated region - should work normally
     let mid_offset = TRUNCATE_SIZE - 1024;
     let mid_read = service
-        .read(inode, mid_offset as u64, 1024, 1000, 1000, client_id)
+        .read(inode, 0, mid_offset as u64, 1024, 1000, 1000, client_id)
         .await
         .expect("Failed to read from middle");
 
@@ -309,6 +310,7 @@ async fn test_partial_stripe_truncation_with_rewrite() {
     service
         .setattr(
             inode,
+            None, // file_handle
             None,
             None,
             None,
@@ -353,7 +355,7 @@ async fn test_partial_stripe_truncation_with_rewrite() {
 
     // Read entire file - should get 6MB with rewritten section
     let read_data = service
-        .read(inode, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read");
 
@@ -377,7 +379,7 @@ async fn test_partial_stripe_truncation_with_rewrite() {
 
     // Verify reading beyond 6MB still returns nothing
     let beyond = service
-        .read(inode, TRUNCATE_SIZE as u64, 1024, 1000, 1000, client_id)
+        .read(inode, 0, TRUNCATE_SIZE as u64, 1024, 1000, 1000, client_id)
         .await
         .expect("Failed to read beyond");
 
@@ -419,6 +421,7 @@ async fn test_stripe_boundary_truncation() {
     service
         .setattr(
             inode,
+            None, // file_handle
             None,
             None,
             None,
@@ -436,7 +439,7 @@ async fn test_stripe_boundary_truncation() {
 
     // Read entire file
     let read_data = service
-        .read(inode, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read");
 
@@ -459,6 +462,7 @@ async fn test_stripe_boundary_truncation() {
     let beyond = service
         .read(
             inode,
+            0,
             third_stripe_offset as u64,
             STRIPE_SIZE as u32,
             1000,
@@ -506,6 +510,7 @@ async fn test_multiple_truncations() {
     service
         .setattr(
             inode,
+            None, // file_handle
             None,
             None,
             None,
@@ -520,7 +525,7 @@ async fn test_multiple_truncations() {
         .expect("Failed to truncate to 10MB");
 
     let read1 = service
-        .read(inode, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read after first truncation");
 
@@ -534,6 +539,7 @@ async fn test_multiple_truncations() {
     service
         .setattr(
             inode,
+            None, // file_handle
             None,
             None,
             None,
@@ -548,7 +554,7 @@ async fn test_multiple_truncations() {
         .expect("Failed to truncate to 6MB");
 
     let read2 = service
-        .read(inode, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read after second truncation");
 
@@ -566,6 +572,7 @@ async fn test_multiple_truncations() {
     service
         .setattr(
             inode,
+            None, // file_handle
             None,
             None,
             None,
@@ -580,7 +587,7 @@ async fn test_multiple_truncations() {
         .expect("Failed to truncate to 2MB");
 
     let read3 = service
-        .read(inode, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, INITIAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read after third truncation");
 
@@ -591,7 +598,7 @@ async fn test_multiple_truncations() {
 
     // Verify no data accessible beyond 2MB
     let beyond = service
-        .read(inode, truncate3 as u64, 1024, 1000, 1000, client_id)
+        .read(inode, 0, truncate3 as u64, 1024, 1000, 1000, client_id)
         .await
         .expect("Failed to read beyond");
 
@@ -634,14 +641,15 @@ async fn test_truncate_grow_does_not_expose_old_data() {
     service
         .setattr(
             inode,
-            None,
-            None,
-            None,
-            Some(TRUNCATE_DOWN as u64),
-            None,
-            None,
-            1000,
-            1000,
+            None,                       // file_handle
+            None,                       // mode
+            None,                       // uid
+            None,                       // gid
+            Some(TRUNCATE_DOWN as u64), // size
+            None,                       // atime
+            None,                       // mtime
+            1000,                       // req_uid
+            1000,                       // req_gid
             client_id,
         )
         .await
@@ -653,14 +661,15 @@ async fn test_truncate_grow_does_not_expose_old_data() {
     service
         .setattr(
             inode,
-            None,
-            None,
-            None,
-            Some(TRUNCATE_UP as u64),
-            None,
-            None,
-            1000,
-            1000,
+            None,                     // file_handle
+            None,                     // mode
+            None,                     // uid
+            None,                     // gid
+            Some(TRUNCATE_UP as u64), // size
+            None,                     // atime
+            None,                     // mtime
+            1000,                     // req_uid
+            1000,                     // req_gid
             client_id,
         )
         .await
@@ -670,7 +679,7 @@ async fn test_truncate_grow_does_not_expose_old_data() {
 
     // Read the entire file
     let read_data = service
-        .read(inode, 0, TRUNCATE_UP as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, TRUNCATE_UP as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read file");
 

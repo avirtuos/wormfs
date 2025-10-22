@@ -200,7 +200,15 @@ async fn test_writes_to_multiple_stripes() {
         let offset = (i as u64) * STRIPE_SIZE;
         println!("Reading stripe {} at offset {}", i, offset);
         let data = service
-            .read(attrs.ino, offset, STRIPE_SIZE as u32, 1000, 1000, client_id)
+            .read(
+                attrs.ino,
+                0,
+                offset,
+                STRIPE_SIZE as u32,
+                1000,
+                1000,
+                client_id,
+            )
             .await
             .expect("Failed to read stripe");
 
@@ -342,7 +350,7 @@ async fn test_write_spanning_many_stripes() {
 
     // Read back and verify
     let read_data = service
-        .read(attrs.ino, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
+        .read(attrs.ino, 0, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read large file");
 
@@ -418,7 +426,15 @@ async fn test_interleaved_stripe_writes() {
     for i in 0..NUM_STRIPES {
         let offset = (i as u64) * STRIPE_SIZE;
         let data = service
-            .read(attrs.ino, offset, STRIPE_SIZE as u32, 1000, 1000, client_id)
+            .read(
+                attrs.ino,
+                0,
+                offset,
+                STRIPE_SIZE as u32,
+                1000,
+                1000,
+                client_id,
+            )
             .await
             .expect("Failed to read stripe");
 
@@ -638,6 +654,7 @@ async fn test_permission_change_during_open() {
         service_clone
             .setattr(
                 inode,
+                None,        // file_handle
                 Some(0o600), // Only owner can read/write now
                 None,
                 None,
