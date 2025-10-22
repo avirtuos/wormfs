@@ -10,6 +10,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WormFS Admin</title>
     <script src="https://unpkg.com/alpinejs@3.13.3/dist/cdn.min.js" defer></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -255,6 +256,21 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             font-weight: 700;
             color: #d39e00;
         }
+
+        .graph-container {
+            background: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            box-shadow: var(--shadow);
+            margin-bottom: 2rem;
+        }
+
+        .graph-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--text);
+        }
     </style>
 </head>
 <body x-data="adminApp()">
@@ -303,20 +319,6 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
             <div class="metrics-grid">
                 <div class="metric-card">
-                    <div class="metric-label">Read Byte Rate (60s avg)</div>
-                    <div class="metric-value">
-                        <span x-text="formatByteRate(readByteRate.avg, readByteRate.peak)"></span>
-                        <span class="metric-unit">Mbps</span>
-                    </div>
-                </div>
-                <div class="metric-card">
-                    <div class="metric-label">Write Byte Rate (60s avg)</div>
-                    <div class="metric-value">
-                        <span x-text="formatByteRate(writeByteRate.avg, writeByteRate.peak)"></span>
-                        <span class="metric-unit">Mbps</span>
-                    </div>
-                </div>
-                <div class="metric-card">
                     <div class="metric-label">Total Write Operations</div>
                     <div class="metric-value" x-text="formatNumber(metrics['filesystem.write_ops.total'])">
                         <span class="metric-unit">ops</span>
@@ -344,6 +346,12 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                         <span class="metric-unit">total</span>
                     </div>
                 </div>
+            </div>
+
+            <!-- Throughput Graph -->
+            <div class="graph-container">
+                <h3 class="graph-title">I/O Throughput (Last 5 Minutes)</h3>
+                <div id="throughputGraph" style="width: 100%; height: 400px;"></div>
             </div>
 
             <div class="metrics-section">
@@ -468,18 +476,18 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 filestoreMetrics: [],  // All filestore metrics
                 bufferedMemoryMetrics: [],  // All filesystem.buffered_memory metrics
 
-                // Byte rate tracking
-                readByteRate: { avg: 0, peak: 0 },
-                writeByteRate: { avg: 0, peak: 0 },
-                byteRateHistory: [],  // Array of {timestamp, readBytes, writeBytes}
+                // Byte rate tracking and graphing
+                byteRateHistory: [],  // Array of {timestamp, readMbps, writeMbps}
                 previousReadBytes: 0,
                 previousWriteBytes: 0,
                 rateUpdateInterval: null,
+                graphInitialized: false,
 
                 init() {
                     this.connectWebSocket();
                     this.fetchMetrics();  // Initial fetch
                     this.fetchComponents();  // Fetch available components
+                    this.initGraph();  // Initialize Plotly graph
                     this.startByteRateTracking();  // Start byte rate updates every second
                 },
 
@@ -562,6 +570,52 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     } catch (e) {
                         console.error('Failed to fetch components:', e);
                     }
+                },
+
+                initGraph() {
+                    const layout = {
+                        autosize: true,
+                        margin: { l: 70, r: 30, t: 30, b: 50 },
+                        xaxis: {
+                            title: 'Time',
+                            type: 'date',
+                            showgrid: true,
+                            gridcolor: '#e5e7eb'
+                        },
+                        yaxis: {
+                            title: 'Throughput (bytes/sec)',
+                            showgrid: true,
+                            gridcolor: '#e5e7eb',
+                            rangemode: 'tozero'
+                        },
+                        showlegend: true,
+                        legend: { x: 0.01, y: 0.99 },
+                        plot_bgcolor: '#ffffff',
+                        paper_bgcolor: '#ffffff'
+                    };
+
+                    const readTrace = {
+                        x: [],
+                        y: [],
+                        mode: 'lines',
+                        name: 'Read',
+                        line: { color: '#3b82f6', width: 2 }
+                    };
+
+                    const writeTrace = {
+                        x: [],
+                        y: [],
+                        mode: 'lines',
+                        name: 'Write',
+                        line: { color: '#10b981', width: 2 }
+                    };
+
+                    Plotly.newPlot('throughputGraph', [readTrace, writeTrace], layout, {
+                        responsive: true,
+                        displayModeBar: false
+                    });
+
+                    this.graphInitialized = true;
                 },
 
                 updateMetrics(newMetrics) {
@@ -667,36 +721,35 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                         writeMbps: writeMbps
                     });
 
-                    // Keep only last 60 seconds
-                    const cutoffTime = now - (60 * 1000);
+                    // Keep only last 300 seconds (5 minutes)
+                    const cutoffTime = now - (300 * 1000);
                     this.byteRateHistory = this.byteRateHistory.filter(
                         entry => entry.timestamp > cutoffTime
                     );
 
-                    // Calculate avg and peak over last 60 seconds
-                    if (this.byteRateHistory.length > 0) {
-                        const readRates = this.byteRateHistory.map(e => e.readMbps);
-                        const writeRates = this.byteRateHistory.map(e => e.writeMbps);
-
-                        this.readByteRate = {
-                            avg: readRates.reduce((a, b) => a + b, 0) / readRates.length,
-                            peak: Math.max(...readRates)
-                        };
-
-                        this.writeByteRate = {
-                            avg: writeRates.reduce((a, b) => a + b, 0) / writeRates.length,
-                            peak: Math.max(...writeRates)
-                        };
-                    }
-
                     // Update previous values
                     this.previousReadBytes = currentReadBytes;
                     this.previousWriteBytes = currentWriteBytes;
+
+                    // Update the graph with new data
+                    this.updateGraph();
                 },
 
-                formatByteRate(avg, peak) {
-                    if (!avg && !peak) return '0 (Peak: 0)';
-                    return `${avg.toFixed(2)} (Peak: ${peak.toFixed(2)})`;
+                updateGraph() {
+                    if (!this.graphInitialized || this.byteRateHistory.length === 0) {
+                        return;
+                    }
+
+                    // Extract timestamps and rates
+                    const timestamps = this.byteRateHistory.map(entry => new Date(entry.timestamp));
+                    const readRates = this.byteRateHistory.map(entry => entry.readMbps * 125000); // Convert Mbps to bytes/sec
+                    const writeRates = this.byteRateHistory.map(entry => entry.writeMbps * 125000);
+
+                    // Update Plotly graph
+                    Plotly.update('throughputGraph', {
+                        x: [timestamps, timestamps],
+                        y: [readRates, writeRates]
+                    }, {}, [0, 1]);
                 }
             };
         }
