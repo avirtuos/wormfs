@@ -136,12 +136,6 @@ pub struct FileSystemServiceImpl {
 
     /// Metrics collector for BufferedFileHandle operations
     buffered_metrics: Arc<BufferedMetricsCollector>,
-
-    /// Peak read throughput observed (MB/s)
-    peak_read_throughput_mbps: Arc<Mutex<f64>>,
-
-    /// Peak write throughput observed (MB/s)
-    peak_write_throughput_mbps: Arc<Mutex<f64>>,
 }
 
 impl FileSystemServiceImpl {
@@ -353,8 +347,6 @@ impl FileSystemServiceImpl {
             lock_extension_task: Arc::new(RwLock::new(None)),
             metrics: None, // Will be set via dependency injection
             buffered_metrics: Arc::new(BufferedMetricsCollector::new()),
-            peak_read_throughput_mbps: Arc::new(Mutex::new(0.0)),
-            peak_write_throughput_mbps: Arc::new(Mutex::new(0.0)),
         }
     }
 
@@ -1192,37 +1184,6 @@ impl FileSystemService for FileSystemServiceImpl {
                         elapsed,
                         crate::metric_service::UnitType::Seconds,
                     );
-
-                    // Calculate and publish throughput metrics
-                    let throughput_mbps = (bytes_read as f64) / elapsed / 1_000_000.0;
-
-                    // Update peak throughput if needed
-                    if let Ok(mut peak) = self.peak_read_throughput_mbps.lock() {
-                        if throughput_mbps > *peak {
-                            *peak = throughput_mbps;
-                        }
-                    }
-
-                    let _ = metrics.publish_gauge(
-                        "filesystem.read_ops.throughput_mbps",
-                        throughput_mbps,
-                        crate::metric_service::UnitType::BytesPerSecond,
-                    );
-
-                    let _ = metrics.publish_gauge(
-                        "filesystem.read_ops.throughput_mbits",
-                        throughput_mbps * 8.0,
-                        crate::metric_service::UnitType::BytesPerSecond,
-                    );
-
-                    // Publish peak throughput
-                    if let Ok(peak) = self.peak_read_throughput_mbps.lock() {
-                        let _ = metrics.publish_gauge(
-                            "filesystem.read_ops.peak_throughput_mbps",
-                            *peak,
-                            crate::metric_service::UnitType::BytesPerSecond,
-                        );
-                    }
                 }
 
                 return Ok(data);
@@ -1350,37 +1311,6 @@ impl FileSystemService for FileSystemServiceImpl {
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
             );
-
-            // Calculate and publish throughput metrics
-            let throughput_mbps = (bytes_read as f64) / elapsed / 1_000_000.0;
-
-            // Update peak throughput if needed
-            if let Ok(mut peak) = self.peak_read_throughput_mbps.lock() {
-                if throughput_mbps > *peak {
-                    *peak = throughput_mbps;
-                }
-            }
-
-            let _ = metrics.publish_gauge(
-                "filesystem.read_ops.throughput_mbps",
-                throughput_mbps,
-                crate::metric_service::UnitType::BytesPerSecond,
-            );
-
-            let _ = metrics.publish_gauge(
-                "filesystem.read_ops.throughput_mbits",
-                throughput_mbps * 8.0,
-                crate::metric_service::UnitType::BytesPerSecond,
-            );
-
-            // Publish peak throughput
-            if let Ok(peak) = self.peak_read_throughput_mbps.lock() {
-                let _ = metrics.publish_gauge(
-                    "filesystem.read_ops.peak_throughput_mbps",
-                    *peak,
-                    crate::metric_service::UnitType::BytesPerSecond,
-                );
-            }
         }
 
         return Ok(data);
@@ -1514,37 +1444,6 @@ impl FileSystemService for FileSystemServiceImpl {
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
             );
-
-            // Calculate and publish throughput metrics
-            let throughput_mbps = (bytes_to_write as f64) / elapsed / 1_000_000.0;
-
-            // Update peak throughput if needed
-            if let Ok(mut peak) = self.peak_write_throughput_mbps.lock() {
-                if throughput_mbps > *peak {
-                    *peak = throughput_mbps;
-                }
-            }
-
-            let _ = metrics.publish_gauge(
-                "filesystem.write_ops.throughput_mbps",
-                throughput_mbps,
-                crate::metric_service::UnitType::BytesPerSecond,
-            );
-
-            let _ = metrics.publish_gauge(
-                "filesystem.write_ops.throughput_mbits",
-                throughput_mbps * 8.0,
-                crate::metric_service::UnitType::BytesPerSecond,
-            );
-
-            // Publish peak throughput
-            if let Ok(peak) = self.peak_write_throughput_mbps.lock() {
-                let _ = metrics.publish_gauge(
-                    "filesystem.write_ops.peak_throughput_mbps",
-                    *peak,
-                    crate::metric_service::UnitType::BytesPerSecond,
-                );
-            }
         }
 
         tracing::info!(
