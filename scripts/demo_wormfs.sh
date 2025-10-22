@@ -214,19 +214,12 @@ main() {
         fail "FUSE not found. Please install fuse3 or macfuse."
     fi
 
-    # Check if binary exists, build if not
-    if [ ! -f "$WORMFS_BINARY" ]; then
-        print_info "WormFS binary not found, building..."
-        echo ""
-        echo "Building WormFS (this may take a few minutes)..."
-        print_command "cargo build --release --features fuser"
-        cd "$PROJECT_ROOT"
-        cargo build --release --features fuser
-        print_success "Build complete"
-    else
-        print_success "WormFS binary found"
-    fi
-
+    echo "Building WormFS (this may take a few minutes)..."
+    print_command "cargo build --release --features fuser"
+    cd "$PROJECT_ROOT"
+    cargo build --release --features fuser
+    print_success "Build complete"
+    
     # Step 2: Create configuration
     print_section "Step 2: Configuration Setup"
 
@@ -554,14 +547,23 @@ EOF
     echo -e "${CYAN}Original MD5: $ORIGINAL_CHECKSUM${NC}"
     print_success "Calculated checksum of staged file"
 
-    # Copy file to WormFS
+    # Copy file to WormFS (with timing)
     print_command "cp $STAGING_FILE $MOUNT_POINT/random.dat"
+    CP_START=$(date +%s.%N)
     cp "$STAGING_FILE" "$MOUNT_POINT/random.dat"
+    CP_END=$(date +%s.%N)
     if [ $? -ne 0 ]; then
         echo -e "${RED}ERROR: Failed to copy file to WormFS${NC}"
         fail "Failed to copy file to WormFS"
     fi
-    print_success "Copied file to WormFS"
+
+    # Calculate write throughput
+    CP_ELAPSED=$(echo "$CP_END - $CP_START" | bc)
+    CP_THROUGHPUT_MBPS=$(echo "scale=2; 300 / $CP_ELAPSED" | bc)
+    CP_THROUGHPUT_MBITS=$(echo "scale=2; $CP_THROUGHPUT_MBPS * 8" | bc)
+
+    print_success "Copied file to WormFS in ${CP_ELAPSED}s"
+    echo -e "${GREEN}Write speed: ${CP_THROUGHPUT_MBPS} MB/s (${CP_THROUGHPUT_MBITS} Mbit/s)${NC}"
 
     sleep 10
 
@@ -569,15 +571,24 @@ EOF
     SIZE=$(stat -f%z "$MOUNT_POINT/random.dat" 2>/dev/null || stat -c%s "$MOUNT_POINT/random.dat" 2>/dev/null)
     print_info "File size in WormFS: $(numfmt --to=iec-i --suffix=B $SIZE)"
 
-    # Calculate checksum of file in WormFS
+    # Calculate checksum of file in WormFS (with timing)
     print_command "md5sum $MOUNT_POINT/random.dat"
+    MD5_START=$(date +%s.%N)
     WORMFS_CHECKSUM=$(md5sum "$MOUNT_POINT/random.dat" | awk '{print $1}')
+    MD5_END=$(date +%s.%N)
     if [ -z "$WORMFS_CHECKSUM" ]; then
         echo -e "${RED}ERROR: Failed to calculate checksum from WormFS (read failed or file corrupted)${NC}"
         fail "Failed to calculate checksum from WormFS (read failed or file corrupted)"
     fi
+
+    # Calculate read throughput
+    MD5_ELAPSED=$(echo "$MD5_END - $MD5_START" | bc)
+    MD5_THROUGHPUT_MBPS=$(echo "scale=2; 300 / $MD5_ELAPSED" | bc)
+    MD5_THROUGHPUT_MBITS=$(echo "scale=2; $MD5_THROUGHPUT_MBPS * 8" | bc)
+
     echo -e "${CYAN}WormFS MD5:  $WORMFS_CHECKSUM${NC}"
-    print_success "Calculated checksum from WormFS"
+    print_success "Calculated checksum from WormFS in ${MD5_ELAPSED}s"
+    echo -e "${GREEN}Read speed: ${MD5_THROUGHPUT_MBPS} MB/s (${MD5_THROUGHPUT_MBITS} Mbit/s)${NC}"
 
     # Compare checksums
     echo ""
