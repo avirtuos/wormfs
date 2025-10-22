@@ -565,7 +565,7 @@ EOF
     print_success "Copied file to WormFS in ${CP_ELAPSED}s"
     echo -e "${GREEN}Write speed: ${CP_THROUGHPUT_MBPS} MB/s (${CP_THROUGHPUT_MBITS} Mbit/s)${NC}"
 
-    sleep 10
+    sleep 30
 
     # Verify size
     SIZE=$(stat -f%z "$MOUNT_POINT/random.dat" 2>/dev/null || stat -c%s "$MOUNT_POINT/random.dat" 2>/dev/null)

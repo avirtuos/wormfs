@@ -303,6 +303,20 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
             <div class="metrics-grid">
                 <div class="metric-card">
+                    <div class="metric-label">Read Byte Rate (60s avg)</div>
+                    <div class="metric-value">
+                        <span x-text="formatByteRate(readByteRate.avg, readByteRate.peak)"></span>
+                        <span class="metric-unit">Mbps</span>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Write Byte Rate (60s avg)</div>
+                    <div class="metric-value">
+                        <span x-text="formatByteRate(writeByteRate.avg, writeByteRate.peak)"></span>
+                        <span class="metric-unit">Mbps</span>
+                    </div>
+                </div>
+                <div class="metric-card">
                     <div class="metric-label">Total Write Operations</div>
                     <div class="metric-value" x-text="formatNumber(metrics['filesystem.write_ops.total'])">
                         <span class="metric-unit">ops</span>
@@ -454,10 +468,19 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 filestoreMetrics: [],  // All filestore metrics
                 bufferedMemoryMetrics: [],  // All filesystem.buffered_memory metrics
 
+                // Byte rate tracking
+                readByteRate: { avg: 0, peak: 0 },
+                writeByteRate: { avg: 0, peak: 0 },
+                byteRateHistory: [],  // Array of {timestamp, readBytes, writeBytes}
+                previousReadBytes: 0,
+                previousWriteBytes: 0,
+                rateUpdateInterval: null,
+
                 init() {
                     this.connectWebSocket();
                     this.fetchMetrics();  // Initial fetch
                     this.fetchComponents();  // Fetch available components
+                    this.startByteRateTracking();  // Start byte rate updates every second
                 },
 
                 connectWebSocket() {
@@ -607,6 +630,65 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
                     const ratio = physicalBytes / logicalBytes;
                     return ratio.toFixed(2) + 'x';
+                },
+
+                startByteRateTracking() {
+                    // Update byte rates every second
+                    this.rateUpdateInterval = setInterval(() => {
+                        this.updateByteRates();
+                    }, 1000);
+                },
+
+                updateByteRates() {
+                    const currentReadBytes = this.metrics['filesystem.read_ops.bytes'] || 0;
+                    const currentWriteBytes = this.metrics['filesystem.write_ops.bytes'] || 0;
+                    const now = Date.now();
+
+                    // Calculate rates in bits per second
+                    const readBytesPerSecond = currentReadBytes - this.previousReadBytes;
+                    const writeBytesPerSecond = currentWriteBytes - this.previousWriteBytes;
+
+                    // Convert to Mbps (bits per second / 1,000,000)
+                    const readMbps = (readBytesPerSecond * 8) / 1_000_000;
+                    const writeMbps = (writeBytesPerSecond * 8) / 1_000_000;
+
+                    // Add to history
+                    this.byteRateHistory.push({
+                        timestamp: now,
+                        readMbps: readMbps,
+                        writeMbps: writeMbps
+                    });
+
+                    // Keep only last 60 seconds
+                    const cutoffTime = now - (60 * 1000);
+                    this.byteRateHistory = this.byteRateHistory.filter(
+                        entry => entry.timestamp > cutoffTime
+                    );
+
+                    // Calculate avg and peak over last 60 seconds
+                    if (this.byteRateHistory.length > 0) {
+                        const readRates = this.byteRateHistory.map(e => e.readMbps);
+                        const writeRates = this.byteRateHistory.map(e => e.writeMbps);
+
+                        this.readByteRate = {
+                            avg: readRates.reduce((a, b) => a + b, 0) / readRates.length,
+                            peak: Math.max(...readRates)
+                        };
+
+                        this.writeByteRate = {
+                            avg: writeRates.reduce((a, b) => a + b, 0) / writeRates.length,
+                            peak: Math.max(...writeRates)
+                        };
+                    }
+
+                    // Update previous values
+                    this.previousReadBytes = currentReadBytes;
+                    this.previousWriteBytes = currentWriteBytes;
+                },
+
+                formatByteRate(avg, peak) {
+                    if (!avg && !peak) return '0 (Peak: 0)';
+                    return `${avg.toFixed(2)} (Peak: ${peak.toFixed(2)})`;
                 }
             };
         }
