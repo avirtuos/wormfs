@@ -178,7 +178,7 @@ async fn test_incremental_write_5mb_file() {
         .expect("Failed to open file for reading");
 
     let read_data = service
-        .read(inode, 0, TOTAL_SIZE as u32, uid, gid, client_id)
+        .read(inode, 0, 0, TOTAL_SIZE as u32, uid, gid, client_id)
         .await
         .expect("Failed to read file");
 

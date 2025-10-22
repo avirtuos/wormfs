@@ -214,7 +214,9 @@ async fn test_access_file_with_execute_on_all_dirs() {
     let (fh, _attr) = result.unwrap();
 
     // Try to read the file
-    let read_result = service.read(file.ino, 0, 1024, 2000, 2000, client_id).await;
+    let read_result = service
+        .read(file.ino, 0, 0, 1024, 2000, 2000, client_id)
+        .await;
 
     assert!(
         read_result.is_ok(),
@@ -440,6 +442,7 @@ async fn test_rmdir_requires_execute_on_parent() {
     service
         .setattr(
             parent.ino,
+            None,        // file_handle
             Some(0o766), // rwxrw-rw- - write but no execute for others
             None,
             None,
@@ -485,6 +488,7 @@ async fn test_unlink_requires_execute_on_parent() {
     service
         .setattr(
             parent.ino,
+            None,        // file_handle
             Some(0o766), // rwxrw-rw- - write but no execute for others
             None,
             None,

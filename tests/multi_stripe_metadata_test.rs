@@ -119,7 +119,7 @@ async fn test_multi_stripe_metadata_persistence() {
 
     // Read back and verify
     let read_data = service
-        .read(inode, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read");
 
@@ -189,7 +189,7 @@ async fn test_stripe_lookup_at_boundaries() {
 
     for (offset, size, expected_byte, description) in test_cases {
         let data = service
-            .read(inode, offset, size, 1000, 1000, client_id)
+            .read(inode, 0, offset, size, 1000, 1000, client_id)
             .await
             .expect(&format!("Failed to read at {}", description));
 
@@ -240,6 +240,7 @@ async fn test_stripe_metadata_after_truncation() {
     service
         .setattr(
             inode,
+            None, // file_handle
             None,
             None,
             None,
@@ -255,7 +256,7 @@ async fn test_stripe_metadata_after_truncation() {
 
     // Read entire file - should get 6MB
     let data = service
-        .read(inode, 0, 12 * 1024 * 1024, 1000, 1000, client_id)
+        .read(inode, 0, 0, 12 * 1024 * 1024, 1000, 1000, client_id)
         .await
         .expect("Failed to read");
 
@@ -313,7 +314,7 @@ async fn test_large_file_stripe_consistency() {
 
     // Read entire file
     let read_data = service
-        .read(inode, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read full file");
 
@@ -325,7 +326,7 @@ async fn test_large_file_stripe_consistency() {
     let middle_size = STRIPE_SIZE as u32; // Read 4MB starting at 6MB
 
     let middle_data = service
-        .read(inode, middle_offset, middle_size, 1000, 1000, client_id)
+        .read(inode, 0, middle_offset, middle_size, 1000, 1000, client_id)
         .await
         .expect("Failed to read middle section");
 

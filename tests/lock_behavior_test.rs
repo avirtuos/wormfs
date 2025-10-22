@@ -242,7 +242,7 @@ async fn test_concurrent_reads_same_file_should_succeed() {
 
             // Read the data
             let data = service_clone
-                .read(inode, 0, 1024, 1000, 1000, client_id)
+                .read(inode, 0, 0, 1024, 1000, 1000, client_id)
                 .await
                 .expect(&format!("Task {} failed to read", task_id));
 
@@ -343,7 +343,7 @@ async fn test_concurrent_read_during_write_should_succeed() {
 
         // Read data (may see old or new data - no guarantees)
         let data = service_clone
-            .read(inode, 0, 1024, 1000, 1000, client_id)
+            .read(inode, 0, 0, 1024, 1000, 1000, client_id)
             .await
             .expect("Reader failed to read");
 

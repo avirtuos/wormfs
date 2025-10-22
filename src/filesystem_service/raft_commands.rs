@@ -772,7 +772,10 @@ impl StorageRaftMemberStub {
                         FsFileType::RegularFile => MetaFileType::RegularFile,
                         FsFileType::Directory => MetaFileType::Directory,
                         FsFileType::Symlink => MetaFileType::Symlink,
-                        FsFileType::NamedPipe | FsFileType::BlockDevice | FsFileType::CharDevice | FsFileType::Socket => {
+                        FsFileType::NamedPipe
+                        | FsFileType::BlockDevice
+                        | FsFileType::CharDevice
+                        | FsFileType::Socket => {
                             // Special files don't have data in WormFS, so they shouldn't reach here
                             trace!(
                                 file_type = ?attributes.kind,
@@ -803,7 +806,10 @@ impl StorageRaftMemberStub {
                                 .update_file(file_id, metadata)
                                 .await
                                 .map_err(|e| {
-                                    RaftError::OperationFailed(format!("Failed to update file attributes: {}", e))
+                                    RaftError::OperationFailed(format!(
+                                        "Failed to update file attributes: {}",
+                                        e
+                                    ))
                                 })?;
 
                             trace!(

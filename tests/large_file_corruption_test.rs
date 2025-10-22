@@ -147,7 +147,7 @@ async fn test_30mb_file_integrity() {
     // Read back the entire file
     println!("Reading back entire file...");
     let read_data = service
-        .read(inode, 0, FILE_SIZE as u32, 1000, 1000, client_id)
+        .read(inode, 0, 0, FILE_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read file");
 

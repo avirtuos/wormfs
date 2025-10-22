@@ -185,6 +185,7 @@ pub trait FileSystemService: Send + Sync {
     /// # Arguments
     ///
     /// * `inode` - File inode
+    /// * `file_handle` - File handle from open() (used to access BufferedFileHandle for read-through caching)
     /// * `offset` - Byte offset in file
     /// * `size` - Number of bytes to read
     /// * `uid` - User ID of the requesting process
@@ -201,6 +202,7 @@ pub trait FileSystemService: Send + Sync {
     async fn read(
         &self,
         inode: u64,
+        file_handle: u64,
         offset: u64,
         size: u32,
         uid: u32,
@@ -311,6 +313,34 @@ pub trait FileSystemService: Send + Sync {
     /// - File is not a symbolic link
     async fn readlink(&self, inode: u64) -> Result<String, Error>;
 
+    /// Flush file data.
+    ///
+    /// Called when a file descriptor is closed (may be called multiple times for dup'd fds).
+    /// Ensures buffered writes are persisted to storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_handle` - The file handle to flush
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the flush fails or file handle is not found.
+    async fn flush(&self, file_handle: u64) -> Result<(), Error>;
+
+    /// Synchronize file data to storage.
+    ///
+    /// Forces all buffered writes to be written to disk, guaranteeing durability.
+    /// Unlike flush(), this ensures data reaches persistent storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_handle` - The file handle to synchronize
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sync fails or file handle is not found.
+    async fn fsync(&self, file_handle: u64) -> Result<(), Error>;
+
     /// Release (close) an open file handle.
     ///
     /// Called when a file handle is closed. Cleans up open file tracking.
@@ -419,6 +449,7 @@ pub trait FileSystemService: Send + Sync {
     /// # Arguments
     ///
     /// * `inode` - File inode
+    /// * `file_handle` - Optional file handle for more efficient operations
     /// * `mode` - New permissions (optional)
     /// * `new_uid` - New owner user ID (optional)
     /// * `new_gid` - New owner group ID (optional)
@@ -440,6 +471,7 @@ pub trait FileSystemService: Send + Sync {
     async fn setattr(
         &self,
         inode: u64,
+        file_handle: Option<u64>,
         mode: Option<u32>,
         new_uid: Option<u32>,
         new_gid: Option<u32>,

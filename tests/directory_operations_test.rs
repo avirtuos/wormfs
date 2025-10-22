@@ -344,6 +344,7 @@ async fn test_rmdir_permission_denied() {
     service
         .setattr(
             parent.ino,
+            None,                 // file_handle
             Some(0o755 & !0o002), // Remove write for others
             None,
             None,

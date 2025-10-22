@@ -1267,6 +1267,33 @@ impl BufferedFileHandle {
         let inner = self.inner.lock().unwrap();
         inner.attributes.clone()
     }
+
+    /// Get file metadata by inode (cached, includes buffered changes).
+    ///
+    /// This provides a fast path for metadata lookups that avoids hitting MetadataStore.
+    /// The returned FileAttr includes any buffered size/mtime changes that haven't been flushed yet.
+    ///
+    /// # Returns
+    ///
+    /// Cached file attributes for this handle's inode.
+    pub fn get_file_by_inode(&self) -> FileAttr {
+        // Return cached attributes (same as attributes() but named to match MetadataStore API)
+        let inner = self.inner.lock().unwrap();
+        inner.attributes.clone()
+    }
+
+    /// Update cached file attributes.
+    ///
+    /// This allows external code (like setattr()) to update the cached attributes
+    /// when metadata changes occur outside of normal write operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `attrs` - The new file attributes to cache
+    pub fn update_attributes(&self, attrs: FileAttr) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.attributes = attrs;
+    }
 }
 
 /// Types of operations that may require pre-flush.
