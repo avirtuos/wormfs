@@ -29,6 +29,9 @@ async fn test_io_amplification_tracking() {
         max_concurrent_operations: 100,
         verification_interval: Duration::from_secs(3600),
         orphan_cleanup_age: Duration::from_secs(3600),
+        stripe_cache_size_mb: 256,
+        stripe_cache_ttl_secs: 3600,
+        stripe_cache_tti_secs: 600,
     };
 
     // Create file store
@@ -202,6 +205,9 @@ async fn test_no_amplification_for_aligned_writes() {
         max_concurrent_operations: 100,
         verification_interval: Duration::from_secs(3600),
         orphan_cleanup_age: Duration::from_secs(3600),
+        stripe_cache_size_mb: 256,
+        stripe_cache_ttl_secs: 3600,
+        stripe_cache_tti_secs: 600,
     };
 
     let file_store =

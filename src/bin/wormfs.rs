@@ -393,6 +393,9 @@ fn create_default_config(
         max_concurrent_operations: 100,
         verification_interval: std::time::Duration::from_secs(3600),
         orphan_cleanup_age: std::time::Duration::from_secs(3600),
+        stripe_cache_size_mb: 256,
+        stripe_cache_ttl_secs: 3600,
+        stripe_cache_tti_secs: 600,
     };
 
     let filesystem_config = FsConfig {

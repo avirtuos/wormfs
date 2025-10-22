@@ -208,6 +208,15 @@ pub struct Config {
     /// Orphan cleanup age threshold (in seconds when serialized)
     #[serde(with = "serde_duration_seconds")]
     pub orphan_cleanup_age: Duration,
+
+    /// Stripe cache maximum size in megabytes
+    pub stripe_cache_size_mb: u64,
+
+    /// Stripe cache time-to-live in seconds (evict after this time regardless of usage)
+    pub stripe_cache_ttl_secs: u64,
+
+    /// Stripe cache time-to-idle in seconds (evict if not accessed for this time)
+    pub stripe_cache_tti_secs: u64,
 }
 
 impl Default for Config {
@@ -220,6 +229,9 @@ impl Default for Config {
             max_concurrent_operations: 100,
             verification_interval: Duration::from_secs(3600),
             orphan_cleanup_age: Duration::from_secs(3600),
+            stripe_cache_size_mb: 256,
+            stripe_cache_ttl_secs: 3600, // 1 hour
+            stripe_cache_tti_secs: 600,  // 10 minutes
         }
     }
 }

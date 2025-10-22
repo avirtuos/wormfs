@@ -7,9 +7,11 @@ use super::{
     StoragePolicy, StripeId, StripeMetadata, VerificationResult,
 };
 use async_trait::async_trait;
+use moka::future::Cache;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock as TokioRwLock;
 use tokio::time::Instant;
 
@@ -32,6 +34,10 @@ struct FileStoreInner {
 
     /// Optional metrics service for instrumentation (sync lock for fire-and-forget publishing)
     metrics: std::sync::RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>,
+
+    /// In-memory cache for decoded stripe data
+    /// Key: StripeId, Value: Vec<u8> (decoded stripe data)
+    stripe_cache: Cache<StripeId, Vec<u8>>,
     // NOTE: MetadataStore integration will be added in Phase 2+
     // For Phase 1, FileStore operates independently
 }
@@ -255,10 +261,21 @@ impl FileStore for FileStoreImpl {
             disks.insert(disk_id, disk_info);
         }
 
+        // Initialize stripe cache with configured settings
+        let stripe_cache = Cache::builder()
+            .max_capacity(config.stripe_cache_size_mb * 1_024 * 1_024)
+            .weigher(|_key: &StripeId, value: &Vec<u8>| -> u32 {
+                value.len().try_into().unwrap_or(u32::MAX)
+            })
+            .time_to_live(Duration::from_secs(config.stripe_cache_ttl_secs))
+            .time_to_idle(Duration::from_secs(config.stripe_cache_tti_secs))
+            .build();
+
         let inner = FileStoreInner {
             config,
             disks: TokioRwLock::new(disks),
             metrics: std::sync::RwLock::new(None),
+            stripe_cache,
         };
 
         Ok(Self {
@@ -410,6 +427,24 @@ impl FileStore for FileStoreImpl {
             chunks.len()
         );
 
+        // Check cache first
+        if let Some(cached_data) = self.inner.stripe_cache.get(&stripe_id).await {
+            eprintln!("[FileStore] Cache HIT for stripe_id={:?}", stripe_id);
+
+            // Publish cache hit metric
+            if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+                let _ = metrics.publish_counter(
+                    "filestore.stripe_cache.hits",
+                    1,
+                    crate::metric_service::UnitType::Operations,
+                );
+            }
+
+            return Ok(cached_data);
+        }
+
+        eprintln!("[FileStore] Cache MISS for stripe_id={:?}", stripe_id);
+
         // Start timing for latency metric
         let start = Instant::now();
 
@@ -522,7 +557,33 @@ impl FileStore for FileStoreImpl {
                 elapsed,
                 crate::metric_service::UnitType::Seconds,
             );
+
+            // Publish cache miss metric
+            let _ = metrics.publish_counter(
+                "filestore.stripe_cache.misses",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            // Publish cache size metrics
+            let _ = metrics.publish_gauge(
+                "filestore.stripe_cache.size_bytes",
+                self.inner.stripe_cache.weighted_size() as f64,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            let _ = metrics.publish_gauge(
+                "filestore.stripe_cache.entry_count",
+                self.inner.stripe_cache.entry_count() as f64,
+                crate::metric_service::UnitType::Operations,
+            );
         }
+
+        // Store decoded stripe in cache
+        self.inner
+            .stripe_cache
+            .insert(stripe_id, data.clone())
+            .await;
 
         Ok(data)
     }
@@ -606,6 +667,9 @@ impl FileStore for FileStoreImpl {
                 crate::metric_service::UnitType::Seconds,
             );
         }
+
+        // Invalidate cached stripe since we're creating a new version
+        self.inner.stripe_cache.invalidate(&stripe_id).await;
 
         Ok(result)
     }
@@ -784,6 +848,9 @@ mod tests {
             max_concurrent_operations: 10,
             verification_interval: std::time::Duration::from_secs(3600),
             orphan_cleanup_age: std::time::Duration::from_secs(3600),
+            stripe_cache_size_mb: 256,
+            stripe_cache_ttl_secs: 3600,
+            stripe_cache_tti_secs: 600,
         };
 
         let mut store = FileStoreImpl::new(config).unwrap();
