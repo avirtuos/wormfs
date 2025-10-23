@@ -1036,6 +1036,11 @@ impl MetadataStore for MetadataStoreImpl {
                 ))
             });
 
+        // Invalidate cache on successful allocation (new chunks added to stripe)
+        if result.is_ok() {
+            self.inner.cache.invalidate_stripe(&stripe_id).await;
+        }
+
         // Publish metrics
         self.publish_metrics("allocate_chunks", "write", start, result.is_err());
 
@@ -1191,6 +1196,11 @@ impl MetadataStore for MetadataStoreImpl {
         disk_id: DiskId,
     ) -> Result<(), Error> {
         let start = tokio::time::Instant::now();
+
+        // Query chunk first to get stripe_id for cache invalidation
+        let chunk = self.get_chunk(chunk_id).await?;
+        let stripe_id = chunk.stripe_id;
+
         let node_id_val = node_id.as_u64();
         let disk_id_val = disk_id.as_u64();
 
@@ -1220,6 +1230,11 @@ impl MetadataStore for MetadataStoreImpl {
         }
         .await;
 
+        // Invalidate cache on successful update (chunk location changed)
+        if result.is_ok() {
+            self.inner.cache.invalidate_stripe(&stripe_id).await;
+        }
+
         // Publish metrics
         self.publish_metrics("update_chunk_location", "write", start, result.is_err());
 
@@ -1228,6 +1243,10 @@ impl MetadataStore for MetadataStoreImpl {
 
     async fn mark_chunk_corrupt(&self, chunk_id: ChunkId) -> Result<(), Error> {
         let start = tokio::time::Instant::now();
+
+        // Query chunk first to get stripe_id for cache invalidation
+        let chunk = self.get_chunk(chunk_id).await?;
+        let stripe_id = chunk.stripe_id;
 
         let result = async {
             let rows_affected = self
@@ -1255,6 +1274,11 @@ impl MetadataStore for MetadataStoreImpl {
         }
         .await;
 
+        // Invalidate cache on successful update (chunk status changed)
+        if result.is_ok() {
+            self.inner.cache.invalidate_stripe(&stripe_id).await;
+        }
+
         // Publish metrics
         self.publish_metrics("mark_chunk_corrupt", "write", start, result.is_err());
 
@@ -1267,6 +1291,11 @@ impl MetadataStore for MetadataStoreImpl {
         verified_at: SystemTime,
     ) -> Result<(), Error> {
         let start = tokio::time::Instant::now();
+
+        // Query chunk first to get stripe_id for cache invalidation
+        let chunk = self.get_chunk(chunk_id).await?;
+        let stripe_id = chunk.stripe_id;
+
         let verified_at_unix = system_time_to_unix(verified_at);
 
         let result = async {
@@ -1294,6 +1323,11 @@ impl MetadataStore for MetadataStoreImpl {
             Ok(())
         }
         .await;
+
+        // Invalidate cache on successful update (verification timestamp changed)
+        if result.is_ok() {
+            self.inner.cache.invalidate_stripe(&stripe_id).await;
+        }
 
         // Publish metrics
         self.publish_metrics("update_chunk_verification", "write", start, result.is_err());
