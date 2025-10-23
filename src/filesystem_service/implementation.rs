@@ -939,7 +939,10 @@ impl FileSystemServiceImpl {
         let config = BufferedFileHandleConfig {
             max_memory_bytes: self.config.buffered_file_handle_config.max_memory_bytes,
             max_flush_interval: self.config.buffered_file_handle_config.max_flush_interval,
-            max_writes_before_flush: self.config.buffered_file_handle_config.max_writes_before_flush,
+            max_writes_before_flush: self
+                .config
+                .buffered_file_handle_config
+                .max_writes_before_flush,
             max_stripe_size, // Dynamically computed from FileStore config
         };
 
@@ -1114,13 +1117,8 @@ impl FileSystemServiceImpl {
         // Note: metrics_task runs independently and doesn't need to be tracked for shutdown
 
         tracing::info!(
-            "Background tasks started (lock extension interval: {:?}, metrics interval: 5s, stripe cache: {})",
-            self.config.lock_extend_interval,
-            if self.config.enable_stripe_cache {
-                "enabled"
-            } else {
-                "disabled"
-            }
+            "Background tasks started (lock extension interval: {:?}, metrics interval: 5s)",
+            self.config.lock_extend_interval
         );
     }
 
@@ -1715,17 +1713,14 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 5: Generate unique file handle
         let file_handle = self.next_file_handle.fetch_add(1, Ordering::SeqCst);
 
-        // Step 5a: Create BufferedFileHandle for all opens (provides metadata caching)
-        // Previously only created for write mode, but now used for all opens to:
-        // 1. Cache file metadata and avoid MetadataStore queries
-        // 2. Provide read-through caching for both reads and writes
-        // 3. Simplify code paths by eliminating buffered vs direct path forks
-        let buffered_handle = if self.config.enable_stripe_cache {
-            let attrs = self.file_record_to_attr(&record);
-            Some(self.create_buffered_handle(record.file_id, inode, attrs))
-        } else {
-            None
-        };
+        // Step 5a: Create BufferedFileHandle for all opens
+        // BufferedFileHandle is mandatory and provides:
+        // 1. Metadata caching to avoid MetadataStore queries
+        // 2. Read-through caching for both reads and writes
+        // 3. Write buffering and coalescing to reduce I/O amplification
+        // 4. Unified code path for all file operations
+        let attrs = self.file_record_to_attr(&record);
+        let buffered_handle = Some(self.create_buffered_handle(record.file_id, inode, attrs));
 
         // Step 6: Create OpenFile state
         let open_file = Arc::new(OpenFile {
@@ -1836,162 +1831,46 @@ impl FileSystemService for FileSystemServiceImpl {
             gid
         );
 
-        // Fast path: Use BufferedFileHandle if file_handle is valid (non-zero)
-        if file_handle != 0 {
-            let buffered_handle = {
-                let open_files = self
-                    .open_files
-                    .read()
-                    .expect("open_files lock poisoned - indicates panic in file operation");
-                open_files
-                    .get(&file_handle)
-                    .and_then(|of| of.buffered_handle.clone())
-            };
-
-            if let Some(handle) = buffered_handle {
-                tracing::trace!(
-                    "read: Using BufferedFileHandle for file_handle={}, inode={}",
-                    file_handle,
-                    inode
-                );
-
-                // BufferedFileHandle.read() automatically handles:
-                // - Read-your-writes consistency
-                // - Permission checks
-                // - Sparse regions
-                // - Stripe reading
-                let data = handle.read(offset, size).await?;
-
-                // Record metrics
-                if let Some(ref metrics) = self.metrics {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let bytes_read = data.len() as u64;
-
-                    let _ = metrics.publish_counter(
-                        "filesystem.read_ops.total",
-                        1,
-                        crate::metric_service::UnitType::Operations,
-                    );
-
-                    let _ = metrics.publish_counter(
-                        "filesystem.read_ops.bytes",
-                        bytes_read,
-                        crate::metric_service::UnitType::Bytes,
-                    );
-
-                    let _ = metrics.publish_histogram(
-                        "filesystem.read_ops.latency",
-                        elapsed,
-                        crate::metric_service::UnitType::Seconds,
-                    );
-                }
-
-                self.api_metrics
-                    .record_call("read", start.elapsed().as_secs_f64());
-                return Ok(data);
-            }
-        }
-
-        // Slow path: Handleless read (file_handle=0 or invalid)
-        // Used by tests and direct inode reads
-        tracing::trace!("read: Handleless read for inode={}", inode);
-
-        // Get file metadata and check permissions
-        let record = self
-            .metadata_store
-            .get_file_by_inode(inode)
-            .await
-            .map_err(|e| self.convert_metadata_error(e))?;
-
-        // Check read permission
-        crate::filesystem_service::permissions::check_read_permission(
-            uid,
-            gid,
-            record.uid,
-            record.gid,
-            record.permissions,
-        )
-        .map_err(|_| Error::PermissionDenied(inode))?;
-
-        // Check bounds
-        if offset >= record.size {
+        // Require valid file_handle with BufferedFileHandle
+        // All reads must use open() first to get a file_handle
+        if file_handle == 0 {
             self.api_metrics
                 .record_call("read", start.elapsed().as_secs_f64());
-            return Ok(Vec::new()); // EOF
+            return Err(Error::InvalidFileHandle(file_handle));
         }
 
-        // Calculate actual read size
-        let remaining = record.size - offset;
-        let actual_size = std::cmp::min(size as u64, remaining) as usize;
+        // Get BufferedFileHandle from OpenFile
+        let buffered_handle = {
+            let open_files = self
+                .open_files
+                .read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
+            open_files
+                .get(&file_handle)
+                .and_then(|of| of.buffered_handle.clone())
+        };
 
-        // Read from file store
-        let mut result = vec![0u8; actual_size];
-        let mut bytes_read = 0;
+        // BufferedFileHandle is mandatory for all reads
+        let handle = buffered_handle.ok_or_else(|| {
+            tracing::error!(
+                "read: Missing BufferedFileHandle for file_handle={} - this should never happen",
+                file_handle
+            );
+            Error::InvalidFileHandle(file_handle)
+        })?;
 
-        while bytes_read < actual_size {
-            let current_offset = offset + bytes_read as u64;
-            let stripe_size = self.stripe_size();
-            let stripe_idx = current_offset / stripe_size;
+        tracing::trace!(
+            "read: Using BufferedFileHandle for file_handle={}, inode={}",
+            file_handle,
+            inode
+        );
 
-            // Try to get stripe at this offset
-            // Returns error if stripe doesn't exist (sparse region)
-            let stripe_result = self
-                .metadata_store
-                .get_stripe_at_offset(record.file_id, stripe_idx * stripe_size)
-                .await;
-
-            match stripe_result {
-                Ok(stripe) => {
-                    // Read from this stripe
-                    let stripe_offset = current_offset % stripe_size;
-                    let remaining_in_request = actual_size - bytes_read;
-                    let remaining_in_stripe = (stripe_size - stripe_offset) as usize;
-                    let to_read = std::cmp::min(remaining_in_request, remaining_in_stripe);
-
-                    // Get chunks for this stripe
-                    let chunks = self
-                        .metadata_store
-                        .get_stripe_chunks(stripe.stripe_id)
-                        .await
-                        .map_err(|e| self.convert_metadata_error(e))?;
-
-                    let chunk_metadata: Vec<_> = chunks
-                        .into_iter()
-                        .map(|c| crate::file_store::types::ChunkMetadata {
-                            chunk_id: c.chunk_id,
-                            node_id: c.node_id,
-                            disk_id: c.disk_id,
-                            chunk_index: c.chunk_index,
-                        })
-                        .collect();
-
-                    let stripe_data = self
-                        .file_store
-                        .read_stripe(record.file_id, stripe.stripe_id, chunk_metadata)
-                        .await
-                        .map_err(|e| Error::Internal(format!("FileStore read failed: {}", e)))?;
-
-                    let start_pos = stripe_offset as usize;
-                    let end_pos = start_pos + to_read;
-                    result[bytes_read..bytes_read + to_read]
-                        .copy_from_slice(&stripe_data[start_pos..end_pos]);
-
-                    bytes_read += to_read;
-                }
-                Err(_) => {
-                    // Sparse region - fill with zeros
-                    let stripe_offset = current_offset % stripe_size;
-                    let remaining_in_request = actual_size - bytes_read;
-                    let remaining_in_stripe = (stripe_size - stripe_offset) as usize;
-                    let to_read = std::cmp::min(remaining_in_request, remaining_in_stripe);
-
-                    // result is already zero-initialized
-                    bytes_read += to_read;
-                }
-            }
-        }
-
-        let data = result;
+        // BufferedFileHandle.read() automatically handles:
+        // - Read-your-writes consistency
+        // - Permission checks
+        // - Sparse regions
+        // - Stripe reading
+        let data = handle.read(offset, size).await?;
 
         // Record metrics
         if let Some(ref metrics) = self.metrics {
@@ -2019,7 +1898,7 @@ impl FileSystemService for FileSystemServiceImpl {
 
         self.api_metrics
             .record_call("read", start.elapsed().as_secs_f64());
-        return Ok(data);
+        Ok(data)
     }
 
     async fn write(
@@ -3645,7 +3524,7 @@ mod tests {
         let result = service
             .read(
                 file_attr.ino,
-                0,
+                fh,
                 u64::MAX - 100,
                 1000,
                 TEST_UID,
@@ -3685,9 +3564,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Try to read as a different user (uid=2000) - should fail
+        // Try to open for read as a different user (uid=2000) - should fail
         let result = service
-            .read(file_attr.ino, 0, 0, 100, 2000, 2000, client_id)
+            .open(file_attr.ino, libc::O_RDONLY as u32, 2000, 2000, client_id)
             .await;
 
         assert!(result.is_err(), "Should deny read access to non-owner");
@@ -3760,21 +3639,26 @@ mod tests {
             .await
             .unwrap();
 
-        // Try to read as the owner (uid=1000) - should FAIL
+        // Try to open for read as the owner (uid=1000) - should FAIL
         // Even though group has read permission, owner permissions take precedence
         let result = service
-            .read(file_attr.ino, 0, 0, 100, 1000, 1000, client_id)
+            .open(file_attr.ino, libc::O_RDONLY as u32, 1000, 1000, client_id)
             .await;
 
         assert!(result.is_err(), "Owner should be denied due to precedence");
         assert!(matches!(result, Err(Error::PermissionDenied(_))));
 
-        // Try to read as a group member (uid=2000, gid=1000) - should SUCCEED
+        // Try to open for read as a group member (uid=2000, gid=1000) - should SUCCEED
         let result = service
-            .read(file_attr.ino, 0, 0, 100, 2000, 1000, client_id)
+            .open(file_attr.ino, libc::O_RDONLY as u32, 2000, 1000, client_id)
             .await;
 
         assert!(result.is_ok(), "Group member should be able to read");
+
+        // Clean up
+        if let Ok((fh, _)) = result {
+            service.release(fh).await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -4079,7 +3963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_with_invalid_file_handle_uses_fallback() {
+    async fn test_read_with_invalid_file_handle_returns_error() {
         let service = create_test_service().await;
         service.initialize_root().await.unwrap();
         let client_id = ClientId::new(100);
@@ -4091,7 +3975,7 @@ mod tests {
             .unwrap();
 
         // Try to read with an invalid file handle (non-zero but not open)
-        // Should fall back to slow path using inode
+        // Should return InvalidFileHandle error (no fallback path anymore)
         let invalid_fh = 99999;
         let result = service
             .read(
@@ -4105,8 +3989,9 @@ mod tests {
             )
             .await;
 
-        // Should succeed using fallback path (reading from unopened file)
-        assert!(result.is_ok());
+        // Should fail with InvalidFileHandle error
+        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::InvalidFileHandle(_))));
     }
 
     #[tokio::test]

@@ -163,7 +163,7 @@ async fn test_writes_to_multiple_stripes() {
 
     // Open file for writing
     let (fh, _) = service
-        .open(attrs.ino, libc::O_WRONLY as u32, 1000, 1000, client_id)
+        .open(attrs.ino, libc::O_RDWR as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -205,7 +205,7 @@ async fn test_writes_to_multiple_stripes() {
         let data = service
             .read(
                 attrs.ino,
-                0,
+                fh,
                 offset,
                 STRIPE_SIZE as u32,
                 1000,
@@ -317,9 +317,9 @@ async fn test_write_spanning_many_stripes() {
         .await
         .expect("Failed to create file");
 
-    // Open for writing
+    // Open for read/write
     let (fh, _) = service
-        .open(attrs.ino, libc::O_WRONLY as u32, 1000, 1000, client_id)
+        .open(attrs.ino, libc::O_RDWR as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -353,7 +353,7 @@ async fn test_write_spanning_many_stripes() {
 
     // Read back and verify
     let read_data = service
-        .read(attrs.ino, 0, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
+        .read(attrs.ino, fh, 0, TOTAL_SIZE as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read large file");
 
@@ -382,7 +382,7 @@ async fn test_interleaved_stripe_writes() {
         .expect("Failed to create file");
 
     let (fh, _) = service
-        .open(attrs.ino, libc::O_WRONLY as u32, 1000, 1000, client_id)
+        .open(attrs.ino, libc::O_RDWR as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to open file");
 
@@ -431,7 +431,7 @@ async fn test_interleaved_stripe_writes() {
         let data = service
             .read(
                 attrs.ino,
-                0,
+                fh,
                 offset,
                 STRIPE_SIZE as u32,
                 1000,

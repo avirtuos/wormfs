@@ -251,7 +251,7 @@ async fn test_stripe_partial_overwrite_middle() {
 
     // Read entire file
     let read_data = service
-        .read(inode, 0, 0, 16 * MB as u32, 1000, 1000, client_id)
+        .read(inode, fh, 0, 16 * MB as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read file");
 
@@ -404,7 +404,7 @@ async fn test_stripe_multiple_partial_overwrites() {
 
     // Read entire file
     let read_data = service
-        .read(inode, 0, 0, 16 * MB as u32, 1000, 1000, client_id)
+        .read(inode, fh, 0, 16 * MB as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read file");
 
@@ -542,7 +542,7 @@ async fn test_stripe_overwrite_with_flush() {
     println!("\nPhase 5: Reading and verifying...");
 
     let read_data = service
-        .read(inode, 0, 0, 12 * MB as u32, 1000, 1000, client_id)
+        .read(inode, fh, 0, 12 * MB as u32, 1000, 1000, client_id)
         .await
         .expect("Failed to read file");
 
