@@ -164,7 +164,8 @@ impl FileSystemServiceImpl {
     ///
     /// Returns (total_bytes, complete_stripe_bytes, partial_stripe_bytes, handle_count)
     pub fn publish_buffered_memory_usage(&self) -> (usize, usize, usize, usize) {
-        let open_files = self.open_files.read().unwrap();
+        let open_files = self.open_files.read()
+            .expect("open_files lock poisoned - indicates panic in file operation");
 
         let mut total_bytes = 0usize;
         let mut total_complete = 0usize;
@@ -456,7 +457,8 @@ impl FileSystemServiceImpl {
     /// Clients that send recent heartbeats have their locks extended automatically
     /// by the background lock extension task.
     pub fn heartbeat(&self, client_id: ClientId) {
-        let mut sessions = self.client_sessions.write().unwrap();
+        let mut sessions = self.client_sessions.write()
+            .expect("client_sessions lock poisoned - indicates panic in session management");
         sessions.insert(client_id, SystemTime::now());
         tracing::debug!("Heartbeat recorded for client {}", client_id.as_u64());
     }
@@ -498,7 +500,8 @@ impl FileSystemServiceImpl {
         });
 
         // Store task handles
-        let mut lock_task_handle = self.lock_extension_task.write().unwrap();
+        let mut lock_task_handle = self.lock_extension_task.write()
+            .expect("lock_extension_task lock poisoned");
         *lock_task_handle = Some(lock_task);
         // Note: metrics_task runs independently and doesn't need to be tracked for shutdown
 
@@ -521,7 +524,8 @@ impl FileSystemServiceImpl {
     pub async fn flush_file(&self, inode: u64) -> Result<(), Error> {
         // Find all file handles for this inode and collect their buffered handles
         let buffered_handles: Vec<_> = {
-            let open_files = self.open_files.read().unwrap();
+            let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             open_files
                 .values()
                 .filter(|of| of.inode == inode)
@@ -552,7 +556,8 @@ impl FileSystemServiceImpl {
     ///
     /// Some(BufferedFileHandle) if any open file handle exists for this inode, None otherwise.
     fn get_buffered_handle_by_inode(&self, inode: u64) -> Option<Arc<BufferedFileHandle>> {
-        let open_files = self.open_files.read().unwrap();
+        let open_files = self.open_files.read()
+            .expect("open_files lock poisoned - indicates panic in file operation");
         open_files
             .values()
             .find(|of| of.inode == inode)
@@ -571,7 +576,8 @@ impl FileSystemServiceImpl {
 
         // Get snapshot of open files with locks
         let files_to_extend: Vec<_> = {
-            let open_files = self.open_files.read().unwrap();
+            let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             open_files
                 .values()
                 .filter(|f| f.lock_id.is_some())
@@ -588,7 +594,8 @@ impl FileSystemServiceImpl {
         // Check client heartbeats and build list of locks to extend
         // Drop the lock before doing async operations
         let locks_to_extend: Vec<_> = {
-            let sessions = self.client_sessions.read().unwrap();
+            let sessions = self.client_sessions.read()
+                .expect("client_sessions lock poisoned - indicates panic in session management");
 
             files_to_extend
                 .iter()
@@ -673,7 +680,8 @@ impl FileSystemServiceImpl {
 
         // Release all held locks
         let files_to_release: Vec<_> = {
-            let open_files = self.open_files.read().unwrap();
+            let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             open_files.keys().copied().collect()
         };
 
@@ -1102,7 +1110,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 7: Track open file
         {
-            let mut open_files = self.open_files.write().unwrap();
+            let mut open_files = self.open_files.write()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             open_files.insert(file_handle, open_file);
         }
 
@@ -1188,7 +1197,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // Fast path: Use BufferedFileHandle if file_handle is valid (non-zero)
         if file_handle != 0 {
             let buffered_handle = {
-                let open_files = self.open_files.read().unwrap();
+                let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
                 open_files
                     .get(&file_handle)
                     .and_then(|of| of.buffered_handle.clone())
@@ -1393,7 +1403,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 1: Get the BufferedFileHandle from OpenFile
         // We'll use it for both cached metadata and the write operation
         let buffered_handle = {
-            let open_files = self.open_files.read().unwrap();
+            let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             let open_file = open_files.get(&file_handle).ok_or_else(|| {
                 Error::InvalidArgument(format!("File handle {} not found", file_handle))
             })?;
@@ -1729,7 +1740,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Get the buffered handle if present
         let buffered_handle = {
-            let open_files = self.open_files.read().unwrap();
+            let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             open_files
                 .get(&file_handle)
                 .and_then(|open_file| open_file.buffered_handle.clone())
@@ -1766,7 +1778,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Get the buffered handle if present
         let buffered_handle = {
-            let open_files = self.open_files.read().unwrap();
+            let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             open_files
                 .get(&file_handle)
                 .and_then(|open_file| open_file.buffered_handle.clone())
@@ -1800,7 +1813,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Inform BufferedFileHandle about release before closing (if present)
         let buffered_handle_to_flush = {
-            let open_files = self.open_files.read().unwrap();
+            let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             open_files
                 .get(&file_handle)
                 .and_then(|open_file| open_file.buffered_handle.clone())
@@ -1825,7 +1839,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Remove the file handle from tracking and extract lock info
         let removed = {
-            let mut open_files = self.open_files.write().unwrap();
+            let mut open_files = self.open_files.write()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             open_files.remove(&file_handle)
         };
 
@@ -2336,7 +2351,8 @@ impl FileSystemService for FileSystemServiceImpl {
             // Otherwise buffered writes will be lost when we delete stripe metadata
             let buffered_handle = if let Some(fh) = file_handle {
                 // Look up by file handle
-                let open_files = self.open_files.read().unwrap();
+                let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
                 open_files
                     .get(&fh)
                     .and_then(|of| of.buffered_handle.clone())
@@ -2497,7 +2513,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 7: Update BufferedFileHandle cache if file is open
         let buffered_handle = if let Some(fh) = file_handle {
             // Look up by file handle
-            let open_files = self.open_files.read().unwrap();
+            let open_files = self.open_files.read()
+                .expect("open_files lock poisoned - indicates panic in file operation");
             open_files
                 .get(&fh)
                 .and_then(|of| of.buffered_handle.clone())
@@ -2656,7 +2673,8 @@ mod tests {
 
         // Verify file is still open with lock
         {
-            let open_files = service.open_files.read().unwrap();
+            let open_files = service.open_files.read()
+                .expect("open_files lock poisoned in test");
             let open_file = open_files.get(&fh).expect("File handle should still exist");
             assert!(open_file.lock_id.is_some(), "Lock should still be held");
         }
@@ -2709,7 +2727,8 @@ mod tests {
 
         // Remove the client from sessions (simulate no heartbeat)
         {
-            let mut sessions = service.client_sessions.write().unwrap();
+            let mut sessions = service.client_sessions.write()
+                .expect("client_sessions lock poisoned in test");
             sessions.remove(&client_id);
         }
 
@@ -2723,7 +2742,8 @@ mod tests {
 
         // For now, just verify the heartbeat removal worked
         {
-            let sessions = service.client_sessions.read().unwrap();
+            let sessions = service.client_sessions.read()
+                .expect("client_sessions lock poisoned in test");
             assert!(
                 !sessions.contains_key(&client_id),
                 "Client session should be removed"
@@ -2743,7 +2763,8 @@ mod tests {
 
         // Initially no session
         {
-            let sessions = service.client_sessions.read().unwrap();
+            let sessions = service.client_sessions.read()
+                .expect("client_sessions lock poisoned in test");
             assert!(!sessions.contains_key(&client_id));
         }
 
@@ -2752,7 +2773,8 @@ mod tests {
 
         // Should now have session
         {
-            let sessions = service.client_sessions.read().unwrap();
+            let sessions = service.client_sessions.read()
+                .expect("client_sessions lock poisoned in test");
             assert!(
                 sessions.contains_key(&client_id),
                 "Client session should be registered"
