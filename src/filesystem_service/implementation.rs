@@ -805,13 +805,16 @@ impl FileSystemServiceImpl {
                             delta_calls,
                             crate::metric_service::UnitType::Count,
                         );
-                        self.api_metrics.$prev_counter.store(current_calls, Ordering::Relaxed);
+                        self.api_metrics
+                            .$prev_counter
+                            .store(current_calls, Ordering::Relaxed);
                     }
 
                     // Publish average latency
                     if let Ok(mut latencies) = self.api_metrics.$latencies.lock() {
                         if !latencies.is_empty() {
-                            let avg_latency = latencies.iter().sum::<f64>() / latencies.len() as f64;
+                            let avg_latency =
+                                latencies.iter().sum::<f64>() / latencies.len() as f64;
                             let _ = metrics.publish_gauge(
                                 &format!("filesystem.api.{}.latency_avg", $api_name),
                                 avg_latency,
@@ -824,30 +827,85 @@ impl FileSystemServiceImpl {
             }
 
             // File operations
-            publish_api!("create", create_calls, previous_create_calls, create_latencies);
+            publish_api!(
+                "create",
+                create_calls,
+                previous_create_calls,
+                create_latencies
+            );
             publish_api!("open", open_calls, previous_open_calls, open_latencies);
             publish_api!("read", read_calls, previous_read_calls, read_latencies);
             publish_api!("write", write_calls, previous_write_calls, write_latencies);
-            publish_api!("unlink", unlink_calls, previous_unlink_calls, unlink_latencies);
-            publish_api!("symlink", symlink_calls, previous_symlink_calls, symlink_latencies);
-            publish_api!("readlink", readlink_calls, previous_readlink_calls, readlink_latencies);
+            publish_api!(
+                "unlink",
+                unlink_calls,
+                previous_unlink_calls,
+                unlink_latencies
+            );
+            publish_api!(
+                "symlink",
+                symlink_calls,
+                previous_symlink_calls,
+                symlink_latencies
+            );
+            publish_api!(
+                "readlink",
+                readlink_calls,
+                previous_readlink_calls,
+                readlink_latencies
+            );
             publish_api!("flush", flush_calls, previous_flush_calls, flush_latencies);
             publish_api!("fsync", fsync_calls, previous_fsync_calls, fsync_latencies);
-            publish_api!("release", release_calls, previous_release_calls, release_latencies);
+            publish_api!(
+                "release",
+                release_calls,
+                previous_release_calls,
+                release_latencies
+            );
 
             // Directory operations
             publish_api!("mkdir", mkdir_calls, previous_mkdir_calls, mkdir_latencies);
             publish_api!("rmdir", rmdir_calls, previous_rmdir_calls, rmdir_latencies);
-            publish_api!("readdir", readdir_calls, previous_readdir_calls, readdir_latencies);
+            publish_api!(
+                "readdir",
+                readdir_calls,
+                previous_readdir_calls,
+                readdir_latencies
+            );
 
             // Metadata operations
-            publish_api!("getattr", getattr_calls, previous_getattr_calls, getattr_latencies);
-            publish_api!("setattr", setattr_calls, previous_setattr_calls, setattr_latencies);
+            publish_api!(
+                "getattr",
+                getattr_calls,
+                previous_getattr_calls,
+                getattr_latencies
+            );
+            publish_api!(
+                "setattr",
+                setattr_calls,
+                previous_setattr_calls,
+                setattr_latencies
+            );
 
             // Lock operations
-            publish_api!("acquire_lock", acquire_lock_calls, previous_acquire_lock_calls, acquire_lock_latencies);
-            publish_api!("release_lock", release_lock_calls, previous_release_lock_calls, release_lock_latencies);
-            publish_api!("extend_lock", extend_lock_calls, previous_extend_lock_calls, extend_lock_latencies);
+            publish_api!(
+                "acquire_lock",
+                acquire_lock_calls,
+                previous_acquire_lock_calls,
+                acquire_lock_latencies
+            );
+            publish_api!(
+                "release_lock",
+                release_lock_calls,
+                previous_release_lock_calls,
+                release_lock_latencies
+            );
+            publish_api!(
+                "extend_lock",
+                extend_lock_calls,
+                previous_extend_lock_calls,
+                extend_lock_latencies
+            );
         }
     }
 
@@ -877,12 +935,12 @@ impl FileSystemServiceImpl {
         let raft_client: Arc<dyn crate::filesystem_service::buffered_file_handle::RaftClient> =
             Arc::new(RaftClientImpl::new(Arc::clone(&self.raft_stub)));
 
-        // Configure buffered handle
+        // Configure buffered handle - use config from filesystem config but override max_stripe_size
         let config = BufferedFileHandleConfig {
-            max_memory_bytes: 20 * 1024 * 1024, // 20MB per handle
-            max_flush_interval: std::time::Duration::from_secs(5),
-            max_writes_before_flush: 100,
-            max_stripe_size,
+            max_memory_bytes: self.config.buffered_file_handle_config.max_memory_bytes,
+            max_flush_interval: self.config.buffered_file_handle_config.max_flush_interval,
+            max_writes_before_flush: self.config.buffered_file_handle_config.max_writes_before_flush,
+            max_stripe_size, // Dynamically computed from FileStore config
         };
 
         Arc::new(BufferedFileHandle::new(
@@ -1415,7 +1473,8 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
-            self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("create", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
@@ -1465,12 +1524,14 @@ impl FileSystemService for FileSystemServiceImpl {
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
                 // Release the reserved inode on error
                 let _ = self.metadata_store.release_inode(inode).await;
-                self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("create", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
                 let _ = self.metadata_store.release_inode(inode).await;
-                self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("create", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal("Unexpected Raft result for create".into()));
             }
         };
@@ -1497,7 +1558,8 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
         {
             let _ = self.metadata_store.release_inode(inode).await;
-            self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("create", _start.elapsed().as_secs_f64());
             return Err(self.convert_metadata_error(e));
         }
 
@@ -1507,7 +1569,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // here ensures immediate cleanup on database errors.
         if let Err(e) = self.metadata_store.confirm_inode(inode).await {
             let _ = self.metadata_store.release_inode(inode).await;
-            self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("create", _start.elapsed().as_secs_f64());
             return Err(self.convert_metadata_error(e));
         }
 
@@ -1539,7 +1602,8 @@ impl FileSystemService for FileSystemServiceImpl {
             inode,
             file_id
         );
-        self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("create", _start.elapsed().as_secs_f64());
         Ok(attr)
     }
 
@@ -1569,7 +1633,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 2: Check file type (can't open directories with open())
         if record.file_type == crate::metadata_store::FileType::Directory {
-            self.api_metrics.record_call("open", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("open", _start.elapsed().as_secs_f64());
             return Err(Error::IsADirectory(inode));
         }
 
@@ -1626,7 +1691,8 @@ impl FileSystemService for FileSystemServiceImpl {
                     Some(lock_id)
                 }
                 Ok(_) => {
-                    self.api_metrics.record_call("open", _start.elapsed().as_secs_f64());
+                    self.api_metrics
+                        .record_call("open", _start.elapsed().as_secs_f64());
                     return Err(Error::RaftError(
                         "Unexpected Raft result for lock acquisition".into(),
                     ));
@@ -1634,7 +1700,8 @@ impl FileSystemService for FileSystemServiceImpl {
                 Err(e) => {
                     // Lock acquisition failed - likely already locked
                     tracing::warn!("Failed to acquire write lock on inode {}: {}", inode, e);
-                    self.api_metrics.record_call("open", _start.elapsed().as_secs_f64());
+                    self.api_metrics
+                        .record_call("open", _start.elapsed().as_secs_f64());
                     return Err(Error::InvalidArgument(format!(
                         "File inode {} is already open for writing",
                         inode
@@ -1741,7 +1808,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 7: Return file handle and attributes
         let attr = self.file_record_to_attr(&record);
         tracing::info!("Opened file: inode={}, handle={}", inode, file_handle);
-        self.api_metrics.record_call("open", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("open", _start.elapsed().as_secs_f64());
         Ok((file_handle, attr))
     }
 
@@ -1818,7 +1886,8 @@ impl FileSystemService for FileSystemServiceImpl {
                     );
                 }
 
-                self.api_metrics.record_call("read", start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("read", start.elapsed().as_secs_f64());
                 return Ok(data);
             }
         }
@@ -1846,7 +1915,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Check bounds
         if offset >= record.size {
-            self.api_metrics.record_call("read", start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("read", start.elapsed().as_secs_f64());
             return Ok(Vec::new()); // EOF
         }
 
@@ -1947,7 +2017,8 @@ impl FileSystemService for FileSystemServiceImpl {
             );
         }
 
-        self.api_metrics.record_call("read", start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("read", start.elapsed().as_secs_f64());
         return Ok(data);
     }
 
@@ -1976,7 +2047,8 @@ impl FileSystemService for FileSystemServiceImpl {
         );
 
         if data.is_empty() {
-            self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("write", start.elapsed().as_secs_f64());
             return Ok(0);
         }
 
@@ -1993,7 +2065,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
             // Validate that the file handle matches the inode
             if open_file.inode != inode {
-                self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("write", start.elapsed().as_secs_f64());
                 return Err(Error::InvalidArgument(format!(
                     "File handle {} does not match inode {}",
                     file_handle, inode
@@ -2009,7 +2082,8 @@ impl FileSystemService for FileSystemServiceImpl {
         let attrs = if let Some(ref handle) = buffered_handle {
             handle.get_file_by_inode()
         } else {
-            self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("write", start.elapsed().as_secs_f64());
             return Err(Error::Internal(
                 "BufferedFileHandle required - enable_stripe_cache must be true".to_string(),
             ));
@@ -2028,7 +2102,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 4: Validate file size won't exceed maximum
         let end_offset = checked_end_offset(offset, data.len())?;
         if end_offset > self.config.max_file_size {
-            self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("write", start.elapsed().as_secs_f64());
             return Err(Error::NoSpace); // ENOSPC - file would exceed maximum size
         }
 
@@ -2052,7 +2127,8 @@ impl FileSystemService for FileSystemServiceImpl {
                 "BufferedFileHandle not enabled for file handle {}, writes will not be buffered",
                 file_handle
             );
-            self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("write", start.elapsed().as_secs_f64());
             return Err(Error::Internal(
                 "BufferedFileHandle required - enable_stripe_cache must be true".to_string(),
             ));
@@ -2095,7 +2171,8 @@ impl FileSystemService for FileSystemServiceImpl {
             inode,
             offset
         );
-        self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("write", start.elapsed().as_secs_f64());
         Ok(bytes_written as u32)
     }
 
@@ -2124,7 +2201,8 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
-            self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("unlink", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
@@ -2148,7 +2226,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 3: Check file type (can't unlink directories - use rmdir)
         if file_record.file_type == crate::metadata_store::FileType::Directory {
-            self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("unlink", _start.elapsed().as_secs_f64());
             return Err(Error::IsADirectory(file_record.inode));
         }
 
@@ -2177,11 +2256,13 @@ impl FileSystemService for FileSystemServiceImpl {
         match result {
             crate::filesystem_service::raft_commands::RaftCommandResult::FileDeleted => {}
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
-                self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("unlink", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
-                self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("unlink", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal("Unexpected Raft result for unlink".into()));
             }
         }
@@ -2195,7 +2276,8 @@ impl FileSystemService for FileSystemServiceImpl {
             path,
             file_record.inode
         );
-        self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("unlink", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -2224,14 +2306,16 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
-            self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("symlink", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
         // Step 2: Check if symlink already exists
         let path = parent_record.path.join(name);
         if let Ok(_existing) = self.metadata_store.get_file_by_path(&path).await {
-            self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("symlink", _start.elapsed().as_secs_f64());
             return Err(Error::AlreadyExists(path.to_string_lossy().into_owned()));
         }
 
@@ -2255,11 +2339,13 @@ impl FileSystemService for FileSystemServiceImpl {
         let (inode, file_id) = match result {
             RaftCommandResult::SymlinkCreated { inode, file_id } => (inode, file_id),
             RaftCommandResult::Error { message } => {
-                self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("symlink", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
-                self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("symlink", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal(
                     "Unexpected Raft result for symlink creation".into(),
                 ));
@@ -2309,7 +2395,8 @@ impl FileSystemService for FileSystemServiceImpl {
             file_id
         );
 
-        self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("symlink", _start.elapsed().as_secs_f64());
         Ok(attr)
     }
 
@@ -2333,7 +2420,8 @@ impl FileSystemService for FileSystemServiceImpl {
         let result = record.target.ok_or_else(|| {
             Error::Internal(format!("Symlink at inode {} has no target path", inode))
         });
-        self.api_metrics.record_call("readlink", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("readlink", _start.elapsed().as_secs_f64());
         result
     }
 
@@ -2375,7 +2463,8 @@ impl FileSystemService for FileSystemServiceImpl {
             );
         }
 
-        self.api_metrics.record_call("flush", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("flush", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -2414,7 +2503,8 @@ impl FileSystemService for FileSystemServiceImpl {
             );
         }
 
-        self.api_metrics.record_call("fsync", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("fsync", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -2500,7 +2590,8 @@ impl FileSystemService for FileSystemServiceImpl {
             }
         }
 
-        self.api_metrics.record_call("release", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("release", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -2533,7 +2624,8 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
-            self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("mkdir", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
@@ -2550,7 +2642,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 3: Check if directory already exists
         let path = parent_record.path.join(name);
         if let Ok(_existing) = self.metadata_store.get_file_by_path(&path).await {
-            self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("mkdir", _start.elapsed().as_secs_f64());
             return Err(Error::AlreadyExists(path.to_string_lossy().into_owned()));
         }
 
@@ -2590,12 +2683,14 @@ impl FileSystemService for FileSystemServiceImpl {
             } => file_id,
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
                 let _ = self.metadata_store.release_inode(inode).await;
-                self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("mkdir", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
                 let _ = self.metadata_store.release_inode(inode).await;
-                self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("mkdir", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal(
                     "Unexpected Raft result for directory creation".into(),
                 ));
@@ -2624,14 +2719,16 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
         {
             let _ = self.metadata_store.release_inode(inode).await;
-            self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("mkdir", _start.elapsed().as_secs_f64());
             return Err(self.convert_metadata_error(e));
         }
 
         // Step 8: Confirm inode reservation - release inode on error
         if let Err(e) = self.metadata_store.confirm_inode(inode).await {
             let _ = self.metadata_store.release_inode(inode).await;
-            self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("mkdir", _start.elapsed().as_secs_f64());
             return Err(self.convert_metadata_error(e));
         }
 
@@ -2664,7 +2761,8 @@ impl FileSystemService for FileSystemServiceImpl {
             file_id
         );
 
-        self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("mkdir", _start.elapsed().as_secs_f64());
         Ok(attr)
     }
 
@@ -2693,7 +2791,8 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
-            self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("rmdir", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
@@ -2717,7 +2816,8 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 4: Verify target is a directory (not a file or symlink)
         if dir_record.file_type != crate::metadata_store::FileType::Directory {
-            self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("rmdir", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(dir_record.inode));
         }
 
@@ -2730,7 +2830,8 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if !children.is_empty() {
-            self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("rmdir", _start.elapsed().as_secs_f64());
             return Err(Error::DirectoryNotEmpty(dir_record.inode));
         }
 
@@ -2761,11 +2862,13 @@ impl FileSystemService for FileSystemServiceImpl {
                 // Success - file already deleted by Raft stub
             }
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
-                self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("rmdir", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
-                self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("rmdir", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal(
                     "Unexpected Raft result for directory deletion".into(),
                 ));
@@ -2782,7 +2885,8 @@ impl FileSystemService for FileSystemServiceImpl {
             dir_record.inode
         );
 
-        self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("rmdir", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -2874,7 +2978,8 @@ impl FileSystemService for FileSystemServiceImpl {
             });
         }
 
-        self.api_metrics.record_call("readdir", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("readdir", _start.elapsed().as_secs_f64());
         Ok(entries)
     }
 
@@ -2887,7 +2992,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // BufferedFileHandle maintains up-to-date attributes, so no flush needed
         if let Some(buffered_handle) = self.get_buffered_handle_by_inode(inode) {
             let result = Ok(buffered_handle.get_file_by_inode());
-            self.api_metrics.record_call("getattr", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("getattr", _start.elapsed().as_secs_f64());
             return result;
         }
 
@@ -2895,7 +3001,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // First check inode_manager cache
         if let Some(cached) = self.inode_manager.cache().get(inode) {
             let result = Ok(self.cached_metadata_to_attr(inode, &cached));
-            self.api_metrics.record_call("getattr", _start.elapsed().as_secs_f64());
+            self.api_metrics
+                .record_call("getattr", _start.elapsed().as_secs_f64());
             return result;
         }
 
@@ -2923,7 +3030,8 @@ impl FileSystemService for FileSystemServiceImpl {
             .insert(record.inode, record.file_id, metadata);
 
         let result = Ok(self.file_record_to_attr(&record));
-        self.api_metrics.record_call("getattr", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("getattr", _start.elapsed().as_secs_f64());
         result
     }
 
@@ -2983,7 +3091,8 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 3: Validate new size against max_file_size
         if let Some(new_size) = size {
             if new_size > self.config.max_file_size {
-                self.api_metrics.record_call("setattr", _start.elapsed().as_secs_f64());
+                self.api_metrics
+                    .record_call("setattr", _start.elapsed().as_secs_f64());
                 return Err(Error::NoSpace); // ENOSPC - file would exceed maximum size
             }
         }
@@ -3179,7 +3288,8 @@ impl FileSystemService for FileSystemServiceImpl {
         self.inode_manager.cache().invalidate(inode);
 
         tracing::info!("Updated attributes for inode {}", inode);
-        self.api_metrics.record_call("setattr", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("setattr", _start.elapsed().as_secs_f64());
         Ok(attr)
     }
 
@@ -3197,7 +3307,8 @@ impl FileSystemService for FileSystemServiceImpl {
         let result = Err(Error::NotSupported(
             "locks not implemented in Step 7".into(),
         ));
-        self.api_metrics.record_call("acquire_lock", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("acquire_lock", _start.elapsed().as_secs_f64());
         result
     }
 
@@ -3207,7 +3318,8 @@ impl FileSystemService for FileSystemServiceImpl {
         let result = Err(Error::NotSupported(
             "locks not implemented in Step 7".into(),
         ));
-        self.api_metrics.record_call("release_lock", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("release_lock", _start.elapsed().as_secs_f64());
         result
     }
 
@@ -3222,7 +3334,8 @@ impl FileSystemService for FileSystemServiceImpl {
         let result = Err(Error::NotSupported(
             "locks not implemented in Step 7".into(),
         ));
-        self.api_metrics.record_call("extend_lock", _start.elapsed().as_secs_f64());
+        self.api_metrics
+            .record_call("extend_lock", _start.elapsed().as_secs_f64());
         result
     }
 }

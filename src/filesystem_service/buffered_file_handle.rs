@@ -48,12 +48,13 @@ use std::time::{Duration, Instant, SystemTime};
 use tracing::trace;
 
 /// Configuration for BufferedFileHandle behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BufferedFileHandleConfig {
     /// Maximum memory per handle before triggering partial flush (bytes)
     pub max_memory_bytes: usize,
 
-    /// Maximum time between full flushes
+    /// Maximum time between full flushes (in seconds when serialized)
+    #[serde(with = "serde_duration_seconds")]
     pub max_flush_interval: Duration,
 
     /// Maximum writes before forcing full flush
@@ -63,12 +64,33 @@ pub struct BufferedFileHandleConfig {
     pub max_stripe_size: usize,
 }
 
+/// Serde helper module for Duration serialization/deserialization as seconds.
+mod serde_duration_seconds {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(duration.as_secs())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
+}
+
 impl Default for BufferedFileHandleConfig {
     fn default() -> Self {
         Self {
             max_memory_bytes: 20 * 1024 * 1024, // 20MB
-            max_flush_interval: Duration::from_secs(5),
-            max_writes_before_flush: 100,
+            max_flush_interval: Duration::from_secs(10),
+            max_writes_before_flush: 10000,
             max_stripe_size: 4 * 1024 * 1024, // 4MB
         }
     }
@@ -618,7 +640,7 @@ impl BufferedFileHandle {
         // Check if need full flush
         if self.needs_full_flush() {
             trace!("Triggering auto-flush after write (writes_since_flush >= threshold or time elapsed)");
-            self.full_flush(true).await?; // true = flush everything (time/count based flush)
+            //self.full_flush(true).await?; // true = flush everything (time/count based flush)
         }
 
         Ok(bytes_written)
