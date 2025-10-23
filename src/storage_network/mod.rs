@@ -72,9 +72,8 @@ pub mod implementation;
 pub mod types;
 
 use async_trait::async_trait;
-use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 pub use types::{
     Config, ConnectionState, Error, NetworkCommand, PeerId, PeerInfo, PeerState, TopicHandle,
     TopicMessage, TopicReceiver, TopicSender, ValidationResult,
@@ -84,6 +83,7 @@ pub use types::{
 ///
 /// This is a lightweight cloneable handle that wraps the inner network state
 /// and provides a command channel for non-blocking operations.
+#[cfg(feature = "libp2p")]
 #[derive(Clone)]
 #[allow(dead_code)] // TODO: Remove when implementation is complete
 pub struct StorageNetworkHandle {
@@ -94,10 +94,132 @@ pub struct StorageNetworkHandle {
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
 }
 
+#[cfg(feature = "libp2p")]
+impl StorageNetworkHandle {
+    /// Join a topic and get channels for pub/sub communication.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_name` - Name of the topic to join
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(sender, receiver)` channels for publishing and receiving messages.
+    pub async fn join_topic(
+        &self,
+        topic_name: &str,
+    ) -> Result<(TopicSender, TopicReceiver), Error> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        self.event_tx
+            .send(NetworkCommand::JoinTopic {
+                name: topic_name.to_string(),
+                response: response_tx,
+            })
+            .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+
+        let topic_handle = response_rx
+            .await
+            .map_err(|_| Error::EventLoopFailed("Event loop dropped response".to_string()))??;
+
+        Ok((topic_handle.tx, topic_handle.rx))
+    }
+
+    /// Broadcast a message to all peers on a topic.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - Topic name
+    /// * `message` - Message bytes to broadcast
+    pub async fn broadcast(&self, topic: &str, message: Vec<u8>) -> Result<(), Error> {
+        self.event_tx
+            .send(NetworkCommand::Broadcast {
+                topic: topic.to_string(),
+                message,
+            })
+            .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+
+        Ok(())
+    }
+
+    /// Send a message to a specific peer on a topic.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - Target peer identifier
+    /// * `topic` - Topic name
+    /// * `message` - Message bytes to send
+    pub async fn send_to_peer(
+        &self,
+        peer_id: &PeerId,
+        topic: &str,
+        message: Vec<u8>,
+    ) -> Result<(), Error> {
+        self.event_tx
+            .send(NetworkCommand::SendToPeer {
+                peer_id: peer_id.clone(),
+                topic: topic.to_string(),
+                message,
+            })
+            .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+
+        Ok(())
+    }
+
+    /// Get list of currently connected peers.
+    pub fn get_connected_peers(&self) -> Vec<PeerInfo> {
+        let peers = self
+            .inner
+            .peers
+            .read()
+            .expect("Failed to acquire peers lock");
+
+        peers
+            .values()
+            .filter(|state| state.connection_state == ConnectionState::Connected)
+            .map(|state| PeerInfo {
+                peer_id: state.peer_id.clone(),
+                addresses: state
+                    .addresses
+                    .iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect(),
+                state: state.connection_state,
+                connected_since: Some(state.last_seen),
+                protocols: vec![], // Day 3: Track protocols
+                rtt: None,         // Day 3: Track RTT
+            })
+            .collect()
+    }
+
+    /// Get detailed information about a specific peer.
+    pub fn get_peer_info(&self, peer_id: &PeerId) -> Option<PeerInfo> {
+        let peers = self
+            .inner
+            .peers
+            .read()
+            .expect("Failed to acquire peers lock");
+
+        peers.get(peer_id).map(|state| PeerInfo {
+            peer_id: state.peer_id.clone(),
+            addresses: state
+                .addresses
+                .iter()
+                .filter_map(|s| s.parse().ok())
+                .collect(),
+            state: state.connection_state,
+            connected_since: Some(state.last_seen),
+            protocols: vec![],
+            rtt: None,
+        })
+    }
+}
+
 /// Factory for creating StorageNetwork instances.
 ///
 /// This factory is responsible for initializing the libp2p swarm and
 /// creating the inner network state before returning a cloneable handle.
+#[cfg(feature = "libp2p")]
 pub struct StorageNetworkFactory;
 
 // StorageNetworkFactory implementation is in implementation.rs
@@ -106,6 +228,7 @@ pub struct StorageNetworkFactory;
 ///
 /// This struct holds all the mutable network state and is wrapped in Arc
 /// to enable safe concurrent access from multiple components.
+#[cfg(feature = "libp2p")]
 #[allow(dead_code)] // TODO: Remove when implementation is complete
 pub struct StorageNetworkInner {
     /// Reference to the inner state containing swarm and peer tracking.
