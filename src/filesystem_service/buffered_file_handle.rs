@@ -246,6 +246,15 @@ pub trait BufferedMetricsReporter: Send + Sync {
 
     /// Report a coalesced write (write that reused an existing stripe builder).
     fn report_write_coalesced(&self);
+
+    /// Report a flush triggered by memory pressure.
+    fn report_memory_pressure_flush(&self);
+
+    /// Report an inform() call by operation type.
+    ///
+    /// # Arguments
+    /// * `op_type` - The type of operation that triggered the inform() call
+    fn report_inform(&self, op_type: OperationType);
 }
 
 /// Per-file-handle write buffer that coalesces metadata and data changes.
@@ -574,6 +583,12 @@ impl BufferedFileHandle {
             // Check if need full flush due to memory pressure (outside lock)
             if self.needs_memory_flush() {
                 trace!("Triggering full_flush due to memory pressure (complete stripes only)");
+
+                // Report memory pressure flush before executing
+                if let Some(reporter) = &self.metrics_reporter {
+                    reporter.report_memory_pressure_flush();
+                }
+
                 self.full_flush(false).await?; // false = only flush complete stripes
             }
         }
@@ -1227,6 +1242,11 @@ impl BufferedFileHandle {
     ///
     /// * `op_type` - Type of operation about to be performed
     pub async fn inform(&self, op_type: OperationType) -> Result<(), Error> {
+        // Report inform call to metrics
+        if let Some(reporter) = &self.metrics_reporter {
+            reporter.report_inform(op_type);
+        }
+
         match op_type {
             OperationType::Truncate => self.full_flush(true).await, // true = flush everything before truncate
             OperationType::Setattr => {
