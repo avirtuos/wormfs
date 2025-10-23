@@ -35,6 +35,12 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
         transaction_isolation: IsolationLevel::ReadCommitted,
         enable_prepared_statements: true,
         read_pool_timeout_secs: 30,
+        stripe_cache_size_mb: 64,
+        stripe_cache_ttl_secs: 10,
+        stripe_cache_tti_secs: 5,
+        chunk_cache_size_mb: 64,
+        chunk_cache_ttl_secs: 10,
+        chunk_cache_tti_secs: 5,
     };
 
     let metadata_store = MetadataStoreFactory::create_concrete(metadata_config)
