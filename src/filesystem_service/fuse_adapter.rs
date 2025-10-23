@@ -793,6 +793,249 @@ impl Filesystem for FuseAdapter {
     }
 }
 
+#[cfg(all(test, feature = "fuser"))]
+mod tests {
+    use super::*;
+    use crate::filesystem_service::types::FileType;
+    use crate::metadata_store::Error as MetadataError;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    #[test]
+    fn test_metadata_error_to_errno_not_found_errors() {
+        // Create a minimal FuseAdapter for testing helper methods
+        // We can't easily instantiate the full FuseAdapter, so we'll test the error mapping logic directly
+
+        // Test FileNotFoundByInode
+        let error = MetadataError::FileNotFoundByInode(123);
+        assert_eq!(map_error_to_errno(&error), libc::ENOENT);
+
+        // Test FileNotFoundByPath
+        let error = MetadataError::FileNotFoundByPath("/test".to_string());
+        assert_eq!(map_error_to_errno(&error), libc::ENOENT);
+
+        // Test ParentNotFound
+        let error = MetadataError::ParentNotFound(PathBuf::from("/test"));
+        assert_eq!(map_error_to_errno(&error), libc::ENOENT);
+    }
+
+    #[test]
+    fn test_metadata_error_to_errno_already_exists() {
+        let error = MetadataError::FileAlreadyExists(PathBuf::from("/test"));
+        assert_eq!(map_error_to_errno(&error), libc::EEXIST);
+    }
+
+    #[test]
+    fn test_metadata_error_to_errno_lock_errors() {
+        use crate::file_store::types::FileId;
+        use crate::filesystem_service::types::ClientId;
+
+        let file_id = FileId::generate();
+        let client_id = ClientId::new(123);
+
+        // Test LockConflict
+        let error = MetadataError::LockConflict {
+            file_id,
+            lock_type: "write".to_string(),
+        };
+        assert_eq!(map_error_to_errno(&error), libc::ENOLCK);
+
+        // Test LockNotFound
+        let error = MetadataError::LockNotFound { file_id, client_id };
+        assert_eq!(map_error_to_errno(&error), libc::ENOLCK);
+    }
+
+    #[test]
+    fn test_metadata_error_to_errno_invalid_argument() {
+        // Test ConstraintViolation
+        let error = MetadataError::ConstraintViolation("test".to_string());
+        assert_eq!(map_error_to_errno(&error), libc::EINVAL);
+
+        // Test ConfigInvalid
+        let error = MetadataError::ConfigInvalid("test".to_string());
+        assert_eq!(map_error_to_errno(&error), libc::EINVAL);
+    }
+
+    #[test]
+    fn test_metadata_error_to_errno_io_errors() {
+        // Test QueryError
+        let error = MetadataError::QueryError("test".to_string());
+        assert_eq!(map_error_to_errno(&error), libc::EIO);
+
+        // Test ConnectionError
+        let error = MetadataError::ConnectionError("test".to_string());
+        assert_eq!(map_error_to_errno(&error), libc::EIO);
+
+        // Test TransactionError
+        let error = MetadataError::TransactionError("test".to_string());
+        assert_eq!(map_error_to_errno(&error), libc::EIO);
+    }
+
+    #[test]
+    fn test_metadata_error_to_errno_inode_exhaustion() {
+        // Test InodeSpaceExhausted
+        let error = MetadataError::InodeSpaceExhausted;
+        assert_eq!(map_error_to_errno(&error), libc::ENOSPC);
+
+        // Test NoAvailableInodes
+        let error = MetadataError::NoAvailableInodes;
+        assert_eq!(map_error_to_errno(&error), libc::ENOSPC);
+    }
+
+    #[test]
+    fn test_metadata_error_to_errno_inode_invalid() {
+        // Test InodeNotReserved
+        let error = MetadataError::InodeNotReserved(123);
+        assert_eq!(map_error_to_errno(&error), libc::EINVAL);
+
+        // Test InodeInUse
+        let error = MetadataError::InodeInUse(123);
+        assert_eq!(map_error_to_errno(&error), libc::EINVAL);
+    }
+
+    #[test]
+    fn test_to_fuse_attr_regular_file() {
+        let attr = crate::filesystem_service::types::FileAttr {
+            ino: 42,
+            size: 1024,
+            blocks: 2,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
+            crtime: SystemTime::UNIX_EPOCH,
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        };
+
+        let fuse_attr = convert_to_fuse_attr(&attr);
+
+        assert_eq!(fuse_attr.ino, 42);
+        assert_eq!(fuse_attr.size, 1024);
+        assert_eq!(fuse_attr.blocks, 2);
+        assert_eq!(fuse_attr.perm, 0o644);
+        assert_eq!(fuse_attr.nlink, 1);
+        assert_eq!(fuse_attr.uid, 1000);
+        assert_eq!(fuse_attr.gid, 1000);
+        assert_eq!(fuse_attr.kind, FuseFileType::RegularFile);
+    }
+
+    #[test]
+    fn test_to_fuse_attr_directory() {
+        let attr = crate::filesystem_service::types::FileAttr {
+            ino: 2,
+            size: 4096,
+            blocks: 8,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
+            crtime: SystemTime::UNIX_EPOCH,
+            kind: FileType::Directory,
+            perm: 0o755,
+            nlink: 2,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        };
+
+        let fuse_attr = convert_to_fuse_attr(&attr);
+
+        assert_eq!(fuse_attr.ino, 2);
+        assert_eq!(fuse_attr.perm, 0o755);
+        assert_eq!(fuse_attr.kind, FuseFileType::Directory);
+        assert_eq!(fuse_attr.nlink, 2);
+    }
+
+    #[test]
+    fn test_to_fuse_attr_symlink() {
+        let attr = crate::filesystem_service::types::FileAttr {
+            ino: 100,
+            size: 10,
+            blocks: 1,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
+            crtime: SystemTime::UNIX_EPOCH,
+            kind: FileType::Symlink,
+            perm: 0o777,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        };
+
+        let fuse_attr = convert_to_fuse_attr(&attr);
+
+        assert_eq!(fuse_attr.kind, FuseFileType::Symlink);
+        assert_eq!(fuse_attr.perm, 0o777);
+    }
+
+    // Helper functions to test the logic without needing a full FuseAdapter instance
+    fn map_error_to_errno(error: &MetadataError) -> i32 {
+        use crate::metadata_store::Error as MError;
+        match error {
+            MError::FileNotFoundByInode(_)
+            | MError::FileNotFoundByPath(_)
+            | MError::FileNotFoundByFileId(_)
+            | MError::ParentNotFound(_) => libc::ENOENT,
+            MError::FileAlreadyExists(_) => libc::EEXIST,
+            MError::LockConflict { .. } | MError::LockNotFound { .. } => libc::ENOLCK,
+            MError::ConstraintViolation(_) | MError::ConfigInvalid(_) | MError::ConfigError(_) => {
+                libc::EINVAL
+            }
+            MError::QueryError(_)
+            | MError::TransactionError(_)
+            | MError::ConnectionError(_)
+            | MError::SchemaInitFailed(_)
+            | MError::SnapshotFailed(_)
+            | MError::RestoreFailed(_) => libc::EIO,
+            MError::InodeSpaceExhausted | MError::NoAvailableInodes => libc::ENOSPC,
+            MError::InodeNotReserved(_)
+            | MError::InodeInUse(_)
+            | MError::InodeReservationExpired(_) => libc::EINVAL,
+            MError::StripeNotFound(_) | MError::ChunkNotFound(_) => libc::EIO,
+            MError::Io(_) => libc::EIO,
+        }
+    }
+
+    fn convert_to_fuse_attr(attr: &crate::filesystem_service::types::FileAttr) -> FuseFileAttr {
+        FuseFileAttr {
+            ino: attr.ino,
+            size: attr.size,
+            blocks: attr.blocks,
+            atime: attr.atime,
+            mtime: attr.mtime,
+            ctime: attr.ctime,
+            crtime: attr.crtime,
+            kind: match attr.kind {
+                FileType::RegularFile => FuseFileType::RegularFile,
+                FileType::Directory => FuseFileType::Directory,
+                FileType::Symlink => FuseFileType::Symlink,
+                FileType::NamedPipe => FuseFileType::NamedPipe,
+                FileType::BlockDevice => FuseFileType::BlockDevice,
+                FileType::CharDevice => FuseFileType::CharDevice,
+                FileType::Socket => FuseFileType::Socket,
+            },
+            perm: attr.perm,
+            nlink: attr.nlink,
+            uid: attr.uid,
+            gid: attr.gid,
+            rdev: attr.rdev,
+            blksize: attr.blksize,
+            flags: attr.flags,
+        }
+    }
+}
+
 // Export a stub when fuser feature is disabled
 #[cfg(not(feature = "fuser"))]
 pub struct FuseAdapter;

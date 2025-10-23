@@ -3228,4 +3228,117 @@ mod tests {
         assert_eq!(attr2.ino, ROOT_INODE);
     }
     */
+
+    #[tokio::test]
+    async fn test_create_in_non_directory_fails() {
+        let service = create_test_service().await;
+        service.initialize_root().await.unwrap();
+        let client_id = ClientId::new(100);
+
+        // Create a regular file
+        let file_attr = service
+            .create(ROOT_INODE, "regular.txt", 0o644, TEST_UID, TEST_GID, client_id)
+            .await
+            .unwrap();
+
+        // Try to create a file inside the regular file (should fail - not a directory)
+        let result = service
+            .create(file_attr.ino, "child.txt", 0o644, TEST_UID, TEST_GID, client_id)
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::NotADirectory(inode) => assert_eq!(inode, file_attr.ino),
+            e => panic!("Expected NotADirectory error, got: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_open_directory_for_writing_fails() {
+        let service = create_test_service().await;
+        service.initialize_root().await.unwrap();
+        let client_id = ClientId::new(100);
+
+        // Try to open root directory for writing (should fail - is a directory)
+        let result = service.open(ROOT_INODE, 0x02, TEST_UID, TEST_GID, client_id).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::IsADirectory(inode) => assert_eq!(inode, ROOT_INODE),
+            e => panic!("Expected IsADirectory error, got: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_release_nonexistent_file_handle_succeeds() {
+        let service = create_test_service().await;
+
+        // Try to release a non-existent file handle
+        // Note: Release is idempotent and doesn't error on invalid handles
+        let invalid_fh = 99999;
+        let result = service.release(invalid_fh).await;
+
+        // Should succeed (idempotent operation)
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_read_with_invalid_file_handle_uses_fallback() {
+        let service = create_test_service().await;
+        service.initialize_root().await.unwrap();
+        let client_id = ClientId::new(100);
+
+        // Create a file
+        let file_attr = service
+            .create(ROOT_INODE, "test.txt", 0o644, TEST_UID, TEST_GID, client_id)
+            .await
+            .unwrap();
+
+        // Try to read with an invalid file handle (non-zero but not open)
+        // Should fall back to slow path using inode
+        let invalid_fh = 99999;
+        let result = service
+            .read(file_attr.ino, invalid_fh, 0, 1024, TEST_UID, TEST_GID, client_id)
+            .await;
+
+        // Should succeed using fallback path (reading from unopened file)
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_heartbeats_update_timestamp() {
+        let service = create_test_service().await;
+        let client_id = ClientId::new(999);
+
+        // First heartbeat
+        service.heartbeat(client_id);
+
+        let first_timestamp = {
+            let sessions = service
+                .client_sessions
+                .read()
+                .expect("client_sessions lock poisoned in test");
+            *sessions.get(&client_id).unwrap()
+        };
+
+        // Wait a bit
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Second heartbeat
+        service.heartbeat(client_id);
+
+        let second_timestamp = {
+            let sessions = service
+                .client_sessions
+                .read()
+                .expect("client_sessions lock poisoned in test");
+            *sessions.get(&client_id).unwrap()
+        };
+
+        // Second timestamp should be later than first
+        assert!(
+            second_timestamp > first_timestamp,
+            "Second heartbeat should update timestamp"
+        );
+    }
 }
