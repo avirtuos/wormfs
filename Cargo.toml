@@ -45,9 +45,12 @@ libp2p = { version = "0.53", optional = true, features = [
     "request-response",   # Direct RPC
     "noise",              # Transport encryption
     "tcp",                # TCP transport
+    "tokio",              # Tokio runtime support
+    "yamux",              # Connection multiplexing
     "mdns",               # Local peer discovery (optional)
     "identify",           # Peer info exchange
     "ping",               # Keep-alive/connection health
+    "macros",             # NetworkBehaviour derive macro
 ] }
 
 # Raft consensus (OpenRaft)
