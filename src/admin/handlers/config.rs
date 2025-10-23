@@ -122,7 +122,6 @@ pub async fn config_handler(State(mount_config): State<Arc<MountConfig>>) -> imp
                 "enable_xattr": mount_config.filesystem_config.enable_xattr,
                 "uid": mount_config.filesystem_config.uid,
                 "gid": mount_config.filesystem_config.gid,
-                "enable_stripe_cache": mount_config.filesystem_config.enable_stripe_cache,
             },
             "descriptions": {
                 "node_id": "Unique identifier for this storage node in distributed system",
@@ -142,7 +141,6 @@ pub async fn config_handler(State(mount_config): State<Arc<MountConfig>>) -> imp
                 "enable_xattr": "Enable extended attributes support",
                 "uid": "Default user ID for filesystem operations",
                 "gid": "Default group ID for filesystem operations",
-                "enable_stripe_cache": "Enable per-handle write buffering to reduce I/O amplification",
             }
         },
         "buffered_file_handle": {

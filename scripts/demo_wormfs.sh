@@ -534,13 +534,13 @@ EOF
 
     # Stage file in /tmp first
     STAGING_FILE=$(mktemp -t wormfs-demo-staging.XXXXXX.dat)
-    print_command "dd if=/dev/urandom of=$STAGING_FILE bs=1M count=1000"
-    dd if=/dev/urandom of="$STAGING_FILE" bs=1M count=1000 2>&1 | tail -1
+    print_command "dd if=/dev/urandom of=$STAGING_FILE bs=1M count=2000"
+    dd if=/dev/urandom of="$STAGING_FILE" bs=1M count=2000 2>&1 | tail -1
     if [ $? -ne 0 ]; then
         echo -e "${RED}ERROR: Failed to create test file with dd${NC}"
         fail "Failed to create test file with dd"
     fi
-    print_success "Created 1000MB file in staging area"
+    print_success "Created 2000MB file in staging area"
 
     # Calculate checksum of original file
     print_command "md5sum $STAGING_FILE"
@@ -564,13 +564,11 @@ EOF
 
     # Calculate write throughput
     CP_ELAPSED=$(echo "$CP_END - $CP_START" | bc)
-    CP_THROUGHPUT_MBPS=$(echo "scale=2; 300 / $CP_ELAPSED" | bc)
+    CP_THROUGHPUT_MBPS=$(echo "scale=2; 2000 / $CP_ELAPSED" | bc)
     CP_THROUGHPUT_MBITS=$(echo "scale=2; $CP_THROUGHPUT_MBPS * 8" | bc)
 
     print_success "Copied file to WormFS in ${CP_ELAPSED}s"
     echo -e "${GREEN}Write speed: ${CP_THROUGHPUT_MBPS} MB/s (${CP_THROUGHPUT_MBITS} Mbit/s)${NC}"
-
-    sleep 30
 
     # Verify size
     SIZE=$(stat -f%z "$MOUNT_POINT/random.dat" 2>/dev/null || stat -c%s "$MOUNT_POINT/random.dat" 2>/dev/null)
@@ -588,7 +586,7 @@ EOF
 
     # Calculate read throughput
     MD5_ELAPSED=$(echo "$MD5_END - $MD5_START" | bc)
-    MD5_THROUGHPUT_MBPS=$(echo "scale=2; 300 / $MD5_ELAPSED" | bc)
+    MD5_THROUGHPUT_MBPS=$(echo "scale=2; 2000 / $MD5_ELAPSED" | bc)
     MD5_THROUGHPUT_MBITS=$(echo "scale=2; $MD5_THROUGHPUT_MBPS * 8" | bc)
 
     echo -e "${CYAN}WormFS MD5:  $WORMFS_CHECKSUM${NC}"

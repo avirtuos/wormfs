@@ -69,9 +69,8 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
 
     let file_store = Arc::new(file_store);
 
-    // Create FileSystemService with BufferedFileHandle enabled
-    let mut fs_config = wormfs::filesystem_service::types::Config::default();
-    fs_config.enable_stripe_cache = true; // Now controls BufferedFileHandle creation
+    // Create FileSystemService (BufferedFileHandle is always enabled)
+    let fs_config = wormfs::filesystem_service::types::Config::default();
 
     let service = FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None)
         .await
@@ -181,7 +180,7 @@ async fn test_incremental_write_5mb_file() {
         .expect("Failed to open file for reading");
 
     let read_data = service
-        .read(inode, 0, 0, TOTAL_SIZE as u32, uid, gid, client_id)
+        .read(inode, fh_read, 0, TOTAL_SIZE as u32, uid, gid, client_id)
         .await
         .expect("Failed to read file");
 

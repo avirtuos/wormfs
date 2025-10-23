@@ -76,11 +76,8 @@ pub struct Config {
     /// Default GID for filesystem operations
     pub gid: u32,
 
-    /// Enable stripe write buffering via BufferedFileHandle to reduce I/O amplification
-    /// When enabled, each file handle gets a per-handle write buffer (20MB default)
-    pub enable_stripe_cache: bool,
-
     /// BufferedFileHandle configuration
+    /// BufferedFileHandle is always enabled for all file operations
     #[serde(default)]
     pub buffered_file_handle_config: BufferedFileHandleConfig,
 }
@@ -178,8 +175,7 @@ impl Default for Config {
             enable_xattr: true,
             uid: 1000,
             gid: 1000,
-            // BufferedFileHandle enabled by default to reduce I/O amplification
-            enable_stripe_cache: true,
+            // BufferedFileHandle is always enabled for all file operations
             buffered_file_handle_config: BufferedFileHandleConfig::default(),
         }
     }
