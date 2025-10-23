@@ -169,6 +169,261 @@ impl super::buffered_file_handle::BufferedMetricsReporter for BufferedMetricsCol
     }
 }
 
+/// Metrics collector for FileSystemService API operations.
+///
+/// Tracks call counts and latencies for all public FileSystemService APIs
+/// to provide observability into filesystem operation patterns and performance.
+#[derive(Debug)]
+struct ApiMetricsCollector {
+    // File operation counters
+    create_calls: AtomicU64,
+    open_calls: AtomicU64,
+    read_calls: AtomicU64,
+    write_calls: AtomicU64,
+    unlink_calls: AtomicU64,
+    symlink_calls: AtomicU64,
+    readlink_calls: AtomicU64,
+    flush_calls: AtomicU64,
+    fsync_calls: AtomicU64,
+    release_calls: AtomicU64,
+
+    // Directory operation counters
+    mkdir_calls: AtomicU64,
+    rmdir_calls: AtomicU64,
+    readdir_calls: AtomicU64,
+
+    // Metadata operation counters
+    getattr_calls: AtomicU64,
+    setattr_calls: AtomicU64,
+
+    // Lock operation counters
+    acquire_lock_calls: AtomicU64,
+    release_lock_calls: AtomicU64,
+    extend_lock_calls: AtomicU64,
+
+    // Latency vectors (for calculating averages)
+    create_latencies: Arc<Mutex<Vec<f64>>>,
+    open_latencies: Arc<Mutex<Vec<f64>>>,
+    read_latencies: Arc<Mutex<Vec<f64>>>,
+    write_latencies: Arc<Mutex<Vec<f64>>>,
+    unlink_latencies: Arc<Mutex<Vec<f64>>>,
+    symlink_latencies: Arc<Mutex<Vec<f64>>>,
+    readlink_latencies: Arc<Mutex<Vec<f64>>>,
+    flush_latencies: Arc<Mutex<Vec<f64>>>,
+    fsync_latencies: Arc<Mutex<Vec<f64>>>,
+    release_latencies: Arc<Mutex<Vec<f64>>>,
+    mkdir_latencies: Arc<Mutex<Vec<f64>>>,
+    rmdir_latencies: Arc<Mutex<Vec<f64>>>,
+    readdir_latencies: Arc<Mutex<Vec<f64>>>,
+    getattr_latencies: Arc<Mutex<Vec<f64>>>,
+    setattr_latencies: Arc<Mutex<Vec<f64>>>,
+    acquire_lock_latencies: Arc<Mutex<Vec<f64>>>,
+    release_lock_latencies: Arc<Mutex<Vec<f64>>>,
+    extend_lock_latencies: Arc<Mutex<Vec<f64>>>,
+
+    // Previous values for delta calculation
+    previous_create_calls: AtomicU64,
+    previous_open_calls: AtomicU64,
+    previous_read_calls: AtomicU64,
+    previous_write_calls: AtomicU64,
+    previous_unlink_calls: AtomicU64,
+    previous_symlink_calls: AtomicU64,
+    previous_readlink_calls: AtomicU64,
+    previous_flush_calls: AtomicU64,
+    previous_fsync_calls: AtomicU64,
+    previous_release_calls: AtomicU64,
+    previous_mkdir_calls: AtomicU64,
+    previous_rmdir_calls: AtomicU64,
+    previous_readdir_calls: AtomicU64,
+    previous_getattr_calls: AtomicU64,
+    previous_setattr_calls: AtomicU64,
+    previous_acquire_lock_calls: AtomicU64,
+    previous_release_lock_calls: AtomicU64,
+    previous_extend_lock_calls: AtomicU64,
+}
+
+impl ApiMetricsCollector {
+    fn new() -> Self {
+        Self {
+            // Initialize counters
+            create_calls: AtomicU64::new(0),
+            open_calls: AtomicU64::new(0),
+            read_calls: AtomicU64::new(0),
+            write_calls: AtomicU64::new(0),
+            unlink_calls: AtomicU64::new(0),
+            symlink_calls: AtomicU64::new(0),
+            readlink_calls: AtomicU64::new(0),
+            flush_calls: AtomicU64::new(0),
+            fsync_calls: AtomicU64::new(0),
+            release_calls: AtomicU64::new(0),
+            mkdir_calls: AtomicU64::new(0),
+            rmdir_calls: AtomicU64::new(0),
+            readdir_calls: AtomicU64::new(0),
+            getattr_calls: AtomicU64::new(0),
+            setattr_calls: AtomicU64::new(0),
+            acquire_lock_calls: AtomicU64::new(0),
+            release_lock_calls: AtomicU64::new(0),
+            extend_lock_calls: AtomicU64::new(0),
+
+            // Initialize latency vectors
+            create_latencies: Arc::new(Mutex::new(Vec::new())),
+            open_latencies: Arc::new(Mutex::new(Vec::new())),
+            read_latencies: Arc::new(Mutex::new(Vec::new())),
+            write_latencies: Arc::new(Mutex::new(Vec::new())),
+            unlink_latencies: Arc::new(Mutex::new(Vec::new())),
+            symlink_latencies: Arc::new(Mutex::new(Vec::new())),
+            readlink_latencies: Arc::new(Mutex::new(Vec::new())),
+            flush_latencies: Arc::new(Mutex::new(Vec::new())),
+            fsync_latencies: Arc::new(Mutex::new(Vec::new())),
+            release_latencies: Arc::new(Mutex::new(Vec::new())),
+            mkdir_latencies: Arc::new(Mutex::new(Vec::new())),
+            rmdir_latencies: Arc::new(Mutex::new(Vec::new())),
+            readdir_latencies: Arc::new(Mutex::new(Vec::new())),
+            getattr_latencies: Arc::new(Mutex::new(Vec::new())),
+            setattr_latencies: Arc::new(Mutex::new(Vec::new())),
+            acquire_lock_latencies: Arc::new(Mutex::new(Vec::new())),
+            release_lock_latencies: Arc::new(Mutex::new(Vec::new())),
+            extend_lock_latencies: Arc::new(Mutex::new(Vec::new())),
+
+            // Initialize previous values
+            previous_create_calls: AtomicU64::new(0),
+            previous_open_calls: AtomicU64::new(0),
+            previous_read_calls: AtomicU64::new(0),
+            previous_write_calls: AtomicU64::new(0),
+            previous_unlink_calls: AtomicU64::new(0),
+            previous_symlink_calls: AtomicU64::new(0),
+            previous_readlink_calls: AtomicU64::new(0),
+            previous_flush_calls: AtomicU64::new(0),
+            previous_fsync_calls: AtomicU64::new(0),
+            previous_release_calls: AtomicU64::new(0),
+            previous_mkdir_calls: AtomicU64::new(0),
+            previous_rmdir_calls: AtomicU64::new(0),
+            previous_readdir_calls: AtomicU64::new(0),
+            previous_getattr_calls: AtomicU64::new(0),
+            previous_setattr_calls: AtomicU64::new(0),
+            previous_acquire_lock_calls: AtomicU64::new(0),
+            previous_release_lock_calls: AtomicU64::new(0),
+            previous_extend_lock_calls: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a call and its latency for a specific API.
+    fn record_call(&self, api_name: &str, latency_secs: f64) {
+        // Increment counter and store latency based on API name
+        match api_name {
+            "create" => {
+                self.create_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.create_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "open" => {
+                self.open_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.open_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "read" => {
+                self.read_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.read_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "write" => {
+                self.write_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.write_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "unlink" => {
+                self.unlink_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.unlink_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "symlink" => {
+                self.symlink_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.symlink_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "readlink" => {
+                self.readlink_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.readlink_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "flush" => {
+                self.flush_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.flush_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "fsync" => {
+                self.fsync_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.fsync_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "release" => {
+                self.release_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.release_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "mkdir" => {
+                self.mkdir_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.mkdir_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "rmdir" => {
+                self.rmdir_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.rmdir_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "readdir" => {
+                self.readdir_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.readdir_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "getattr" => {
+                self.getattr_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.getattr_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "setattr" => {
+                self.setattr_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.setattr_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "acquire_lock" => {
+                self.acquire_lock_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.acquire_lock_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "release_lock" => {
+                self.release_lock_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.release_lock_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            "extend_lock" => {
+                self.extend_lock_calls.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut latencies) = self.extend_lock_latencies.lock() {
+                    latencies.push(latency_secs);
+                }
+            }
+            _ => {} // Unknown API name - ignore
+        }
+    }
+}
+
 /// Concrete implementation of FileSystemService.
 ///
 /// This implementation:
@@ -210,6 +465,9 @@ pub struct FileSystemServiceImpl {
 
     /// Metrics collector for BufferedFileHandle operations
     buffered_metrics: Arc<BufferedMetricsCollector>,
+
+    /// Metrics collector for FileSystemService API operations
+    api_metrics: Arc<ApiMetricsCollector>,
 }
 
 impl FileSystemServiceImpl {
@@ -528,6 +786,71 @@ impl FileSystemServiceImpl {
         (total_bytes, total_complete, total_partial, handle_count)
     }
 
+    /// Publish FileSystemService API metrics (call counts and average latencies).
+    ///
+    /// This method publishes delta-based counters for API call counts and
+    /// gauge metrics for average latencies. Called periodically by background task.
+    pub fn publish_api_metrics(&self) {
+        if let Some(metrics) = &self.metrics {
+            // Helper macro to publish metrics for an API
+            macro_rules! publish_api {
+                ($api_name:expr, $calls_counter:ident, $prev_counter:ident, $latencies:ident) => {
+                    // Publish call count (delta)
+                    let current_calls = self.api_metrics.$calls_counter.load(Ordering::Relaxed);
+                    let previous_calls = self.api_metrics.$prev_counter.load(Ordering::Relaxed);
+                    let delta_calls = current_calls.saturating_sub(previous_calls);
+                    if delta_calls > 0 {
+                        let _ = metrics.publish_counter(
+                            &format!("filesystem.api.{}.calls", $api_name),
+                            delta_calls,
+                            crate::metric_service::UnitType::Count,
+                        );
+                        self.api_metrics.$prev_counter.store(current_calls, Ordering::Relaxed);
+                    }
+
+                    // Publish average latency
+                    if let Ok(mut latencies) = self.api_metrics.$latencies.lock() {
+                        if !latencies.is_empty() {
+                            let avg_latency = latencies.iter().sum::<f64>() / latencies.len() as f64;
+                            let _ = metrics.publish_gauge(
+                                &format!("filesystem.api.{}.latency_avg", $api_name),
+                                avg_latency,
+                                crate::metric_service::UnitType::Seconds,
+                            );
+                            latencies.clear();
+                        }
+                    }
+                };
+            }
+
+            // File operations
+            publish_api!("create", create_calls, previous_create_calls, create_latencies);
+            publish_api!("open", open_calls, previous_open_calls, open_latencies);
+            publish_api!("read", read_calls, previous_read_calls, read_latencies);
+            publish_api!("write", write_calls, previous_write_calls, write_latencies);
+            publish_api!("unlink", unlink_calls, previous_unlink_calls, unlink_latencies);
+            publish_api!("symlink", symlink_calls, previous_symlink_calls, symlink_latencies);
+            publish_api!("readlink", readlink_calls, previous_readlink_calls, readlink_latencies);
+            publish_api!("flush", flush_calls, previous_flush_calls, flush_latencies);
+            publish_api!("fsync", fsync_calls, previous_fsync_calls, fsync_latencies);
+            publish_api!("release", release_calls, previous_release_calls, release_latencies);
+
+            // Directory operations
+            publish_api!("mkdir", mkdir_calls, previous_mkdir_calls, mkdir_latencies);
+            publish_api!("rmdir", rmdir_calls, previous_rmdir_calls, rmdir_latencies);
+            publish_api!("readdir", readdir_calls, previous_readdir_calls, readdir_latencies);
+
+            // Metadata operations
+            publish_api!("getattr", getattr_calls, previous_getattr_calls, getattr_latencies);
+            publish_api!("setattr", setattr_calls, previous_setattr_calls, setattr_latencies);
+
+            // Lock operations
+            publish_api!("acquire_lock", acquire_lock_calls, previous_acquire_lock_calls, acquire_lock_latencies);
+            publish_api!("release_lock", release_lock_calls, previous_release_lock_calls, release_lock_latencies);
+            publish_api!("extend_lock", extend_lock_calls, previous_extend_lock_calls, extend_lock_latencies);
+        }
+    }
+
     /// Create a BufferedFileHandle for a file.
     ///
     /// This helper creates a per-handle write buffer with Raft integration.
@@ -613,6 +936,7 @@ impl FileSystemServiceImpl {
             lock_extension_task: Arc::new(RwLock::new(None)),
             metrics: None, // Will be set via dependency injection
             buffered_metrics: Arc::new(BufferedMetricsCollector::new()),
+            api_metrics: Arc::new(ApiMetricsCollector::new()),
         }
     }
 
@@ -717,6 +1041,9 @@ impl FileSystemServiceImpl {
 
                 // Publish BufferedFileHandle memory metrics
                 service_metrics.publish_buffered_memory_usage();
+
+                // Publish FileSystemService API metrics
+                service_metrics.publish_api_metrics();
             }
         });
 
@@ -1077,6 +1404,7 @@ impl FileSystemService for FileSystemServiceImpl {
         gid: u32,
         _client_id: ClientId,
     ) -> Result<FileAttr, Error> {
+        let _start = Instant::now();
         tracing::debug!("create: parent={}, name={}, mode={:o}", parent, name, mode);
 
         // Step 1: Validate parent exists and is a directory
@@ -1087,6 +1415,7 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
@@ -1136,10 +1465,12 @@ impl FileSystemService for FileSystemServiceImpl {
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
                 // Release the reserved inode on error
                 let _ = self.metadata_store.release_inode(inode).await;
+                self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
                 let _ = self.metadata_store.release_inode(inode).await;
+                self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal("Unexpected Raft result for create".into()));
             }
         };
@@ -1166,6 +1497,7 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
         {
             let _ = self.metadata_store.release_inode(inode).await;
+            self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
             return Err(self.convert_metadata_error(e));
         }
 
@@ -1175,6 +1507,7 @@ impl FileSystemService for FileSystemServiceImpl {
         // here ensures immediate cleanup on database errors.
         if let Err(e) = self.metadata_store.confirm_inode(inode).await {
             let _ = self.metadata_store.release_inode(inode).await;
+            self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
             return Err(self.convert_metadata_error(e));
         }
 
@@ -1206,6 +1539,7 @@ impl FileSystemService for FileSystemServiceImpl {
             inode,
             file_id
         );
+        self.api_metrics.record_call("create", _start.elapsed().as_secs_f64());
         Ok(attr)
     }
 
@@ -1217,6 +1551,7 @@ impl FileSystemService for FileSystemServiceImpl {
         gid: u32,
         _client_id: ClientId,
     ) -> Result<(u64, FileAttr), Error> {
+        let _start = Instant::now();
         tracing::debug!(
             "open: inode={}, flags={}, uid={}, gid={}",
             inode,
@@ -1234,6 +1569,7 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 2: Check file type (can't open directories with open())
         if record.file_type == crate::metadata_store::FileType::Directory {
+            self.api_metrics.record_call("open", _start.elapsed().as_secs_f64());
             return Err(Error::IsADirectory(inode));
         }
 
@@ -1290,6 +1626,7 @@ impl FileSystemService for FileSystemServiceImpl {
                     Some(lock_id)
                 }
                 Ok(_) => {
+                    self.api_metrics.record_call("open", _start.elapsed().as_secs_f64());
                     return Err(Error::RaftError(
                         "Unexpected Raft result for lock acquisition".into(),
                     ));
@@ -1297,6 +1634,7 @@ impl FileSystemService for FileSystemServiceImpl {
                 Err(e) => {
                     // Lock acquisition failed - likely already locked
                     tracing::warn!("Failed to acquire write lock on inode {}: {}", inode, e);
+                    self.api_metrics.record_call("open", _start.elapsed().as_secs_f64());
                     return Err(Error::InvalidArgument(format!(
                         "File inode {} is already open for writing",
                         inode
@@ -1403,6 +1741,7 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 7: Return file handle and attributes
         let attr = self.file_record_to_attr(&record);
         tracing::info!("Opened file: inode={}, handle={}", inode, file_handle);
+        self.api_metrics.record_call("open", _start.elapsed().as_secs_f64());
         Ok((file_handle, attr))
     }
 
@@ -1479,6 +1818,7 @@ impl FileSystemService for FileSystemServiceImpl {
                     );
                 }
 
+                self.api_metrics.record_call("read", start.elapsed().as_secs_f64());
                 return Ok(data);
             }
         }
@@ -1506,6 +1846,7 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Check bounds
         if offset >= record.size {
+            self.api_metrics.record_call("read", start.elapsed().as_secs_f64());
             return Ok(Vec::new()); // EOF
         }
 
@@ -1606,6 +1947,7 @@ impl FileSystemService for FileSystemServiceImpl {
             );
         }
 
+        self.api_metrics.record_call("read", start.elapsed().as_secs_f64());
         return Ok(data);
     }
 
@@ -1634,6 +1976,7 @@ impl FileSystemService for FileSystemServiceImpl {
         );
 
         if data.is_empty() {
+            self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
             return Ok(0);
         }
 
@@ -1650,6 +1993,7 @@ impl FileSystemService for FileSystemServiceImpl {
 
             // Validate that the file handle matches the inode
             if open_file.inode != inode {
+                self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
                 return Err(Error::InvalidArgument(format!(
                     "File handle {} does not match inode {}",
                     file_handle, inode
@@ -1665,6 +2009,7 @@ impl FileSystemService for FileSystemServiceImpl {
         let attrs = if let Some(ref handle) = buffered_handle {
             handle.get_file_by_inode()
         } else {
+            self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
             return Err(Error::Internal(
                 "BufferedFileHandle required - enable_stripe_cache must be true".to_string(),
             ));
@@ -1683,6 +2028,7 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 4: Validate file size won't exceed maximum
         let end_offset = checked_end_offset(offset, data.len())?;
         if end_offset > self.config.max_file_size {
+            self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
             return Err(Error::NoSpace); // ENOSPC - file would exceed maximum size
         }
 
@@ -1706,6 +2052,7 @@ impl FileSystemService for FileSystemServiceImpl {
                 "BufferedFileHandle not enabled for file handle {}, writes will not be buffered",
                 file_handle
             );
+            self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
             return Err(Error::Internal(
                 "BufferedFileHandle required - enable_stripe_cache must be true".to_string(),
             ));
@@ -1748,6 +2095,7 @@ impl FileSystemService for FileSystemServiceImpl {
             inode,
             offset
         );
+        self.api_metrics.record_call("write", start.elapsed().as_secs_f64());
         Ok(bytes_written as u32)
     }
 
@@ -1759,6 +2107,7 @@ impl FileSystemService for FileSystemServiceImpl {
         gid: u32,
         _client_id: ClientId,
     ) -> Result<(), Error> {
+        let _start = Instant::now();
         tracing::debug!(
             "unlink: parent={}, name={}, uid={}, gid={}",
             parent,
@@ -1775,6 +2124,7 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
@@ -1798,6 +2148,7 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 3: Check file type (can't unlink directories - use rmdir)
         if file_record.file_type == crate::metadata_store::FileType::Directory {
+            self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
             return Err(Error::IsADirectory(file_record.inode));
         }
 
@@ -1826,9 +2177,11 @@ impl FileSystemService for FileSystemServiceImpl {
         match result {
             crate::filesystem_service::raft_commands::RaftCommandResult::FileDeleted => {}
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
+                self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
+                self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal("Unexpected Raft result for unlink".into()));
             }
         }
@@ -1842,6 +2195,7 @@ impl FileSystemService for FileSystemServiceImpl {
             path,
             file_record.inode
         );
+        self.api_metrics.record_call("unlink", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -1854,6 +2208,7 @@ impl FileSystemService for FileSystemServiceImpl {
         gid: u32,
         _client_id: ClientId,
     ) -> Result<FileAttr, Error> {
+        let _start = Instant::now();
         tracing::debug!(
             "symlink: parent={}, name={}, target={}",
             parent,
@@ -1869,12 +2224,14 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
         // Step 2: Check if symlink already exists
         let path = parent_record.path.join(name);
         if let Ok(_existing) = self.metadata_store.get_file_by_path(&path).await {
+            self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
             return Err(Error::AlreadyExists(path.to_string_lossy().into_owned()));
         }
 
@@ -1898,9 +2255,11 @@ impl FileSystemService for FileSystemServiceImpl {
         let (inode, file_id) = match result {
             RaftCommandResult::SymlinkCreated { inode, file_id } => (inode, file_id),
             RaftCommandResult::Error { message } => {
+                self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
+                self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal(
                     "Unexpected Raft result for symlink creation".into(),
                 ));
@@ -1950,10 +2309,12 @@ impl FileSystemService for FileSystemServiceImpl {
             file_id
         );
 
+        self.api_metrics.record_call("symlink", _start.elapsed().as_secs_f64());
         Ok(attr)
     }
 
     async fn readlink(&self, inode: u64) -> Result<String, Error> {
+        let _start = Instant::now();
         tracing::debug!("readlink: inode={}", inode);
 
         // Get the file record
@@ -1969,12 +2330,15 @@ impl FileSystemService for FileSystemServiceImpl {
         }
 
         // Return the target path
-        record.target.ok_or_else(|| {
+        let result = record.target.ok_or_else(|| {
             Error::Internal(format!("Symlink at inode {} has no target path", inode))
-        })
+        });
+        self.api_metrics.record_call("readlink", _start.elapsed().as_secs_f64());
+        result
     }
 
     async fn flush(&self, file_handle: u64) -> Result<(), Error> {
+        let _start = Instant::now();
         tracing::debug!("flush: file_handle={}", file_handle);
 
         // Get the buffered handle if present
@@ -2011,10 +2375,12 @@ impl FileSystemService for FileSystemServiceImpl {
             );
         }
 
+        self.api_metrics.record_call("flush", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
     async fn fsync(&self, file_handle: u64) -> Result<(), Error> {
+        let _start = Instant::now();
         tracing::debug!("fsync: file_handle={}", file_handle);
 
         // Get the buffered handle if present
@@ -2048,10 +2414,12 @@ impl FileSystemService for FileSystemServiceImpl {
             );
         }
 
+        self.api_metrics.record_call("fsync", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
     async fn release(&self, file_handle: u64) -> Result<(), Error> {
+        let _start = Instant::now();
         tracing::debug!("release: file_handle={}", file_handle);
 
         // Inform BufferedFileHandle about release before closing (if present)
@@ -2132,6 +2500,7 @@ impl FileSystemService for FileSystemServiceImpl {
             }
         }
 
+        self.api_metrics.record_call("release", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -2146,6 +2515,7 @@ impl FileSystemService for FileSystemServiceImpl {
         gid: u32,
         _client_id: ClientId,
     ) -> Result<FileAttr, Error> {
+        let _start = Instant::now();
         tracing::debug!(
             "mkdir: parent={}, name={}, mode={:o}, uid={}, gid={}",
             parent,
@@ -2163,6 +2533,7 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
@@ -2179,6 +2550,7 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 3: Check if directory already exists
         let path = parent_record.path.join(name);
         if let Ok(_existing) = self.metadata_store.get_file_by_path(&path).await {
+            self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
             return Err(Error::AlreadyExists(path.to_string_lossy().into_owned()));
         }
 
@@ -2218,10 +2590,12 @@ impl FileSystemService for FileSystemServiceImpl {
             } => file_id,
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
                 let _ = self.metadata_store.release_inode(inode).await;
+                self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
                 let _ = self.metadata_store.release_inode(inode).await;
+                self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal(
                     "Unexpected Raft result for directory creation".into(),
                 ));
@@ -2250,12 +2624,14 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
         {
             let _ = self.metadata_store.release_inode(inode).await;
+            self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
             return Err(self.convert_metadata_error(e));
         }
 
         // Step 8: Confirm inode reservation - release inode on error
         if let Err(e) = self.metadata_store.confirm_inode(inode).await {
             let _ = self.metadata_store.release_inode(inode).await;
+            self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
             return Err(self.convert_metadata_error(e));
         }
 
@@ -2288,6 +2664,7 @@ impl FileSystemService for FileSystemServiceImpl {
             file_id
         );
 
+        self.api_metrics.record_call("mkdir", _start.elapsed().as_secs_f64());
         Ok(attr)
     }
 
@@ -2299,6 +2676,7 @@ impl FileSystemService for FileSystemServiceImpl {
         gid: u32,
         _client_id: ClientId,
     ) -> Result<(), Error> {
+        let _start = Instant::now();
         tracing::debug!(
             "rmdir: parent={}, name={}, uid={}, gid={}",
             parent,
@@ -2315,6 +2693,7 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(parent));
         }
 
@@ -2338,6 +2717,7 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 4: Verify target is a directory (not a file or symlink)
         if dir_record.file_type != crate::metadata_store::FileType::Directory {
+            self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
             return Err(Error::NotADirectory(dir_record.inode));
         }
 
@@ -2350,6 +2730,7 @@ impl FileSystemService for FileSystemServiceImpl {
             .map_err(|e| self.convert_metadata_error(e))?;
 
         if !children.is_empty() {
+            self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
             return Err(Error::DirectoryNotEmpty(dir_record.inode));
         }
 
@@ -2380,9 +2761,11 @@ impl FileSystemService for FileSystemServiceImpl {
                 // Success - file already deleted by Raft stub
             }
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
+                self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
                 return Err(Error::MetadataError(message));
             }
             _ => {
+                self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
                 return Err(Error::Internal(
                     "Unexpected Raft result for directory deletion".into(),
                 ));
@@ -2399,6 +2782,7 @@ impl FileSystemService for FileSystemServiceImpl {
             dir_record.inode
         );
 
+        self.api_metrics.record_call("rmdir", _start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -2408,6 +2792,7 @@ impl FileSystemService for FileSystemServiceImpl {
         _offset: i64,
         _client_id: ClientId,
     ) -> Result<Vec<DirEntry>, Error> {
+        let _start = Instant::now();
         // Get the directory's file record
         let record = self
             .metadata_store
@@ -2489,22 +2874,29 @@ impl FileSystemService for FileSystemServiceImpl {
             });
         }
 
+        self.api_metrics.record_call("readdir", _start.elapsed().as_secs_f64());
         Ok(entries)
     }
 
     // ===== Metadata Operations =====
 
     async fn getattr(&self, inode: u64) -> Result<FileAttr, Error> {
+        let _start = Instant::now();
+
         // Fast path: If file has an open BufferedFileHandle, use its cached metadata
         // BufferedFileHandle maintains up-to-date attributes, so no flush needed
         if let Some(buffered_handle) = self.get_buffered_handle_by_inode(inode) {
-            return Ok(buffered_handle.get_file_by_inode());
+            let result = Ok(buffered_handle.get_file_by_inode());
+            self.api_metrics.record_call("getattr", _start.elapsed().as_secs_f64());
+            return result;
         }
 
         // Slow path: No open file handle, need to query MetadataStore
         // First check inode_manager cache
         if let Some(cached) = self.inode_manager.cache().get(inode) {
-            return Ok(self.cached_metadata_to_attr(inode, &cached));
+            let result = Ok(self.cached_metadata_to_attr(inode, &cached));
+            self.api_metrics.record_call("getattr", _start.elapsed().as_secs_f64());
+            return result;
         }
 
         // Cache miss - query MetadataStore
@@ -2530,7 +2922,9 @@ impl FileSystemService for FileSystemServiceImpl {
             .cache()
             .insert(record.inode, record.file_id, metadata);
 
-        Ok(self.file_record_to_attr(&record))
+        let result = Ok(self.file_record_to_attr(&record));
+        self.api_metrics.record_call("getattr", _start.elapsed().as_secs_f64());
+        result
     }
 
     async fn setattr(
@@ -2547,6 +2941,7 @@ impl FileSystemService for FileSystemServiceImpl {
         req_gid: u32,
         _client_id: ClientId,
     ) -> Result<FileAttr, Error> {
+        let _start = Instant::now();
         tracing::debug!(
             "setattr: inode={}, file_handle={:?}, mode={:?}, size={:?}, req_uid={}, req_gid={}",
             inode,
@@ -2588,6 +2983,7 @@ impl FileSystemService for FileSystemServiceImpl {
         // Step 3: Validate new size against max_file_size
         if let Some(new_size) = size {
             if new_size > self.config.max_file_size {
+                self.api_metrics.record_call("setattr", _start.elapsed().as_secs_f64());
                 return Err(Error::NoSpace); // ENOSPC - file would exceed maximum size
             }
         }
@@ -2783,6 +3179,7 @@ impl FileSystemService for FileSystemServiceImpl {
         self.inode_manager.cache().invalidate(inode);
 
         tracing::info!("Updated attributes for inode {}", inode);
+        self.api_metrics.record_call("setattr", _start.elapsed().as_secs_f64());
         Ok(attr)
     }
 
@@ -2795,17 +3192,23 @@ impl FileSystemService for FileSystemServiceImpl {
         _expires_at: SystemTime,
         _client_id: ClientId,
     ) -> Result<u64, Error> {
+        let _start = Instant::now();
         // Phase 1: Stub - locks will be implemented in Step 8
-        Err(Error::NotSupported(
+        let result = Err(Error::NotSupported(
             "locks not implemented in Step 7".into(),
-        ))
+        ));
+        self.api_metrics.record_call("acquire_lock", _start.elapsed().as_secs_f64());
+        result
     }
 
     async fn release_lock(&self, _inode: u64, _client_id: ClientId) -> Result<(), Error> {
+        let _start = Instant::now();
         // Phase 1: Stub - locks will be implemented in Step 8
-        Err(Error::NotSupported(
+        let result = Err(Error::NotSupported(
             "locks not implemented in Step 7".into(),
-        ))
+        ));
+        self.api_metrics.record_call("release_lock", _start.elapsed().as_secs_f64());
+        result
     }
 
     async fn extend_lock(
@@ -2814,10 +3217,13 @@ impl FileSystemService for FileSystemServiceImpl {
         _new_expiry: SystemTime,
         _client_id: ClientId,
     ) -> Result<(), Error> {
+        let _start = Instant::now();
         // Phase 1: Stub - locks will be implemented in Step 8
-        Err(Error::NotSupported(
+        let result = Err(Error::NotSupported(
             "locks not implemented in Step 7".into(),
-        ))
+        ));
+        self.api_metrics.record_call("extend_lock", _start.elapsed().as_secs_f64());
+        result
     }
 }
 
