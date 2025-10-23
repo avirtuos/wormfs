@@ -36,8 +36,8 @@ struct FileStoreInner {
     metrics: std::sync::RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>,
 
     /// In-memory cache for decoded stripe data
-    /// Key: StripeId, Value: Vec<u8> (decoded stripe data)
-    stripe_cache: Cache<StripeId, Vec<u8>>,
+    /// Key: StripeId, Value: Arc<Vec<u8>> (Arc-wrapped decoded stripe data for zero-copy sharing)
+    stripe_cache: Cache<StripeId, Arc<Vec<u8>>>,
     // NOTE: MetadataStore integration will be added in Phase 2+
     // For Phase 1, FileStore operates independently
 }
@@ -264,7 +264,7 @@ impl FileStore for FileStoreImpl {
         // Initialize stripe cache with configured settings
         let stripe_cache = Cache::builder()
             .max_capacity(config.stripe_cache_size_mb * 1_024 * 1_024)
-            .weigher(|_key: &StripeId, value: &Vec<u8>| -> u32 {
+            .weigher(|_key: &StripeId, value: &Arc<Vec<u8>>| -> u32 {
                 value.len().try_into().unwrap_or(u32::MAX)
             })
             .time_to_live(Duration::from_secs(config.stripe_cache_ttl_secs))
@@ -428,7 +428,7 @@ impl FileStore for FileStoreImpl {
         file_id: FileId,
         stripe_id: StripeId,
         chunks: Vec<ChunkMetadata>,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<Arc<Vec<u8>>, Error> {
         eprintln!(
             "[FileStore] Reading stripe: stripe_id={:?}, file_id={:?}, chunks={}",
             stripe_id,
@@ -456,6 +456,7 @@ impl FileStore for FileStoreImpl {
                 );
             }
 
+            // Return Arc directly - zero-copy! Arc::clone is cheap (just increments ref count)
             return Ok(cached_data);
         }
 
@@ -611,13 +612,14 @@ impl FileStore for FileStoreImpl {
             );
         }
 
-        // Store decoded stripe in cache
+        // Store decoded stripe in cache wrapped in Arc for zero-copy sharing
+        let arc_data = Arc::new(data);
         self.inner
             .stripe_cache
-            .insert(stripe_id, data.clone())
+            .insert(stripe_id, arc_data.clone())
             .await;
 
-        Ok(data)
+        Ok(arc_data)
     }
 
     async fn update_stripe_partial(
@@ -635,9 +637,13 @@ impl FileStore for FileStoreImpl {
         let logical_bytes = new_data.len() as u64;
 
         // 1. Read existing stripe
-        let mut stripe_data = self
+        // Read stripe data (Arc-wrapped for zero-copy sharing)
+        let stripe_data_arc = self
             .read_stripe(file_id, stripe_id, existing_chunks)
             .await?;
+
+        // Clone Arc contents to get mutable copy for modification (RMW operation)
+        let mut stripe_data = (*stripe_data_arc).clone();
 
         // Track physical I/O (read entire stripe)
         let read_bytes = stripe_data.len() as u64;
@@ -971,13 +977,13 @@ mod tests {
         assert_eq!(metadata.file_id, file_id);
         assert_eq!(metadata.stripe_id, stripe_id);
 
-        // Read stripe using returned metadata
+        // Read stripe using returned metadata (returns Arc<Vec<u8>>)
         let read_data = store
             .read_stripe(file_id, stripe_id, metadata.chunks)
             .await
             .unwrap();
 
-        assert_eq!(read_data, original_data);
+        assert_eq!(*read_data, original_data);
     }
 
     #[tokio::test]
@@ -1154,7 +1160,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            read_data, original_data,
+            *read_data, original_data,
             "Should reconstruct from remaining chunks"
         );
     }
@@ -1195,7 +1201,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            read_data, original_data,
+            *read_data, original_data,
             "Should reconstruct from valid chunks"
         );
     }
