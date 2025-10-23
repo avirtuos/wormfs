@@ -12,6 +12,7 @@ use super::{
     ui::templates::INDEX_HTML,
     websocket::{ws_handler, WsState},
 };
+use crate::filesystem_service::mount::MountConfig;
 use crate::metric_service::MetricServiceImpl;
 use axum::{
     response::{Html, IntoResponse},
@@ -24,13 +25,22 @@ use tower_http::trace::TraceLayer;
 /// Admin server instance
 pub struct AdminServer {
     config: Config,
+    mount_config: Arc<MountConfig>,
     metrics: Arc<MetricServiceImpl>,
 }
 
 impl AdminServer {
     /// Create a new admin server instance
-    pub fn new(config: Config, metrics: Arc<MetricServiceImpl>) -> Self {
-        Self { config, metrics }
+    pub fn new(
+        config: Config,
+        mount_config: Arc<MountConfig>,
+        metrics: Arc<MetricServiceImpl>,
+    ) -> Self {
+        Self {
+            config,
+            mount_config,
+            metrics,
+        }
     }
 
     /// Start the admin server
@@ -51,10 +61,11 @@ impl AdminServer {
         }
 
         let config = self.config.clone();
+        let mount_config = self.mount_config.clone();
         let metrics = self.metrics.clone();
 
         let handle = tokio::spawn(async move {
-            if let Err(e) = Self::run_server(config, metrics).await {
+            if let Err(e) = Self::run_server(config, mount_config, metrics).await {
                 tracing::error!("Admin server error: {}", e);
             }
         });
@@ -63,13 +74,17 @@ impl AdminServer {
     }
 
     /// Internal method to run the server
-    async fn run_server(config: Config, metrics: Arc<MetricServiceImpl>) -> Result<(), Error> {
+    async fn run_server(
+        config: Config,
+        mount_config: Arc<MountConfig>,
+        metrics: Arc<MetricServiceImpl>,
+    ) -> Result<(), Error> {
         // Create WebSocket state and start broadcast task
         let ws_state = WsState::new(metrics.clone());
         ws_state.start_broadcast_task();
 
         // Build the router
-        let app = Self::create_router(metrics, ws_state);
+        let app = Self::create_router(mount_config, metrics, ws_state);
 
         // Create bind address
         let addr = format!("{}:{}", config.bind_address, config.port);
@@ -92,11 +107,20 @@ impl AdminServer {
     }
 
     /// Create the Axum router with all routes
-    fn create_router(metrics: Arc<MetricServiceImpl>, ws_state: WsState) -> Router {
+    fn create_router(
+        mount_config: Arc<MountConfig>,
+        metrics: Arc<MetricServiceImpl>,
+        ws_state: WsState,
+    ) -> Router {
         // Create WebSocket router with WsState
         let ws_router = Router::new()
             .route("/ws/metrics", get(ws_handler))
             .with_state(ws_state);
+
+        // Create config router with MountConfig state
+        let config_router = Router::new()
+            .route("/api/config", get(config_handler))
+            .with_state(mount_config);
 
         // Create main router with metrics state
         let api_router = Router::new()
@@ -108,12 +132,12 @@ impl AdminServer {
             .route("/api/metrics/{component}", get(component_metrics_handler))
             .route("/api/health", get(health_handler))
             .route("/api/status", get(status_handler))
-            .route("/api/config", get(config_handler))
             .route("/api/logs", get(logs_handler))
             .with_state(metrics);
 
         // Merge routers and add tracing layer
         api_router
+            .merge(config_router)
             .merge(ws_router)
             .layer(TraceLayer::new_for_http())
     }
@@ -145,7 +169,18 @@ mod tests {
         let metrics =
             Arc::new(MetricServiceImpl::new(metrics_config).expect("Failed to create metrics"));
 
-        let server = AdminServer::new(admin_config, metrics);
+        // Create a minimal MountConfig for testing
+        let mount_config = Arc::new(MountConfig {
+            filesystem_config: crate::filesystem_service::types::Config::default(),
+            metadata_config: crate::metadata_store::Config::default(),
+            file_store_config: crate::file_store::types::Config::default(),
+            metric_config: Some(MetricsConfig::default()),
+            admin_config: Some(admin_config.clone()),
+            mount_point: std::path::PathBuf::from("/tmp/test"),
+            mount_options: crate::filesystem_service::mount::MountOptions::default(),
+        });
+
+        let server = AdminServer::new(admin_config.clone(), mount_config, metrics);
 
         assert_eq!(server.config.port, 9090);
         assert_eq!(server.config.bind_address, "127.0.0.1");
@@ -167,7 +202,18 @@ mod tests {
         let metrics =
             Arc::new(MetricServiceImpl::new(metrics_config).expect("Failed to create metrics"));
 
-        let server = AdminServer::new(admin_config, metrics);
+        // Create a minimal MountConfig for testing
+        let mount_config = Arc::new(MountConfig {
+            filesystem_config: crate::filesystem_service::types::Config::default(),
+            metadata_config: crate::metadata_store::Config::default(),
+            file_store_config: crate::file_store::types::Config::default(),
+            metric_config: Some(MetricsConfig::default()),
+            admin_config: Some(admin_config.clone()),
+            mount_point: std::path::PathBuf::from("/tmp/test"),
+            mount_options: crate::filesystem_service::mount::MountOptions::default(),
+        });
+
+        let server = AdminServer::new(admin_config, mount_config, metrics);
 
         let result = server.start();
         assert!(result.is_err());

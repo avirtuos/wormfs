@@ -627,10 +627,12 @@ impl MetadataStore for MetadataStoreImpl {
                     Ok(conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?)
                 })
                 .await
-                .map_err(|e| Error::QueryError(format!(
-                    "Failed to delete file with ID {:?}: {}",
-                    file_id, e
-                )))?;
+                .map_err(|e| {
+                    Error::QueryError(format!(
+                        "Failed to delete file with ID {:?}: {}",
+                        file_id, e
+                    ))
+                })?;
 
             if rows_affected == 0 {
                 return Err(Error::FileNotFoundByFileId(file_id));
@@ -817,10 +819,12 @@ impl MetadataStore for MetadataStoreImpl {
                 Ok(stripes)
             })
             .await
-            .map_err(|e| Error::QueryError(format!(
-                "Failed to get stripes for file {:?}: {}",
-                file_id, e
-            )));
+            .map_err(|e| {
+                Error::QueryError(format!(
+                    "Failed to get stripes for file {:?}: {}",
+                    file_id, e
+                ))
+            });
 
         // Publish metrics
         self.publish_metrics("get_file_stripes", "read", start, result.is_err());
@@ -914,10 +918,7 @@ impl MetadataStore for MetadataStoreImpl {
                 tokio_rusqlite::Error::Rusqlite(rusqlite::Error::QueryReturnedNoRows) => {
                     Error::QueryError(format!("Stripe {:?} not found", stripe_id))
                 }
-                _ => Error::QueryError(format!(
-                    "Failed to delete stripe {:?}: {}",
-                    stripe_id, e
-                )),
+                _ => Error::QueryError(format!("Failed to delete stripe {:?}: {}", stripe_id, e)),
             });
 
         // Publish metrics
@@ -1144,10 +1145,12 @@ impl MetadataStore for MetadataStoreImpl {
                     )?)
                 })
                 .await
-                .map_err(|e| Error::QueryError(format!(
-                    "Failed to mark chunk {:?} as corrupt: {}",
-                    chunk_id, e
-                )))?;
+                .map_err(|e| {
+                    Error::QueryError(format!(
+                        "Failed to mark chunk {:?} as corrupt: {}",
+                        chunk_id, e
+                    ))
+                })?;
 
             if rows_affected == 0 {
                 return Err(Error::ChunkNotFound(chunk_id));
@@ -1356,10 +1359,12 @@ impl MetadataStore for MetadataStoreImpl {
                     )?)
                 })
                 .await
-                .map_err(|e| Error::QueryError(format!(
-                    "Failed to release lock for file {:?} and client {:?}: {}",
-                    file_id, client_id, e
-                )))?;
+                .map_err(|e| {
+                    Error::QueryError(format!(
+                        "Failed to release lock for file {:?} and client {:?}: {}",
+                        file_id, client_id, e
+                    ))
+                })?;
 
             if rows_affected == 0 {
                 return Err(Error::LockNotFound { file_id, client_id });
@@ -1396,10 +1401,12 @@ impl MetadataStore for MetadataStoreImpl {
                     )?)
                 })
                 .await
-                .map_err(|e| Error::QueryError(format!(
-                    "Failed to extend lock for file {:?} and client {:?}: {}",
-                    file_id, client_id, e
-                )))?;
+                .map_err(|e| {
+                    Error::QueryError(format!(
+                        "Failed to extend lock for file {:?} and client {:?}: {}",
+                        file_id, client_id, e
+                    ))
+                })?;
 
             if rows_affected == 0 {
                 return Err(Error::LockNotFound { file_id, client_id });
@@ -1450,10 +1457,9 @@ impl MetadataStore for MetadataStoreImpl {
                 Ok(locks)
             })
             .await
-            .map_err(|e| Error::QueryError(format!(
-                "Failed to get locks for file {:?}: {}",
-                file_id, e
-            )));
+            .map_err(|e| {
+                Error::QueryError(format!("Failed to get locks for file {:?}: {}", file_id, e))
+            });
 
         // Publish metrics
         self.publish_metrics("get_file_locks", "read", start, result.is_err());
@@ -1475,10 +1481,7 @@ impl MetadataStore for MetadataStoreImpl {
                 })
                 .await
                 .map_err(|e| {
-                    Error::QueryError(format!(
-                        "Failed to cleanup expired locks: {}",
-                        e
-                    ))
+                    Error::QueryError(format!("Failed to cleanup expired locks: {}", e))
                 })?;
 
             Ok(rows_affected as u64)

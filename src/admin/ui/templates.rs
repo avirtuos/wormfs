@@ -271,6 +271,112 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             margin-bottom: 1rem;
             color: var(--text);
         }
+
+        /* Config Display Styles */
+        .config-container {
+            padding: 1.5rem;
+        }
+
+        .config-section {
+            background: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: var(--shadow);
+        }
+
+        .config-section-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--text);
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 0.5rem;
+        }
+
+        .config-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .config-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            padding: 0.75rem;
+            background: var(--bg);
+            border-radius: 0.375rem;
+            align-items: start;
+        }
+
+        .config-key {
+            font-weight: 500;
+            color: var(--text);
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .config-value {
+            color: var(--text-secondary);
+            font-family: 'Courier New', monospace;
+            word-break: break-word;
+        }
+
+        .config-array-item {
+            padding: 0.25rem 0;
+            border-left: 2px solid var(--border);
+            padding-left: 0.5rem;
+            margin-bottom: 0.25rem;
+        }
+
+        /* Tooltip Styles */
+        .tooltip-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1rem;
+            height: 1rem;
+            font-size: 0.75rem;
+            cursor: help;
+            position: relative;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+        }
+
+        .tooltip-icon:hover {
+            opacity: 1;
+        }
+
+        .tooltip-content {
+            position: absolute;
+            left: 0;
+            top: 100%;
+            margin-top: 0.5rem;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 0.75rem 1rem;
+            border-radius: 0.375rem;
+            font-size: 0.875rem;
+            font-weight: normal;
+            line-height: 1.4;
+            max-width: 20rem;
+            z-index: 1000;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            white-space: normal;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        .tooltip-content::before {
+            content: '';
+            position: absolute;
+            bottom: 100%;
+            left: 1rem;
+            border: 0.375rem solid transparent;
+            border-bottom-color: rgba(0, 0, 0, 0.9);
+        }
     </style>
 </head>
 <body x-data="adminApp()">
@@ -437,8 +543,35 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
         <!-- Configuration Tab -->
         <div class="tab-panel" :class="{ 'active': activeTab === 'config' }">
-            <div class="placeholder">
-                <p>⚙️ Configuration viewer coming soon</p>
+            <div class="config-container">
+                <template x-for="(component, key) in config" :key="key">
+                    <div class="config-section">
+                        <h3 class="config-section-title" x-text="key.charAt(0).toUpperCase() + key.slice(1)"></h3>
+                        <div class="config-grid">
+                            <template x-for="(value, configKey) in component.values" :key="configKey">
+                                <div class="config-row">
+                                    <div class="config-key">
+                                        <span x-text="configKey"></span>
+                                        <span class="tooltip-icon" @mouseenter="$el.nextElementSibling.style.display='block'" @mouseleave="$el.nextElementSibling.style.display='none'">❓</span>
+                                        <div class="tooltip-content" style="display: none;" x-text="component.descriptions[configKey]"></div>
+                                    </div>
+                                    <div class="config-value">
+                                        <template x-if="Array.isArray(value)">
+                                            <div>
+                                                <template x-for="(item, idx) in value" :key="idx">
+                                                    <div x-text="item" class="config-array-item"></div>
+                                                </template>
+                                            </div>
+                                        </template>
+                                        <template x-if="!Array.isArray(value)">
+                                            <span x-text="typeof value === 'boolean' ? (value ? 'true' : 'false') : value"></span>
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
             </div>
         </div>
 
@@ -468,6 +601,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 activeTab: 'monitoring',
                 metrics: {},
                 droppedMetrics: 0,
+                config: {},  // System configuration
                 wsConnected: false,
                 ws: null,
                 components: {},  // Component-based metric discovery
@@ -488,6 +622,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     this.connectWebSocket();
                     this.fetchMetrics();  // Initial fetch
                     this.fetchComponents();  // Fetch available components
+                    this.fetchConfig();  // Fetch configuration
                     this.initGraph();  // Initialize Plotly graph
                     this.startByteRateTracking();  // Start byte rate updates every second
                     this.startComponentRefresh();  // Discover new metrics every 30 seconds
@@ -571,6 +706,18 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                         }
                     } catch (e) {
                         console.error('Failed to fetch components:', e);
+                    }
+                },
+
+                async fetchConfig() {
+                    try {
+                        const response = await fetch('/api/config');
+                        const data = await response.json();
+                        if (data) {
+                            this.config = data;
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch config:', e);
                     }
                 },
 

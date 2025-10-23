@@ -345,7 +345,10 @@ mod tests {
         .expect("Handler failed");
 
         let json = response.0;
-        assert_eq!(json.get("component").unwrap().as_str().unwrap(), "filesystem");
+        assert_eq!(
+            json.get("component").unwrap().as_str().unwrap(),
+            "filesystem"
+        );
 
         let component_metrics = json.get("metrics").unwrap().as_object().unwrap();
 
