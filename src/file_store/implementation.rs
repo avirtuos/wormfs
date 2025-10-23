@@ -313,6 +313,9 @@ impl FileStore for FileStoreImpl {
         // Encode stripe into shards
         let shards = erasure_coding::encode_stripe(data, &policy)?;
 
+        // Calculate total encoded size (sum of all shards)
+        let encoded_size: u64 = shards.iter().map(|s| s.len() as u64).sum();
+
         // Get a disk to write to
         let disks = self.inner.disks.read().await;
         let disk_info = disks
@@ -396,10 +399,16 @@ impl FileStore for FileStoreImpl {
                 crate::metric_service::UnitType::Operations,
             );
 
-            // Track bytes written
+            // Track bytes written (before and after erasure encoding)
             let _ = metrics.publish_counter(
-                "filestore.stripe_write.bytes",
+                "filestore.stripe_write.bytes_raw",
                 data_size,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            let _ = metrics.publish_counter(
+                "filestore.stripe_write.bytes_encoded",
+                encoded_size,
                 crate::metric_service::UnitType::Bytes,
             );
 
@@ -465,6 +474,7 @@ impl FileStore for FileStoreImpl {
         let mut shards = Vec::new();
         let mut policy: Option<StoragePolicy> = None;
         let mut original_size = 0;
+        let mut encoded_size: u64 = 0; // Track total bytes read from disk
 
         for chunk_meta in chunks_sorted.iter() {
             let disk_info = disks
@@ -503,6 +513,8 @@ impl FileStore for FileStoreImpl {
                             });
                             original_size = chunk_data.header.stripe_end_offset as usize;
                         }
+                        // Track encoded bytes read from disk
+                        encoded_size += chunk_data.data.len() as u64;
                         shards.push(Some(chunk_data.data));
                     }
                 }
@@ -551,9 +563,15 @@ impl FileStore for FileStoreImpl {
                 crate::metric_service::UnitType::Operations,
             );
 
-            // Track bytes read
+            // Track bytes read (before and after erasure decoding)
             let _ = metrics.publish_counter(
-                "filestore.stripe_read.bytes",
+                "filestore.stripe_read.bytes_encoded",
+                encoded_size,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            let _ = metrics.publish_counter(
+                "filestore.stripe_read.bytes_decoded",
                 data_size,
                 crate::metric_service::UnitType::Bytes,
             );
@@ -634,6 +652,10 @@ impl FileStore for FileStoreImpl {
         // Track physical I/O (write entire stripe)
         let write_bytes = stripe_data.len() as u64;
 
+        // Save policy values before move for metrics calculation
+        let total_shards = policy.data_shards + policy.parity_shards;
+        let data_shards = policy.data_shards;
+
         // 3. Write as new stripe (generates NEW ChunkIds)
         // Note: This creates NEW chunks without deleting old ones
         let result = self
@@ -643,10 +665,16 @@ impl FileStore for FileStoreImpl {
         // Publish I/O amplification metrics
         if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
             let elapsed = start.elapsed().as_secs_f64();
-            let physical_bytes = read_bytes + write_bytes;
-            let amplification = physical_bytes as f64 / logical_bytes as f64;
 
-            // Track I/O amplification ratio
+            // Calculate encoded sizes (actual disk I/O including erasure coding overhead)
+            // Encoded size = raw_size * (data_shards + parity_shards) / data_shards
+            let encoded_read_bytes = (read_bytes * total_shards as u64) / data_shards as u64;
+            let encoded_write_bytes = (write_bytes * total_shards as u64) / data_shards as u64;
+
+            let encoded_physical_bytes = encoded_read_bytes + encoded_write_bytes;
+            let amplification = encoded_physical_bytes as f64 / logical_bytes as f64;
+
+            // Track I/O amplification ratio (using encoded sizes for actual disk I/O)
             let _ = metrics.publish_histogram(
                 "filestore.io_amplification.ratio",
                 amplification,
@@ -660,10 +688,10 @@ impl FileStore for FileStoreImpl {
                 crate::metric_service::UnitType::Operations,
             );
 
-            // Track physical I/O (actual bytes read + written)
+            // Track physical I/O (actual bytes read + written to disk, including erasure coding)
             let _ = metrics.publish_counter(
                 "filestore.rmw_operations.physical_bytes",
-                physical_bytes,
+                encoded_physical_bytes,
                 crate::metric_service::UnitType::Bytes,
             );
 
