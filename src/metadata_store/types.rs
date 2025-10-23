@@ -55,6 +55,26 @@ pub struct Config {
 
     /// Timeout for acquiring connection from read pool (in seconds)
     pub read_pool_timeout_secs: u64,
+
+    /// Stripe metadata cache size in MB (default: 64MB)
+    pub stripe_cache_size_mb: usize,
+
+    /// Stripe cache time-to-live in seconds (default: 10 seconds)
+    /// Entries expire after this duration regardless of access frequency
+    pub stripe_cache_ttl_secs: u64,
+
+    /// Stripe cache time-to-idle in seconds (default: 5 seconds)
+    /// Entries expire if not accessed within this duration
+    pub stripe_cache_tti_secs: u64,
+
+    /// Chunk list cache size in MB (default: 64MB)
+    pub chunk_cache_size_mb: usize,
+
+    /// Chunk cache time-to-live in seconds (default: 10 seconds)
+    pub chunk_cache_ttl_secs: u64,
+
+    /// Chunk cache time-to-idle in seconds (default: 5 seconds)
+    pub chunk_cache_tti_secs: u64,
 }
 
 impl Default for Config {
@@ -69,6 +89,12 @@ impl Default for Config {
             transaction_isolation: IsolationLevel::Serializable,
             enable_prepared_statements: true,
             read_pool_timeout_secs: 30,
+            stripe_cache_size_mb: 64,
+            stripe_cache_ttl_secs: 10,
+            stripe_cache_tti_secs: 5,
+            chunk_cache_size_mb: 64,
+            chunk_cache_ttl_secs: 10,
+            chunk_cache_tti_secs: 5,
         }
     }
 }

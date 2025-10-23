@@ -46,6 +46,26 @@ enable_prepared_statements = true
 # Timeout for acquiring connection from read pool (seconds)
 read_pool_timeout_secs = 30
 
+# Stripe metadata cache size in MB (default: 64 MB)
+stripe_cache_size_mb = 64
+
+# Stripe cache time-to-live in seconds (default: 10 seconds)
+# Entries expire after this duration regardless of access frequency
+stripe_cache_ttl_secs = 10
+
+# Stripe cache time-to-idle in seconds (default: 5 seconds)
+# Entries expire if not accessed within this duration
+stripe_cache_tti_secs = 5
+
+# Chunk list cache size in MB (default: 64 MB)
+chunk_cache_size_mb = 64
+
+# Chunk cache time-to-live in seconds (default: 10 seconds)
+chunk_cache_ttl_secs = 10
+
+# Chunk cache time-to-idle in seconds (default: 5 seconds)
+chunk_cache_tti_secs = 5
+
 # ===== File Store Configuration =====
 [file_store]
 # List of disk paths for chunk storage
