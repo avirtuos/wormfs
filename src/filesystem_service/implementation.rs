@@ -204,7 +204,7 @@ impl FileSystemServiceImpl {
 
             // Flush operation counts
             let _ = metrics.publish_counter(
-                "buffered_file_handles.partial_flushes",
+                "filesystem.buffered_file_handles.partial_flushes",
                 self.buffered_metrics
                     .partial_flushes
                     .load(Ordering::Relaxed),
@@ -212,14 +212,14 @@ impl FileSystemServiceImpl {
             );
 
             let _ = metrics.publish_counter(
-                "buffered_file_handles.full_flushes",
+                "filesystem.buffered_file_handles.full_flushes",
                 self.buffered_metrics.full_flushes.load(Ordering::Relaxed),
                 crate::metric_service::UnitType::Count,
             );
 
             // Write coalescence count
             let _ = metrics.publish_counter(
-                "buffered_file_handles.writes_coalesced",
+                "filesystem.buffered_file_handles.writes_coalesced",
                 self.buffered_metrics
                     .writes_coalesced
                     .load(Ordering::Relaxed),
@@ -231,7 +231,7 @@ impl FileSystemServiceImpl {
                 if !latencies.is_empty() {
                     let avg_latency = latencies.iter().sum::<f64>() / latencies.len() as f64;
                     let _ = metrics.publish_gauge(
-                        "buffered_file_handles.flush_latency_avg",
+                        "filesystem.buffered_file_handles.flush_latency_avg",
                         avg_latency,
                         crate::metric_service::UnitType::Seconds,
                     );
@@ -242,12 +242,12 @@ impl FileSystemServiceImpl {
                         latencies.iter().max_by(|a, b| a.partial_cmp(b).unwrap()),
                     ) {
                         let _ = metrics.publish_gauge(
-                            "buffered_file_handles.flush_latency_min",
+                            "filesystem.buffered_file_handles.flush_latency_min",
                             *min,
                             crate::metric_service::UnitType::Seconds,
                         );
                         let _ = metrics.publish_gauge(
-                            "buffered_file_handles.flush_latency_max",
+                            "filesystem.buffered_file_handles.flush_latency_max",
                             *max,
                             crate::metric_service::UnitType::Seconds,
                         );
