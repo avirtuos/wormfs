@@ -845,9 +845,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 },
 
                 calculateAmplification() {
-                    // Physical I/O: actual bytes read/written to storage
-                    const physicalWriteBytes = this.metrics['filestore.stripe_write.bytes']?.value || 0;
-                    const physicalReadBytes = this.metrics['filestore.stripe_read.bytes']?.value || 0;
+                    // Physical I/O: actual bytes read/written to storage (including erasure coding overhead)
+                    const physicalWriteBytes = this.metrics['filestore.stripe_write.bytes_encoded']?.value || 0;
+                    const physicalReadBytes = this.metrics['filestore.stripe_read.bytes_encoded']?.value || 0;
                     const physicalBytes = physicalWriteBytes + physicalReadBytes;
 
                     // Logical I/O: bytes requested by user operations
