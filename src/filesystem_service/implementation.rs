@@ -61,6 +61,22 @@ struct BufferedMetricsCollector {
     full_flushes: AtomicU64,
     /// Count of writes that reused existing buffers (coalesced)
     writes_coalesced: AtomicU64,
+    /// Count of flushes triggered by memory pressure
+    memory_pressure_flushes: AtomicU64,
+    /// Count of inform(Truncate) calls
+    inform_truncate: AtomicU64,
+    /// Count of inform(Setattr) calls
+    inform_setattr: AtomicU64,
+    /// Count of inform(Rename) calls
+    inform_rename: AtomicU64,
+    /// Count of inform(Lock) calls
+    inform_lock: AtomicU64,
+    /// Count of inform(Flush) calls
+    inform_flush: AtomicU64,
+    /// Count of inform(Fsync) calls
+    inform_fsync: AtomicU64,
+    /// Count of inform(Release) calls
+    inform_release: AtomicU64,
     /// Recent flush latencies for histogram calculation
     flush_latencies: Arc<std::sync::Mutex<Vec<f64>>>,
     /// Previous partial_flushes value (for delta calculation)
@@ -69,6 +85,22 @@ struct BufferedMetricsCollector {
     previous_full_flushes: AtomicU64,
     /// Previous writes_coalesced value (for delta calculation)
     previous_writes_coalesced: AtomicU64,
+    /// Previous memory_pressure_flushes value (for delta calculation)
+    previous_memory_pressure_flushes: AtomicU64,
+    /// Previous inform_truncate value (for delta calculation)
+    previous_inform_truncate: AtomicU64,
+    /// Previous inform_setattr value (for delta calculation)
+    previous_inform_setattr: AtomicU64,
+    /// Previous inform_rename value (for delta calculation)
+    previous_inform_rename: AtomicU64,
+    /// Previous inform_lock value (for delta calculation)
+    previous_inform_lock: AtomicU64,
+    /// Previous inform_flush value (for delta calculation)
+    previous_inform_flush: AtomicU64,
+    /// Previous inform_fsync value (for delta calculation)
+    previous_inform_fsync: AtomicU64,
+    /// Previous inform_release value (for delta calculation)
+    previous_inform_release: AtomicU64,
 }
 
 impl BufferedMetricsCollector {
@@ -77,10 +109,26 @@ impl BufferedMetricsCollector {
             partial_flushes: AtomicU64::new(0),
             full_flushes: AtomicU64::new(0),
             writes_coalesced: AtomicU64::new(0),
+            memory_pressure_flushes: AtomicU64::new(0),
+            inform_truncate: AtomicU64::new(0),
+            inform_setattr: AtomicU64::new(0),
+            inform_rename: AtomicU64::new(0),
+            inform_lock: AtomicU64::new(0),
+            inform_flush: AtomicU64::new(0),
+            inform_fsync: AtomicU64::new(0),
+            inform_release: AtomicU64::new(0),
             flush_latencies: Arc::new(std::sync::Mutex::new(Vec::new())),
             previous_partial_flushes: AtomicU64::new(0),
             previous_full_flushes: AtomicU64::new(0),
             previous_writes_coalesced: AtomicU64::new(0),
+            previous_memory_pressure_flushes: AtomicU64::new(0),
+            previous_inform_truncate: AtomicU64::new(0),
+            previous_inform_setattr: AtomicU64::new(0),
+            previous_inform_rename: AtomicU64::new(0),
+            previous_inform_lock: AtomicU64::new(0),
+            previous_inform_flush: AtomicU64::new(0),
+            previous_inform_fsync: AtomicU64::new(0),
+            previous_inform_release: AtomicU64::new(0),
         }
     }
 }
@@ -101,6 +149,23 @@ impl super::buffered_file_handle::BufferedMetricsReporter for BufferedMetricsCol
 
     fn report_write_coalesced(&self) {
         self.writes_coalesced.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn report_memory_pressure_flush(&self) {
+        self.memory_pressure_flushes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn report_inform(&self, op_type: super::buffered_file_handle::OperationType) {
+        use super::buffered_file_handle::OperationType;
+        match op_type {
+            OperationType::Truncate => self.inform_truncate.fetch_add(1, Ordering::Relaxed),
+            OperationType::Setattr => self.inform_setattr.fetch_add(1, Ordering::Relaxed),
+            OperationType::Rename => self.inform_rename.fetch_add(1, Ordering::Relaxed),
+            OperationType::Lock => self.inform_lock.fetch_add(1, Ordering::Relaxed),
+            OperationType::Flush => self.inform_flush.fetch_add(1, Ordering::Relaxed),
+            OperationType::Fsync => self.inform_fsync.fetch_add(1, Ordering::Relaxed),
+            OperationType::Release => self.inform_release.fetch_add(1, Ordering::Relaxed),
+        };
     }
 }
 
@@ -273,6 +338,158 @@ impl FileSystemServiceImpl {
                 self.buffered_metrics
                     .previous_writes_coalesced
                     .store(current_coalesced, Ordering::Relaxed);
+            }
+
+            // Memory pressure flushes
+            let current_memory_pressure = self
+                .buffered_metrics
+                .memory_pressure_flushes
+                .load(Ordering::Relaxed);
+            let previous_memory_pressure = self
+                .buffered_metrics
+                .previous_memory_pressure_flushes
+                .load(Ordering::Relaxed);
+            let delta_memory_pressure =
+                current_memory_pressure.saturating_sub(previous_memory_pressure);
+            if delta_memory_pressure > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.memory_pressure_flushes",
+                    delta_memory_pressure,
+                    crate::metric_service::UnitType::Count,
+                );
+                self.buffered_metrics
+                    .previous_memory_pressure_flushes
+                    .store(current_memory_pressure, Ordering::Relaxed);
+            }
+
+            // inform() operation counts
+            // Truncate
+            let current_truncate = self
+                .buffered_metrics
+                .inform_truncate
+                .load(Ordering::Relaxed);
+            let previous_truncate = self
+                .buffered_metrics
+                .previous_inform_truncate
+                .load(Ordering::Relaxed);
+            let delta_truncate = current_truncate.saturating_sub(previous_truncate);
+            if delta_truncate > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.inform_truncate",
+                    delta_truncate,
+                    crate::metric_service::UnitType::Count,
+                );
+                self.buffered_metrics
+                    .previous_inform_truncate
+                    .store(current_truncate, Ordering::Relaxed);
+            }
+
+            // Setattr
+            let current_setattr = self.buffered_metrics.inform_setattr.load(Ordering::Relaxed);
+            let previous_setattr = self
+                .buffered_metrics
+                .previous_inform_setattr
+                .load(Ordering::Relaxed);
+            let delta_setattr = current_setattr.saturating_sub(previous_setattr);
+            if delta_setattr > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.inform_setattr",
+                    delta_setattr,
+                    crate::metric_service::UnitType::Count,
+                );
+                self.buffered_metrics
+                    .previous_inform_setattr
+                    .store(current_setattr, Ordering::Relaxed);
+            }
+
+            // Rename
+            let current_rename = self.buffered_metrics.inform_rename.load(Ordering::Relaxed);
+            let previous_rename = self
+                .buffered_metrics
+                .previous_inform_rename
+                .load(Ordering::Relaxed);
+            let delta_rename = current_rename.saturating_sub(previous_rename);
+            if delta_rename > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.inform_rename",
+                    delta_rename,
+                    crate::metric_service::UnitType::Count,
+                );
+                self.buffered_metrics
+                    .previous_inform_rename
+                    .store(current_rename, Ordering::Relaxed);
+            }
+
+            // Lock
+            let current_lock = self.buffered_metrics.inform_lock.load(Ordering::Relaxed);
+            let previous_lock = self
+                .buffered_metrics
+                .previous_inform_lock
+                .load(Ordering::Relaxed);
+            let delta_lock = current_lock.saturating_sub(previous_lock);
+            if delta_lock > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.inform_lock",
+                    delta_lock,
+                    crate::metric_service::UnitType::Count,
+                );
+                self.buffered_metrics
+                    .previous_inform_lock
+                    .store(current_lock, Ordering::Relaxed);
+            }
+
+            // Flush
+            let current_inform_flush = self.buffered_metrics.inform_flush.load(Ordering::Relaxed);
+            let previous_inform_flush = self
+                .buffered_metrics
+                .previous_inform_flush
+                .load(Ordering::Relaxed);
+            let delta_inform_flush = current_inform_flush.saturating_sub(previous_inform_flush);
+            if delta_inform_flush > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.inform_flush",
+                    delta_inform_flush,
+                    crate::metric_service::UnitType::Count,
+                );
+                self.buffered_metrics
+                    .previous_inform_flush
+                    .store(current_inform_flush, Ordering::Relaxed);
+            }
+
+            // Fsync
+            let current_fsync = self.buffered_metrics.inform_fsync.load(Ordering::Relaxed);
+            let previous_fsync = self
+                .buffered_metrics
+                .previous_inform_fsync
+                .load(Ordering::Relaxed);
+            let delta_fsync = current_fsync.saturating_sub(previous_fsync);
+            if delta_fsync > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.inform_fsync",
+                    delta_fsync,
+                    crate::metric_service::UnitType::Count,
+                );
+                self.buffered_metrics
+                    .previous_inform_fsync
+                    .store(current_fsync, Ordering::Relaxed);
+            }
+
+            // Release
+            let current_release = self.buffered_metrics.inform_release.load(Ordering::Relaxed);
+            let previous_release = self
+                .buffered_metrics
+                .previous_inform_release
+                .load(Ordering::Relaxed);
+            let delta_release = current_release.saturating_sub(previous_release);
+            if delta_release > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.inform_release",
+                    delta_release,
+                    crate::metric_service::UnitType::Count,
+                );
+                self.buffered_metrics
+                    .previous_inform_release
+                    .store(current_release, Ordering::Relaxed);
             }
 
             // Flush latency (average of recent flushes)
