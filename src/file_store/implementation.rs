@@ -589,7 +589,7 @@ impl FileStore for FileStoreImpl {
             let _ = metrics.publish_gauge(
                 "filestore.stripe_cache.entry_count",
                 self.inner.stripe_cache.entry_count() as f64,
-                crate::metric_service::UnitType::Operations,
+                crate::metric_service::UnitType::Count,
             );
         }
 

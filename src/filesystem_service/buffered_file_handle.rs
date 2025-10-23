@@ -350,6 +350,7 @@ impl BufferedFileHandle {
         let mut bytes_written = 0;
         let mut remaining = data;
         let mut current_offset = offset;
+        let mut had_coalescence = false;
 
         let config = {
             let inner = self.inner.lock().unwrap();
@@ -556,11 +557,9 @@ impl BufferedFileHandle {
                 (written, is_new_builder)
             };
 
-            // Report write coalescence metric if this was a reused builder
+            // Track if any coalescence occurred (metric reported after loop)
             if !is_new_builder {
-                if let Some(reporter) = &self.metrics_reporter {
-                    reporter.report_write_coalesced();
-                }
+                had_coalescence = true;
             }
 
             bytes_written += written as u32;
@@ -571,6 +570,13 @@ impl BufferedFileHandle {
             if self.needs_memory_flush() {
                 trace!("Triggering full_flush due to memory pressure (complete stripes only)");
                 self.full_flush(false).await?; // false = only flush complete stripes
+            }
+        }
+
+        // Report write coalescence metric once per write operation if any coalescence occurred
+        if had_coalescence {
+            if let Some(reporter) = &self.metrics_reporter {
+                reporter.report_write_coalesced();
             }
         }
 

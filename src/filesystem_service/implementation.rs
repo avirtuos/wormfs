@@ -63,6 +63,12 @@ struct BufferedMetricsCollector {
     writes_coalesced: AtomicU64,
     /// Recent flush latencies for histogram calculation
     flush_latencies: Arc<std::sync::Mutex<Vec<f64>>>,
+    /// Previous partial_flushes value (for delta calculation)
+    previous_partial_flushes: AtomicU64,
+    /// Previous full_flushes value (for delta calculation)
+    previous_full_flushes: AtomicU64,
+    /// Previous writes_coalesced value (for delta calculation)
+    previous_writes_coalesced: AtomicU64,
 }
 
 impl BufferedMetricsCollector {
@@ -72,6 +78,9 @@ impl BufferedMetricsCollector {
             full_flushes: AtomicU64::new(0),
             writes_coalesced: AtomicU64::new(0),
             flush_latencies: Arc::new(std::sync::Mutex::new(Vec::new())),
+            previous_partial_flushes: AtomicU64::new(0),
+            previous_full_flushes: AtomicU64::new(0),
+            previous_writes_coalesced: AtomicU64::new(0),
         }
     }
 }
@@ -202,29 +211,66 @@ impl FileSystemServiceImpl {
                 crate::metric_service::UnitType::Count,
             );
 
-            // Flush operation counts
-            let _ = metrics.publish_counter(
-                "filesystem.buffered_file_handles.partial_flushes",
+            // Flush operation counts - publish deltas since last publish
+            // Partial flushes
+            let current_partial = self
+                .buffered_metrics
+                .partial_flushes
+                .load(Ordering::Relaxed);
+            let previous_partial = self
+                .buffered_metrics
+                .previous_partial_flushes
+                .load(Ordering::Relaxed);
+            let delta_partial = current_partial.saturating_sub(previous_partial);
+            if delta_partial > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.partial_flushes",
+                    delta_partial,
+                    crate::metric_service::UnitType::Count,
+                );
                 self.buffered_metrics
-                    .partial_flushes
-                    .load(Ordering::Relaxed),
-                crate::metric_service::UnitType::Count,
-            );
+                    .previous_partial_flushes
+                    .store(current_partial, Ordering::Relaxed);
+            }
 
-            let _ = metrics.publish_counter(
-                "filesystem.buffered_file_handles.full_flushes",
-                self.buffered_metrics.full_flushes.load(Ordering::Relaxed),
-                crate::metric_service::UnitType::Count,
-            );
+            // Full flushes
+            let current_full = self.buffered_metrics.full_flushes.load(Ordering::Relaxed);
+            let previous_full = self
+                .buffered_metrics
+                .previous_full_flushes
+                .load(Ordering::Relaxed);
+            let delta_full = current_full.saturating_sub(previous_full);
+            if delta_full > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.full_flushes",
+                    delta_full,
+                    crate::metric_service::UnitType::Count,
+                );
+                self.buffered_metrics
+                    .previous_full_flushes
+                    .store(current_full, Ordering::Relaxed);
+            }
 
             // Write coalescence count
-            let _ = metrics.publish_counter(
-                "filesystem.buffered_file_handles.writes_coalesced",
+            let current_coalesced = self
+                .buffered_metrics
+                .writes_coalesced
+                .load(Ordering::Relaxed);
+            let previous_coalesced = self
+                .buffered_metrics
+                .previous_writes_coalesced
+                .load(Ordering::Relaxed);
+            let delta_coalesced = current_coalesced.saturating_sub(previous_coalesced);
+            if delta_coalesced > 0 {
+                let _ = metrics.publish_counter(
+                    "filesystem.buffered_file_handles.writes_coalesced",
+                    delta_coalesced,
+                    crate::metric_service::UnitType::Count,
+                );
                 self.buffered_metrics
-                    .writes_coalesced
-                    .load(Ordering::Relaxed),
-                crate::metric_service::UnitType::Count,
-            );
+                    .previous_writes_coalesced
+                    .store(current_coalesced, Ordering::Relaxed);
+            }
 
             // Flush latency (average of recent flushes)
             if let Ok(mut latencies) = self.buffered_metrics.flush_latencies.lock() {

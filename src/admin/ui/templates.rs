@@ -320,13 +320,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <div class="metrics-grid">
                 <div class="metric-card">
                     <div class="metric-label">Total Write Operations</div>
-                    <div class="metric-value" x-text="formatNumber(metrics['filesystem.write_ops.total'])">
+                    <div class="metric-value" x-text="formatNumber(metrics['filesystem.write_ops.total']?.value || 0)">
                         <span class="metric-unit">ops</span>
                     </div>
                 </div>
                 <div class="metric-card">
                     <div class="metric-label">Total Read Operations</div>
-                    <div class="metric-value" x-text="formatNumber(metrics['filesystem.read_ops.total'])">
+                    <div class="metric-value" x-text="formatNumber(metrics['filesystem.read_ops.total']?.value || 0)">
                         <span class="metric-unit">ops</span>
                     </div>
                 </div>
@@ -336,7 +336,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 </div>
                 <div class="metric-card">
                     <div class="metric-label">RMW Operations</div>
-                    <div class="metric-value" x-text="formatNumber(metrics['filestore.rmw_operations.total'])">
+                    <div class="metric-value" x-text="formatNumber(metrics['filestore.rmw_operations.total']?.value || 0)">
                         <span class="metric-unit">ops</span>
                     </div>
                 </div>
@@ -628,12 +628,14 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 },
 
                 updateMetrics(newMetrics) {
-                    // Extract values from metric objects
+                    // Store full metric objects (including value, unit, type)
                     Object.keys(newMetrics).forEach(key => {
                         if (typeof newMetrics[key] === 'object' && newMetrics[key].value !== undefined) {
-                            this.metrics[key] = newMetrics[key].value;
-                        } else {
+                            // Store the full metric object with metadata
                             this.metrics[key] = newMetrics[key];
+                        } else {
+                            // Legacy/simple numeric value (WebSocket might send just numbers)
+                            this.metrics[key] = { value: newMetrics[key], unit: 'Count', type: 'Counter' };
                         }
                     });
                 },
@@ -662,29 +664,48 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     }
                 },
 
-                // Smart formatting based on metric name
+                // Smart formatting based on metric unit metadata
                 formatMetricValue(metricName) {
-                    const value = this.metrics[metricName];
-                    if (!value) return '0';
+                    const metric = this.metrics[metricName];
+                    if (!metric || metric.value === undefined) return '0';
 
-                    if (metricName.endsWith('.bytes')) {
-                        return this.formatBytes(value);
-                    } else if (metricName.endsWith('.latency')) {
-                        return this.formatLatency(value);
-                    } else {
-                        return this.formatNumber(value) + ' operations';
+                    const value = metric.value;
+                    const unit = metric.unit || 'Count';
+
+                    // Format based on unit type from backend
+                    switch (unit) {
+                        case 'Bytes':
+                            return this.formatBytes(value);
+                        case 'Kilobytes':
+                            return this.formatBytes(value * 1024);
+                        case 'Megabytes':
+                            return this.formatBytes(value * 1024 * 1024);
+                        case 'Gigabytes':
+                            return this.formatBytes(value * 1024 * 1024 * 1024);
+                        case 'Seconds':
+                            return this.formatLatency(value);
+                        case 'Milliseconds':
+                            return this.formatLatency(value / 1000);
+                        case 'Count':
+                            return this.formatNumber(value);
+                        case 'Operations':
+                        case 'Requests':
+                        case 'Events':
+                            return this.formatNumber(value) + ' ' + unit.toLowerCase();
+                        default:
+                            return this.formatNumber(value) + ' ' + unit.toLowerCase();
                     }
                 },
 
                 calculateAmplification() {
                     // Physical I/O: actual bytes read/written to storage
-                    const physicalWriteBytes = this.metrics['filestore.stripe_write.bytes'] || 0;
-                    const physicalReadBytes = this.metrics['filestore.stripe_read.bytes'] || 0;
+                    const physicalWriteBytes = this.metrics['filestore.stripe_write.bytes']?.value || 0;
+                    const physicalReadBytes = this.metrics['filestore.stripe_read.bytes']?.value || 0;
                     const physicalBytes = physicalWriteBytes + physicalReadBytes;
 
                     // Logical I/O: bytes requested by user operations
-                    const logicalWriteBytes = this.metrics['filesystem.write_ops.bytes'] || 0;
-                    const logicalReadBytes = this.metrics['filesystem.read_ops.bytes'] || 0;
+                    const logicalWriteBytes = this.metrics['filesystem.write_ops.bytes']?.value || 0;
+                    const logicalReadBytes = this.metrics['filesystem.read_ops.bytes']?.value || 0;
                     const logicalBytes = logicalWriteBytes + logicalReadBytes;
 
                     if (logicalBytes === 0) {
@@ -703,8 +724,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 },
 
                 updateByteRates() {
-                    const currentReadBytes = this.metrics['filesystem.read_ops.bytes'] || 0;
-                    const currentWriteBytes = this.metrics['filesystem.write_ops.bytes'] || 0;
+                    const currentReadBytes = this.metrics['filesystem.read_ops.bytes']?.value || 0;
+                    const currentWriteBytes = this.metrics['filesystem.write_ops.bytes']?.value || 0;
                     const now = Date.now();
 
                     // Skip first sample - only establish baseline
