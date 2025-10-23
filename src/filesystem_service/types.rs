@@ -8,6 +8,7 @@ use thiserror::Error;
 
 // Re-export common ID types
 pub use crate::file_store::types::FileId;
+pub use crate::filesystem_service::buffered_file_handle::BufferedFileHandleConfig;
 pub use crate::metadata_store::types::ClientId;
 
 /// File handle opaque to FUSE.
@@ -78,6 +79,10 @@ pub struct Config {
     /// Enable stripe write buffering via BufferedFileHandle to reduce I/O amplification
     /// When enabled, each file handle gets a per-handle write buffer (20MB default)
     pub enable_stripe_cache: bool,
+
+    /// BufferedFileHandle configuration
+    #[serde(default)]
+    pub buffered_file_handle_config: BufferedFileHandleConfig,
 }
 
 /// Serde helper module for Duration serialization/deserialization as seconds.
@@ -175,6 +180,7 @@ impl Default for Config {
             gid: 1000,
             // BufferedFileHandle enabled by default to reduce I/O amplification
             enable_stripe_cache: true,
+            buffered_file_handle_config: BufferedFileHandleConfig::default(),
         }
     }
 }

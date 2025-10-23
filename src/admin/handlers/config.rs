@@ -145,6 +145,20 @@ pub async fn config_handler(State(mount_config): State<Arc<MountConfig>>) -> imp
                 "enable_stripe_cache": "Enable per-handle write buffering to reduce I/O amplification",
             }
         },
+        "buffered_file_handle": {
+            "values": {
+                "max_memory_bytes": mount_config.filesystem_config.buffered_file_handle_config.max_memory_bytes,
+                "max_flush_interval_secs": mount_config.filesystem_config.buffered_file_handle_config.max_flush_interval.as_secs(),
+                "max_writes_before_flush": mount_config.filesystem_config.buffered_file_handle_config.max_writes_before_flush,
+                "max_stripe_size": mount_config.filesystem_config.buffered_file_handle_config.max_stripe_size,
+            },
+            "descriptions": {
+                "max_memory_bytes": "Maximum memory per file handle before triggering partial flush (bytes)",
+                "max_flush_interval_secs": "Maximum time between full flushes to disk (seconds)",
+                "max_writes_before_flush": "Maximum write operations before forcing full flush",
+                "max_stripe_size": "Maximum stripe size for buffered writes (bytes, from FileStore config)",
+            }
+        },
         "mount": {
             "values": {
                 "mount_point": mount_config.mount_point.display().to_string(),
