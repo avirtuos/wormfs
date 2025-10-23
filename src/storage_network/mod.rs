@@ -67,6 +67,8 @@
 //! - **Auto-ID Mode**: Accept any peer ID on first connection, store it durably,
 //!   and enforce consistency on subsequent connections
 
+pub mod behaviour;
+pub mod implementation;
 pub mod types;
 
 use async_trait::async_trait;
@@ -85,11 +87,11 @@ pub use types::{
 #[derive(Clone)]
 #[allow(dead_code)] // TODO: Remove when implementation is complete
 pub struct StorageNetworkHandle {
-    /// Reference to inner network state
-    inner: Arc<StorageNetworkInner>,
+    /// Reference to inner network state (contains swarm, peers, topics)
+    pub(crate) inner: Arc<implementation::InnerState>,
 
     /// Command channel for sending network commands to the event loop
-    event_tx: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
+    pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
 }
 
 /// Factory for creating StorageNetwork instances.
@@ -98,78 +100,20 @@ pub struct StorageNetworkHandle {
 /// creating the inner network state before returning a cloneable handle.
 pub struct StorageNetworkFactory;
 
-impl StorageNetworkFactory {
-    /// Create a new StorageNetwork instance with the given configuration.
-    ///
-    /// This method initializes the libp2p swarm, sets up the event loop,
-    /// and returns both the inner state and a cloneable network handle.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Network configuration including peers, listen addresses, etc.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(StorageNetworkInner, StorageNetworkHandle)` where:
-    /// - `StorageNetworkInner` contains the actual swarm and should have `run()` called on it
-    /// - `StorageNetworkHandle` is a cloneable handle for network operations
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Configuration is invalid
-    /// - Swarm initialization fails
-    /// - Event loop setup fails
-    pub async fn create(
-        _config: Config,
-    ) -> Result<(StorageNetworkInner, StorageNetworkHandle), Error> {
-        // TODO: Implement actual libp2p swarm initialization
-        // For now, return placeholder error
-        Err(Error::ConfigError(
-            "StorageNetworkFactory not yet implemented".to_string(),
-        ))
-    }
-}
+// StorageNetworkFactory implementation is in implementation.rs
 
 /// Inner network state containing the actual libp2p swarm.
 ///
-/// This struct holds all the mutable network state and is wrapped in Arc<RwLock>
+/// This struct holds all the mutable network state and is wrapped in Arc
 /// to enable safe concurrent access from multiple components.
 #[allow(dead_code)] // TODO: Remove when implementation is complete
 pub struct StorageNetworkInner {
-    /// libp2p swarm - protected by RwLock for concurrent access
-    /// TODO: Replace () with actual Swarm<WormFsBehaviour> once libp2p behavior is implemented
-    swarm: RwLock<()>,
-
-    /// Active peer state tracking
-    peers: RwLock<HashMap<PeerId, PeerState>>,
-
-    /// Active topic subscriptions
-    topics: RwLock<HashMap<String, TopicHandle>>,
-
-    /// Network configuration
-    config: Config,
+    /// Reference to the inner state containing swarm and peer tracking.
+    /// The actual InnerState is defined in implementation.rs.
+    pub(crate) inner: Arc<implementation::InnerState>,
 }
 
-impl StorageNetworkInner {
-    /// Start the swarm event loop.
-    ///
-    /// This method must be called exactly once to start processing libp2p events
-    /// and network commands. It runs indefinitely until shutdown.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the event loop cannot be started or encounters a fatal error.
-    pub async fn run(&self) -> Result<(), Error> {
-        // TODO: Implement event loop that processes:
-        // 1. libp2p swarm events
-        // 2. NetworkCommand messages from the command channel
-        // 3. Topic message routing
-        Err(Error::EventLoopFailed(
-            "Event loop not yet implemented".to_string(),
-        ))
-    }
-}
+// StorageNetworkInner implementation is in implementation.rs
 
 /// StorageNetwork trait defines the interface for peer-to-peer networking.
 ///
