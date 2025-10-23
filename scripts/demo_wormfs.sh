@@ -247,6 +247,12 @@ synchronous = "Normal"
 transaction_isolation = "Serializable"
 enable_prepared_statements = true
 read_pool_timeout_secs = 30
+stripe_cache_size_mb = 64
+stripe_cache_ttl_secs = 10
+stripe_cache_tti_secs = 5
+chunk_cache_size_mb = 64
+chunk_cache_ttl_secs = 10
+chunk_cache_tti_secs = 5
 
 [file_store]
 disk_paths = ["$DATA_DIR/chunks"]
