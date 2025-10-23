@@ -353,8 +353,9 @@ impl BufferedFileHandle {
         let mut had_coalescence = false;
 
         let config = {
-            let inner = self.inner.lock()
-                .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+            let inner = self.inner.lock().expect(
+                "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+            );
             inner.config.clone()
         };
 
@@ -586,8 +587,9 @@ impl BufferedFileHandle {
 
         // Update file attributes
         {
-            let mut inner = self.inner.lock()
-                .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+            let mut inner = self.inner.lock().expect(
+                "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+            );
             let new_size = (offset + bytes_written as u64).max(inner.attributes.size);
             inner.attributes.size = new_size;
             inner.attributes.mtime = SystemTime::now();
@@ -626,8 +628,9 @@ impl BufferedFileHandle {
         trace!(stripe_idx = %stripe_idx, "get_or_load_existing_stripe: Entry");
 
         let (file_id, max_stripe_size, cached_stripe) = {
-            let inner = self.inner.lock()
-                .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+            let inner = self.inner.lock().expect(
+                "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+            );
 
             trace!(
                 stripe_idx = %stripe_idx,
@@ -767,8 +770,9 @@ impl BufferedFileHandle {
     pub async fn read(&self, offset: u64, size: u32) -> Result<Vec<u8>, Error> {
         let mut result = Vec::with_capacity(size as usize);
         let config = {
-            let inner = self.inner.lock()
-                .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+            let inner = self.inner.lock().expect(
+                "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+            );
             inner.config.clone()
         };
 
@@ -948,8 +952,9 @@ impl BufferedFileHandle {
 
         // 1. Flush complete builders to FileStore (or all if force=true)
         let (builders_to_flush, config) = {
-            let mut inner = self.inner.lock()
-                .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+            let mut inner = self.inner.lock().expect(
+                "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+            );
             let max_stripe_size = inner.config.max_stripe_size;
 
             // Partition builders into complete and partial
@@ -1030,8 +1035,9 @@ impl BufferedFileHandle {
                 })?;
 
             // Add to buffered metadata
-            let mut inner = self.inner.lock()
-                .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+            let mut inner = self.inner.lock().expect(
+                "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+            );
 
             // If there's already a stripe at this index, tombstone the old one ONLY if it came from MetadataStore
             // (This happens when partial_flush wrote a smaller version and now we're writing a larger one)
@@ -1085,8 +1091,9 @@ impl BufferedFileHandle {
 
         // 2. Build batch of operations for Raft (only for flushed stripes)
         let (operations, flushed_indices) = {
-            let mut inner = self.inner.lock()
-                .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+            let mut inner = self.inner.lock().expect(
+                "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+            );
             let mut ops = Vec::new();
 
             // Track which stripe indices were flushed
@@ -1164,8 +1171,9 @@ impl BufferedFileHandle {
 
         // 4. Update origin and clear dirty flags ONLY for flushed stripes
         {
-            let mut inner = self.inner.lock()
-                .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+            let mut inner = self.inner.lock().expect(
+                "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+            );
 
             // Update origin for flushed stripes
             for stripe_idx in &flushed_indices {
@@ -1238,15 +1246,17 @@ impl BufferedFileHandle {
 
     /// Check if there's any buffered data.
     fn has_buffered_data(&self) -> bool {
-        let inner = self.inner.lock()
-            .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+        let inner = self.inner.lock().expect(
+            "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+        );
         inner.dirty_data
     }
 
     /// Check if memory flush is needed.
     fn needs_memory_flush(&self) -> bool {
-        let inner = self.inner.lock()
-            .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+        let inner = self.inner.lock().expect(
+            "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+        );
         // Only count complete stripes toward memory pressure
         // Partial stripes don't trigger flush (prevents data loss)
         inner.complete_stripe_bytes > inner.config.max_memory_bytes
@@ -1254,8 +1264,9 @@ impl BufferedFileHandle {
 
     /// Check if full flush is needed due to time/write count.
     fn needs_full_flush(&self) -> bool {
-        let inner = self.inner.lock()
-            .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+        let inner = self.inner.lock().expect(
+            "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+        );
 
         if inner.writes_since_flush >= inner.config.max_writes_before_flush {
             return true;
@@ -1271,16 +1282,18 @@ impl BufferedFileHandle {
     /// Get current memory usage in bytes.
     /// Returns the sum of complete and partial stripe bytes.
     pub fn memory_bytes(&self) -> usize {
-        let inner = self.inner.lock()
-            .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+        let inner = self.inner.lock().expect(
+            "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+        );
         inner.complete_stripe_bytes + inner.partial_stripe_bytes
     }
 
     /// Get detailed memory usage breakdown.
     /// Returns (complete_stripe_bytes, partial_stripe_bytes, total_bytes).
     pub fn memory_usage_detailed(&self) -> (usize, usize, usize) {
-        let inner = self.inner.lock()
-            .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+        let inner = self.inner.lock().expect(
+            "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+        );
         let total = inner.complete_stripe_bytes + inner.partial_stripe_bytes;
         (
             inner.complete_stripe_bytes,
@@ -1291,8 +1304,9 @@ impl BufferedFileHandle {
 
     /// Get file attributes (may include buffered changes).
     pub fn attributes(&self) -> FileAttr {
-        let inner = self.inner.lock()
-            .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+        let inner = self.inner.lock().expect(
+            "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+        );
         inner.attributes.clone()
     }
 
@@ -1306,8 +1320,9 @@ impl BufferedFileHandle {
     /// Cached file attributes for this handle's inode.
     pub fn get_file_by_inode(&self) -> FileAttr {
         // Return cached attributes (same as attributes() but named to match MetadataStore API)
-        let inner = self.inner.lock()
-            .expect("BufferedFileHandle inner lock poisoned - indicates panic during file operation");
+        let inner = self.inner.lock().expect(
+            "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
+        );
         inner.attributes.clone()
     }
 

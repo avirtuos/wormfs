@@ -119,7 +119,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
 
     // Initialize MetadataStore (concrete type for FileSystemServiceImplFactory)
     tracing::info!("Initializing MetadataStore...");
-    let metadata_store = MetadataStoreFactory::create_concrete(config.metadata_config)
+    let metadata_store = MetadataStoreFactory::create_concrete(config.metadata_config.clone())
         .await
         .map_err(|e| Error::MetadataError(format!("Failed to create MetadataStore: {}", e)))?;
 
@@ -138,7 +138,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
     // Initialize FileStore
     tracing::info!("Initializing FileStore...");
     let file_store = Arc::new(
-        FileStore::new(config.file_store_config)
+        FileStore::new(config.file_store_config.clone())
             .map_err(|e| Error::DataFailed(format!("Failed to create FileStore: {}", e)))?,
     );
 
@@ -167,8 +167,14 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
             admin_cfg.port
         );
 
-        let admin_server =
-            crate::admin::AdminServer::new(admin_cfg.clone(), Arc::clone(metrics_svc));
+        // Wrap the config in Arc for sharing with admin server
+        let mount_config_arc = Arc::new(config.clone());
+
+        let admin_server = crate::admin::AdminServer::new(
+            admin_cfg.clone(),
+            mount_config_arc,
+            Arc::clone(metrics_svc),
+        );
 
         match admin_server.start() {
             Ok(handle) => {
@@ -201,7 +207,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
     tracing::info!("Creating FileSystemService...");
     let service = Arc::new(
         FileSystemServiceImplFactory::create(
-            config.filesystem_config,
+            config.filesystem_config.clone(),
             metadata_store,
             file_store,
             metrics,

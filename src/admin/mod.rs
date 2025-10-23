@@ -19,6 +19,7 @@
 //! ```rust,no_run
 //! use wormfs::admin::{AdminServer, Config};
 //! use wormfs::metric_service::{MetricService, MetricServiceImpl};
+//! use wormfs::filesystem_service::mount::MountConfig;
 //! use std::sync::Arc;
 //!
 //! # #[tokio::main]
@@ -26,7 +27,18 @@
 //! let config = Config::default();
 //! let metrics = Arc::new(MetricServiceImpl::new(Default::default())?);
 //!
-//! let server = AdminServer::new(config, metrics);
+//! // Create a minimal MountConfig
+//! let mount_config = Arc::new(MountConfig {
+//!     filesystem_config: Default::default(),
+//!     metadata_config: Default::default(),
+//!     file_store_config: Default::default(),
+//!     metric_config: Some(Default::default()),
+//!     admin_config: Some(config.clone()),
+//!     mount_point: std::path::PathBuf::from("/tmp/wormfs"),
+//!     mount_options: Default::default(),
+//! });
+//!
+//! let server = AdminServer::new(config, mount_config, metrics);
 //! let handle = server.start()?;
 //!
 //! // Server runs in the background
