@@ -8,6 +8,10 @@ WormFS, short for write-once-read-many file system, is a user-space distributed 
 
 Much of the architecture of this project is inspired by LizardFS' simplicity with a goal of offering greater control and visibility over how chunks are stored, replicated, and recovered.
 
+<p align="center">
+<img src="docs/images/admin_ui.png" width="600">
+</p>
+
 ## 📊 Project Status
 
 **Current Phase:** ✨ Phase 1 Complete! ✨
