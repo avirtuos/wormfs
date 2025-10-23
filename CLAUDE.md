@@ -7,7 +7,7 @@ WormFS, short for write-once-read-many file system, is intended to be user-space
 ## Rules and Guidelines
 
 1.  If you are working on a component, first read the design document in the docs/components folder and any other component required for the task. For example, StorageRaftMember's design is in docs/components/02_StorageRaftMember.md
-2. Prioritize idiomatic Rust,aAlways strive for clear and concise rust code. Follow Rust's best practices, including ownership, borrowing, and error handling.
+2. Prioritize idiomatic Rust. Always strive for clear and concise rust code. Follow Rust's best practices, including ownership, borrowing, and error handling.
 3. Make sure any relevant changes are reflected in the project REAME.md as well as the component's design file.
 4. Every new feature or bug fix should be accompanied by appropriate unit and integration tests. Aim for test coverage above 70%.
 5. When validating a change or completion of a test, always run `cargo fmt`, `cargo build`, and `cargo test`.
