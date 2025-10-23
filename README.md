@@ -44,13 +44,52 @@ WormFS is a work in progress that's being developed iteratively following a phas
 
 ---
 
-## 🚀 Quick Start
+## 📚 Documentation
 
-### Prerequisites
+### Core Documentation
+- [Design Overview](docs/design.md) - Overall WormFS architecture, key terms, and Raft-based consensus design
+- [Configuration Reference](docs/configuration.md) - Complete guide to TOML configuration options and settings
+
+### Implementation Plans
+- [Phase 1: Minimal Data Path](docs/implementation_plan/phase1_minimal_data_path.md) - Single-node filesystem implementation with FUSE, SQLite, and local storage
+- [Phase 2: Consensus Layer](docs/implementation_plan/phase2_consensus_layer.md) - Raft consensus integration for distributed coordination
+- [Phase 3: Distributed Storage](docs/implementation_plan/phase3_distributed_storage.md) - Multi-node chunk distribution and network protocol
+- [Phase 4: Robustness & Recovery](docs/implementation_plan/phase4_robustness_recovery.md) - Failure detection, chunk repair, and data recovery mechanisms
+- [Phase 5: Observability & Testing](docs/implementation_plan/phase5_observability_testing.md) - Metrics, monitoring, and comprehensive testing strategy
+- [Overall Implementation Plan](docs/overall_implementation_plan.md) - High-level roadmap and phase dependencies
+
+### Component Specifications
+- [01. StorageNode](docs/components/01_StorageNode.md) - Top-level orchestrator that wires together all subsystem components
+- [02. StorageRaftMember](docs/components/02_StorageRaftMember.md) - Raft consensus implementation for distributed metadata operations
+- [03. StorageNetwork](docs/components/03_StorageNetwork.md) - Libp2p-based peer-to-peer networking layer for node communication
+- [04. FileStore](docs/components/04_FileStore.md) - Reed-Solomon erasure coding and chunk storage management
+- [05. MetadataStore](docs/components/05_MetadataStore.md) - SQLite-based metadata persistence for files, directories, and chunk locations
+- [06. SnapshotStore](docs/components/06_SnapshotStore.md) - Raft snapshot management for metadata compaction and recovery
+- [07. TransactionLogStore](docs/components/07_TransactionLogStore.md) - Redb-based append-only log for Raft consensus operations
+- [08. StorageEndpoint](docs/components/08_StorageEndpoint.md) - gRPC API server for inter-node communication
+- [09. StorageWatchdog](docs/components/09_StorageWatchdog.md) - Background health monitoring and chunk verification service
+- [10. MetricService](docs/components/10_MetricService.md) - Metrics collection and aggregation for observability
+- [11. FileSystemService](docs/components/11_FileSystemService.md) - FUSE integration layer providing POSIX filesystem operations
+- [12. WormValidator](docs/components/12_WormValidator.md) - Correctness testing framework for distributed operations
+- [13. BufferedFileHandle](docs/components/13_buffered_file_handle.md) - Write buffering and coalescing for improved performance
+
+### Additional Documentation
+- [Chunk Format API](docs/chunk_format_api.md) - Binary chunk format specification and versioning
+- [Filesystem Transactions](docs/filesystem_transactions.md) - Transaction semantics for multi-step filesystem operations
+- [POSIX Compliance](docs/posix_compliance.md) - POSIX standard compliance status and known limitations
+- [Raft Integration Stubs](docs/raft_integration_stubs.md) - Raft interface implementations for Phase 2+ features
+- [Key Components](docs/key_components.md) - Quick reference guide to major system components
+
+---
+
+## 🚀 Getting Started
+
+### Dependencies
 
 **Required:**
-- Rust 1.70+ (with Cargo)
-- FUSE3 (Linux) or macFUSE (macOS)
+- **Rust 1.70+** with Cargo
+- **FUSE3** (Linux) or **macFUSE** (macOS)
+- **Build essentials** (gcc, make)
 
 **Install FUSE:**
 ```bash
@@ -64,381 +103,32 @@ sudo yum install fuse3 fuse3-devel
 brew install macfuse
 ```
 
-### Building WormFS
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd wormfs_v2
-
-# Build with default features (includes FUSE)
-cargo build --release
-
-# Or build with all features
-cargo build --release --all-features
-```
-
 ### Running the Demo
 
-The quickest way to see WormFS in action:
+The quickest way to experience WormFS:
 
 ```bash
-# Run the interactive demo (handles everything automatically)
-./scripts/demo_wormfs.sh
-
-# Or run with verbose output
-./scripts/demo_wormfs.sh --verbose
-```
-
-### Manual Usage
-
-#### 1. Run the Storage Node
-
-```bash
-# Run with default configuration
-cargo run --bin wormfs-storage-node -- \
-  --data-dir /tmp/wormfs-data \
-  --verbose
-
-# Or use a config file
-cargo run --bin wormfs-storage-node -- \
-  --config examples/config.toml \
-  --verbose
-```
-
-#### 2. Mount the Filesystem (in another terminal)
-
-```bash
-# Create mount point
-mkdir -p /tmp/wormfs-mount
-
-# Mount the filesystem
-cargo run --bin wormfs -- mount \
-  --mount-point /tmp/wormfs-mount \
-  --metadata-db /tmp/wormfs-data/metadata.db \
-  --data-dir /tmp/wormfs-data/chunks \
-  --foreground
-```
-
-#### 3. Use the Filesystem
-
-```bash
-# In another terminal
-cd /tmp/wormfs-mount
-
-# Create files
-echo "Hello WormFS!" > hello.txt
-cat hello.txt
-
-# Create directories
-mkdir test_dir
-ls -la
-
-# Copy files
-cp /etc/hosts test_dir/
-cat test_dir/hosts
-```
-
-#### 4. Unmount
-
-```bash
-# Linux
-fusermount -u /tmp/wormfs-mount
-
-# macOS
-umount /tmp/wormfs-mount
-```
-
----
-
-## ⚙️ Configuration
-
-WormFS supports three levels of configuration (in order of precedence):
-
-### 1. TOML Configuration File
-
-Create a `config.toml` file (see `examples/config.toml` for full example):
-
-```toml
-# Node configuration
-node_id = "wormfs-node-001"
-listen_address = "127.0.0.1:7000"
-data_dir = "/var/lib/wormfs"
-
-# Metadata database
-metadata_db_path = "/var/lib/wormfs/metadata.db"
-
-# Erasure coding settings
-default_stripe_size = 1048576  # 1MB
-default_data_shards = 2
-default_parity_shards = 1
-
-# Filesystem settings
-default_uid = 1000
-default_gid = 1000
-lock_timeout = 30  # seconds
-```
-
-### 2. Environment Variables
-
-Override specific settings:
-
-```bash
-export WORMFS_NODE_ID="my-custom-node"
-export WORMFS_DATA_DIR="/custom/path"
-export WORMFS_LISTEN_ADDRESS="0.0.0.0:8000"
-```
-
-### 3. CLI Arguments
-
-Highest priority - overrides everything:
-
-```bash
-wormfs-storage-node \
-  --config config.toml \
-  --node-id override-node \
-  --data-dir /tmp/override \
-  --verbose
-```
-
----
-
-## 🏗️ Architecture (Phase 1)
-
-WormFS Phase 1 consists of three main components wired together by the StorageNode orchestrator:
-
-```
-┌─────────────────────────────────────────┐
-│         StorageNode (Orchestrator)      │
-├─────────────────────────────────────────┤
-│                                         │
-│  ┌───────────────────────────────────┐ │
-│  │   MetadataStore (SQLite + WAL)    │ │
-│  │   • File/directory metadata       │ │
-│  │   • Chunk location tracking       │ │
-│  │   • Distributed locks             │ │
-│  │   • Inode management              │ │
-│  └───────────────────────────────────┘ │
-│                                         │
-│  ┌───────────────────────────────────┐ │
-│  │   FileStore (Erasure Coding)      │ │
-│  │   • Reed-Solomon encoding         │ │
-│  │   • Local chunk storage           │ │
-│  │   • Chunk verification            │ │
-│  │   • Two-phase commit staging      │ │
-│  └───────────────────────────────────┘ │
-│                                         │
-│  ┌───────────────────────────────────┐ │
-│  │   FileSystemService (FUSE)        │ │
-│  │   • POSIX filesystem API          │ │
-│  │   • File operations               │ │
-│  │   • Directory operations          │ │
-│  │   • Lock management               │ │
-│  └───────────────────────────────────┘ │
-│                                         │
-└─────────────────────────────────────────┘
-```
-
-### Data Flow
-
-**Write Operation:**
-1. Client writes data via FUSE
-2. FileSystemService validates and splits into stripes
-3. FileStore applies Reed-Solomon erasure coding
-4. Chunks written to local disk
-5. MetadataStore updated with chunk locations
-
-**Read Operation:**
-1. Client reads data via FUSE
-2. FileSystemService queries MetadataStore for chunk locations
-3. FileStore retrieves and reconstructs stripes from chunks
-4. Data returned to client
-
----
-
-## 🧪 Testing
-
-```bash
-# Run all tests
-cargo test
-
-# Run specific test suites
-cargo test --test phase1_component_wiring
-cargo test --lib storage_node
-cargo test --lib metadata_store
-cargo test --lib file_store
-cargo test --lib filesystem_service
-
-# Run with logging
-RUST_LOG=debug cargo test -- --nocapture
-```
-
----
-
-## 📝 Development
-
-This project uses a structured, spec-driven development approach:
-
-1. **Design Documentation** (`docs/design.md`)
-   - Overall architecture
-   - Component specifications
-   - Data flow diagrams
-
-2. **Implementation Plans** (`docs/implementation_plan/`)
-   - Phase 1: Minimal Data Path
-   - Phase 2: Consensus Layer (Raft)
-   - Phase 3: Distributed Storage
-   - Phase 4: Robustness & Recovery
-   - Phase 5: Observability & Testing
-
-3. **Component Specifications** (`docs/components/`)
-   - Detailed specs for each component
-   - Interface definitions
-   - Implementation notes
-
-### Development Workflow
-
-```bash
-# 1. Make changes
-vim src/...
-
-# 2. Run tests
-cargo test
-
-# 3. Check formatting
-cargo fmt --check
-
-# 4. Run linter
-cargo clippy -- -D warnings
-
-# 5. Run comprehensive validation
-./scripts/validate.sh
-
-# 6. Commit changes
-git add .
-git commit -m "Description"
-```
-
----
-
-## 🎯 Current Capabilities & Limitations
-
-### ✅ What Works (Phase 1)
-
-**Filesystem Operations:**
-- ✅ Create, read, write, delete files
-- ✅ Create, list, remove directories
-- ✅ File attributes (permissions, timestamps, size)
-- ✅ Symbolic links
-
-**Data Management:**
-- ✅ Erasure coding (configurable data/parity shards)
-- ✅ Local chunk storage
-- ✅ Stripe-based file organization
-- ✅ Chunk verification
-
-**Metadata:**
-- ✅ SQLite-based persistence
-- ✅ Concurrent reads (connection pool)
-- ✅ WAL mode for performance
-- ✅ ACID transactions
-
-### 🚧 Current Limitations (Single-Node Phase 1)
-
-- ⚠️ **Single Node Only**: No distributed operation yet
-- ⚠️ **Local Storage Only**: Chunks stored on one machine
-- ⚠️ **No Replication**: Each chunk stored once (within erasure coding)
-- ⚠️ **No Consensus**: No Raft coordination (Phase 2)
-- ⚠️ **No Network Protocol**: No node-to-node communication
-- ⚠️ **Limited Durability**: Single point of failure
-
-These limitations will be addressed in future phases!
-
----
-
-## 🐛 Troubleshooting
-
-### Build Issues
-
-**Problem:** `error: linker 'cc' not found`
-```bash
-# Install build essentials
-sudo apt-get install build-essential  # Ubuntu/Debian
-sudo yum groupinstall "Development Tools"  # RHEL/CentOS
-```
-
-**Problem:** `error: failed to run custom build command for 'fuser'`
-```bash
-# Install FUSE development headers
-sudo apt-get install libfuse3-dev  # Ubuntu/Debian
-```
-
-### Runtime Issues
-
-**Problem:** `Permission denied` when mounting
-```bash
-# Add user to fuse group
-sudo usermod -a -G fuse $USER
-# Log out and log back in
-```
-
-**Problem:** `Transport endpoint is not connected`
-```bash
-# Clean up stale mount
-fusermount -u /tmp/wormfs-mount  # Linux
-umount /tmp/wormfs-mount         # macOS
-```
-
-**Problem:** Tests fail with database locked
-```bash
-# Clean test artifacts
-cargo clean
-rm -rf /tmp/wormfs-test-*
-```
-
-**Problem:** `fusermount3: option allow_other only allowed if 'user_allow_other' is set`
-
-This occurs when auto_unmount is enabled without proper FUSE configuration. WormFS now disables auto_unmount by default to avoid this issue.
-
-**Solution A - Use defaults (recommended for development):**
-```bash
-# The demo script and binaries now work without any configuration
 ./scripts/demo_wormfs.sh
 ```
 
-**Solution B - Enable user_allow_other system-wide (if you need auto_unmount):**
-```bash
-# Edit FUSE config (requires sudo)
-sudo nano /etc/fuse.conf
-# Uncomment or add the line: user_allow_other
+**What the Demo Does:**
 
-# Then you can use auto_unmount
-cargo run --bin wormfs -- mount \
-  --mount-point /tmp/wormfs-mount \
-  --metadata-db /tmp/wormfs-data/metadata.db \
-  --data-dir /tmp/wormfs-data/chunks \
-  --auto-unmount \
-  --foreground
-```
+The interactive demo script automatically:
+1. Builds WormFS from source
+2. Creates a temporary filesystem with erasure coding (2+1 Reed-Solomon)
+3. Mounts the filesystem via FUSE
+4. Performs file operations (create, read, write, delete)
+5. Demonstrates directory operations (mkdir, readdir, rmdir)
+6. Displays real-time metrics (I/O amplification, cache hit rates, performance)
+7. Launches an admin web UI for monitoring
 
-**Solution C - Manual cleanup (if process crashes):**
-```bash
-# Clean up stale mount manually
-fusermount -u /tmp/wormfs-mount  # Linux
-umount /tmp/wormfs-mount         # macOS
+**Accessing the Web UI:**
 
-# Or use the demo script which handles cleanup automatically
-```
-
----
-
-## 📚 Documentation
-
-- [Design Overview](docs/design.md)
-- [Phase 1 Implementation Plan](docs/implementation_plan/phase1_minimal_data_path.md)
-- [Component Specifications](docs/components/)
-- [FUSE Quickstart](docs/fuse_quickstart.md)
-- [POSIX Compliance](docs/posix_compliance.md)
+Open your browser to **http://127.0.0.1:9090/** to view:
+- Real-time system metrics and performance graphs
+- Current configuration settings
+- System health status and component diagnostics
+- File and chunk statistics
 
 ---
 
