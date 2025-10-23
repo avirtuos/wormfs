@@ -171,7 +171,8 @@ async fn test_io_amplification_tracking() {
     // Validate stripe write metrics exist
     let stripe_write_metrics = [
         "filestore.stripe_write.total",
-        "filestore.stripe_write.bytes",
+        "filestore.stripe_write.bytes_raw",
+        "filestore.stripe_write.bytes_encoded",
         "filestore.stripe_write.latency",
     ];
 
