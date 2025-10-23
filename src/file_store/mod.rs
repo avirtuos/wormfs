@@ -79,6 +79,7 @@ pub mod types;
 use async_trait::async_trait;
 pub use implementation::FileStoreImpl;
 use std::path::PathBuf;
+use std::sync::Arc;
 pub use stripe_builder::StripeBuilder;
 pub use types::{
     ChunkCacheEntry, ChunkData, ChunkHeader, ChunkId, ChunkMetadata, CompressionAlgorithm, Config,
@@ -164,7 +165,7 @@ pub trait FileStore: Send + Sync {
         file_id: FileId,
         stripe_id: StripeId,
         chunks: Vec<ChunkMetadata>,
-    ) -> Result<Vec<u8>, Error>;
+    ) -> Result<Arc<Vec<u8>>, Error>;
 
     /// Update a portion of an existing stripe.
     ///

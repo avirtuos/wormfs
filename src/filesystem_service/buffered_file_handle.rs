@@ -419,9 +419,13 @@ impl BufferedFileHandle {
             if needs_load {
                 trace!(stripe_idx = %stripe_idx, "Calling get_or_load_existing_stripe");
                 // Check for existing stripe that needs read-modify-write
-                if let Some((existing_stripe, mut existing_data)) =
+                if let Some((existing_stripe, existing_data_arc)) =
                     self.get_or_load_existing_stripe(stripe_idx).await?
                 {
+                    // Clone the Arc contents to get a mutable copy for modification
+                    // This is a one-time cost for writes; reads get zero-copy benefits
+                    let mut existing_data = (*existing_data_arc).clone();
+
                     // Calculate how much to overwrite in this stripe
                     let bytes_to_write = remaining
                         .len()
@@ -657,11 +661,11 @@ impl BufferedFileHandle {
     ///
     /// # Returns
     ///
-    /// Option with (StripeMetadata, Vec<u8>) if stripe exists, None otherwise.
+    /// Option with (StripeMetadata, Arc<Vec<u8>>) if stripe exists, None otherwise (Arc enables zero-copy sharing).
     async fn get_or_load_existing_stripe(
         &self,
         stripe_idx: u32,
-    ) -> Result<Option<(StripeMetadata, Vec<u8>)>, Error> {
+    ) -> Result<Option<(StripeMetadata, Arc<Vec<u8>>)>, Error> {
         trace!(stripe_idx = %stripe_idx, "get_or_load_existing_stripe: Entry");
 
         let (file_id, max_stripe_size, cached_stripe) = {
@@ -716,8 +720,8 @@ impl BufferedFileHandle {
                 })
                 .collect();
 
-            // Read stripe data from FileStore
-            let data = self
+            // Read stripe data from FileStore (Arc-wrapped for zero-copy sharing)
+            let data: Arc<Vec<u8>> = self
                 .file_store
                 .read_stripe(file_id, stripe_meta.stripe_id, chunks)
                 .await
@@ -759,8 +763,8 @@ impl BufferedFileHandle {
                 })
                 .collect();
 
-            // Read stripe data
-            let data = self
+            // Read stripe data (Arc-wrapped for zero-copy sharing)
+            let data: Arc<Vec<u8>> = self
                 .file_store
                 .read_stripe(file_id, stripe_record.stripe_id, chunks)
                 .await
@@ -875,7 +879,8 @@ impl BufferedFileHandle {
                     inner.file_id
                 };
 
-                let stripe_data = self
+                // Arc-wrapped stripe data enables zero-copy sharing across reads
+                let stripe_data: Arc<Vec<u8>> = self
                     .file_store
                     .read_stripe(
                         file_id,
@@ -885,6 +890,7 @@ impl BufferedFileHandle {
                     .await
                     .map_err(|e| Error::DataFailed(format!("Failed to read stripe: {}", e)))?;
 
+                // Arc<Vec<u8>> derefs to &[u8], so slicing works transparently
                 let available = stripe_data.len().saturating_sub(offset_in_stripe);
                 let to_copy = bytes_to_read.min(available);
                 result
@@ -941,7 +947,8 @@ impl BufferedFileHandle {
                             })
                             .collect();
 
-                        let stripe_data = self
+                        // Arc-wrapped stripe data for zero-copy sharing
+                        let stripe_data: Arc<Vec<u8>> = self
                             .file_store
                             .read_stripe(file_id, stripe_metadata.stripe_id, chunks)
                             .await
@@ -949,6 +956,7 @@ impl BufferedFileHandle {
                                 Error::DataFailed(format!("Failed to read stripe: {}", e))
                             })?;
 
+                        // Arc derefs to &[u8] for transparent slicing
                         let available = stripe_data.len().saturating_sub(offset_in_stripe);
                         let to_copy = bytes_to_read.min(available);
                         result.extend_from_slice(
@@ -1487,8 +1495,8 @@ mod tests {
             _file_id: FileId,
             _stripe_id: StripeId,
             _chunks: Vec<ChunkMetadata>,
-        ) -> Result<Vec<u8>, FileStoreError> {
-            Ok(vec![])
+        ) -> Result<Arc<Vec<u8>>, FileStoreError> {
+            Ok(Arc::new(vec![]))
         }
 
         async fn update_stripe_partial(
