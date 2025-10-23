@@ -64,6 +64,12 @@ pub async fn config_handler(State(mount_config): State<Arc<MountConfig>>) -> imp
                 "transaction_isolation": format!("{:?}", mount_config.metadata_config.transaction_isolation),
                 "enable_prepared_statements": mount_config.metadata_config.enable_prepared_statements,
                 "read_pool_timeout_secs": mount_config.metadata_config.read_pool_timeout_secs,
+                "stripe_cache_size_mb": mount_config.metadata_config.stripe_cache_size_mb,
+                "stripe_cache_ttl_secs": mount_config.metadata_config.stripe_cache_ttl_secs,
+                "stripe_cache_tti_secs": mount_config.metadata_config.stripe_cache_tti_secs,
+                "chunk_cache_size_mb": mount_config.metadata_config.chunk_cache_size_mb,
+                "chunk_cache_ttl_secs": mount_config.metadata_config.chunk_cache_ttl_secs,
+                "chunk_cache_tti_secs": mount_config.metadata_config.chunk_cache_tti_secs,
             },
             "descriptions": {
                 "database_path": "Path to SQLite database file storing filesystem metadata",
@@ -75,6 +81,12 @@ pub async fn config_handler(State(mount_config): State<Arc<MountConfig>>) -> imp
                 "transaction_isolation": "Transaction isolation level: ReadCommitted or Serializable",
                 "enable_prepared_statements": "Enable prepared statement caching for common queries",
                 "read_pool_timeout_secs": "Timeout for acquiring read connection from pool (seconds)",
+                "stripe_cache_size_mb": "In-memory cache size for stripe metadata in MB (reduces SQLite queries)",
+                "stripe_cache_ttl_secs": "Stripe metadata cache time-to-live (evict after this time)",
+                "stripe_cache_tti_secs": "Stripe metadata cache time-to-idle (evict if not accessed)",
+                "chunk_cache_size_mb": "In-memory cache size for chunk lists in MB (reduces SQLite queries)",
+                "chunk_cache_ttl_secs": "Chunk list cache time-to-live (evict after this time)",
+                "chunk_cache_tti_secs": "Chunk list cache time-to-idle (evict if not accessed)",
             }
         },
         "filestore": {

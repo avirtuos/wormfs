@@ -101,6 +101,7 @@
 //! - **Lock Expiration**: Automatic cleanup of expired locks
 //! - **Lock Extension**: Clients can extend lease duration
 
+pub mod cache;
 pub mod factory;
 pub mod implementation;
 pub mod types;

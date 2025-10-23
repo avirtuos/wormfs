@@ -1,6 +1,7 @@
 //! Concrete implementation of MetadataStore using tokio-rusqlite for async operations.
 
 use super::{
+    cache::{CacheConfig, MetadataCache},
     ChunkId, ChunkRecord, ChunkStatus, ClientId, Config, DiskId, Error, FileId, FileMetadata,
     FileRecord, LockRecord, LockType, MetadataStore, NodeId, StripeId, StripeRecord,
 };
@@ -50,6 +51,9 @@ struct MetadataStoreInner {
 
     /// Optional metrics service for instrumentation (sync lock for fire-and-forget publishing)
     metrics: std::sync::RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>,
+
+    /// Metadata cache for stripe records and chunk lists
+    cache: MetadataCache,
 }
 
 /// Concrete implementation of MetadataStore.
@@ -102,10 +106,22 @@ impl MetadataStoreImpl {
         // Configure connection with optimal settings
         Self::configure_connection(&conn, &config).await?;
 
+        // Initialize metadata cache
+        let cache_config = CacheConfig {
+            stripe_cache_size_mb: config.stripe_cache_size_mb,
+            stripe_cache_ttl_secs: config.stripe_cache_ttl_secs,
+            stripe_cache_tti_secs: config.stripe_cache_tti_secs,
+            chunk_cache_size_mb: config.chunk_cache_size_mb,
+            chunk_cache_ttl_secs: config.chunk_cache_ttl_secs,
+            chunk_cache_tti_secs: config.chunk_cache_tti_secs,
+        };
+        let cache = MetadataCache::new(&cache_config);
+
         let inner = MetadataStoreInner {
             conn,
             config,
             metrics: std::sync::RwLock::new(None),
+            cache,
         };
 
         Ok(Self {
@@ -642,6 +658,11 @@ impl MetadataStore for MetadataStoreImpl {
         }
         .await;
 
+        // Invalidate cache on successful delete
+        if result.is_ok() {
+            self.inner.cache.invalidate_file(&file_id).await;
+        }
+
         // Publish metrics
         self.publish_metrics("delete_file", "write", start, result.is_err());
 
@@ -838,8 +859,27 @@ impl MetadataStore for MetadataStoreImpl {
         offset: u64,
     ) -> Result<StripeRecord, Error> {
         let start = tokio::time::Instant::now();
-        let file_id_clone = file_id;
 
+        // Try cache first
+        if let Some(cached_record) = self.inner.cache.get_stripe_by_offset(file_id, offset).await {
+            // Cache hit! Clone Arc contents and return
+            let result = Ok((*cached_record).clone());
+
+            // Publish cache hit metric
+            if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+                let _ = metrics.publish_counter(
+                    "metadata_store.get_stripe_at_offset.cache_hit",
+                    1,
+                    crate::metric_service::UnitType::Operations,
+                );
+            }
+
+            self.publish_metrics("get_stripe_at_offset", "read", start, false);
+            return result;
+        }
+
+        // Cache miss - query database
+        let file_id_clone = file_id;
         let result = self
             .inner
             .conn
@@ -876,6 +916,20 @@ impl MetadataStore for MetadataStoreImpl {
                     offset, file_id_clone, e
                 )),
             });
+
+        // If successful, populate cache (write-through)
+        if let Ok(ref record) = result {
+            self.inner.cache.insert_stripe(record.clone()).await;
+
+            // Publish cache miss metric
+            if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+                let _ = metrics.publish_counter(
+                    "metadata_store.get_stripe_at_offset.cache_miss",
+                    1,
+                    crate::metric_service::UnitType::Operations,
+                );
+            }
+        }
 
         // Publish metrics
         self.publish_metrics("get_stripe_at_offset", "read", start, result.is_err());
@@ -920,6 +974,11 @@ impl MetadataStore for MetadataStoreImpl {
                 }
                 _ => Error::QueryError(format!("Failed to delete stripe {:?}: {}", stripe_id, e)),
             });
+
+        // Invalidate cache on successful delete
+        if result.is_ok() {
+            self.inner.cache.invalidate_stripe(&stripe_id).await;
+        }
 
         // Publish metrics
         self.publish_metrics("delete_stripe", "write", start, result.is_err());
@@ -1039,6 +1098,25 @@ impl MetadataStore for MetadataStoreImpl {
     async fn get_stripe_chunks(&self, stripe_id: StripeId) -> Result<Vec<ChunkRecord>, Error> {
         let start = tokio::time::Instant::now();
 
+        // Try cache first
+        if let Some(cached_chunks) = self.inner.cache.get_chunks(&stripe_id).await {
+            // Cache hit! Clone Arc contents and return
+            let result = Ok((*cached_chunks).clone());
+
+            // Publish cache hit metric
+            if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+                let _ = metrics.publish_counter(
+                    "metadata_store.get_stripe_chunks.cache_hit",
+                    1,
+                    crate::metric_service::UnitType::Operations,
+                );
+            }
+
+            self.publish_metrics("get_stripe_chunks", "read", start, false);
+            return result;
+        }
+
+        // Cache miss - query database
         let result = self
             .inner
             .conn
@@ -1082,6 +1160,23 @@ impl MetadataStore for MetadataStoreImpl {
                     stripe_id, e
                 ))
             });
+
+        // If successful, populate cache (write-through)
+        if let Ok(ref chunks) = result {
+            self.inner
+                .cache
+                .insert_chunks(stripe_id, chunks.clone())
+                .await;
+
+            // Publish cache miss metric
+            if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+                let _ = metrics.publish_counter(
+                    "metadata_store.get_stripe_chunks.cache_miss",
+                    1,
+                    crate::metric_service::UnitType::Operations,
+                );
+            }
+        }
 
         // Publish metrics
         self.publish_metrics("get_stripe_chunks", "read", start, result.is_err());
