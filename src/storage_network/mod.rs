@@ -69,6 +69,7 @@
 
 pub mod behaviour;
 pub mod implementation;
+pub mod peer_id_store;
 pub mod types;
 
 use async_trait::async_trait;
