@@ -59,12 +59,14 @@ impl PeerIdStore {
     /// Load peer ID mappings from disk.
     fn load_from_disk(path: &Path) -> Result<HashMap<IpAddr, PeerId>, Error> {
         let contents = std::fs::read_to_string(path).map_err(|e| {
-            Error::ConfigError(format!("Failed to read peer ID store from {:?}: {}", path, e))
+            Error::ConfigError(format!(
+                "Failed to read peer ID store from {:?}: {}",
+                path, e
+            ))
         })?;
 
-        let data: PeerIdStoreData = serde_json::from_str(&contents).map_err(|e| {
-            Error::ConfigError(format!("Failed to parse peer ID store: {}", e))
-        })?;
+        let data: PeerIdStoreData = serde_json::from_str(&contents)
+            .map_err(|e| Error::ConfigError(format!("Failed to parse peer ID store: {}", e)))?;
 
         let mut mappings = HashMap::new();
         for (ip_str, peer_id_bytes) in data.mappings {
@@ -91,9 +93,8 @@ impl PeerIdStore {
                 .collect(),
         };
 
-        let json = serde_json::to_string_pretty(&data).map_err(|e| {
-            Error::ConfigError(format!("Failed to serialize peer ID store: {}", e))
-        })?;
+        let json = serde_json::to_string_pretty(&data)
+            .map_err(|e| Error::ConfigError(format!("Failed to serialize peer ID store: {}", e)))?;
 
         // Ensure parent directory exists
         if let Some(parent) = self.store_path.parent() {
@@ -125,7 +126,10 @@ impl PeerIdStore {
     ///
     /// The stored peer ID if found, `None` otherwise.
     pub fn get(&self, ip: &IpAddr) -> Option<PeerId> {
-        let mappings = self.mappings.read().expect("Failed to acquire mappings lock");
+        let mappings = self
+            .mappings
+            .read()
+            .expect("Failed to acquire mappings lock");
         mappings.get(ip).cloned()
     }
 
@@ -197,7 +201,10 @@ impl PeerIdStore {
     ///
     /// A clone of all currently stored mappings.
     pub fn get_all(&self) -> HashMap<IpAddr, PeerId> {
-        let mappings = self.mappings.read().expect("Failed to acquire mappings lock");
+        let mappings = self
+            .mappings
+            .read()
+            .expect("Failed to acquire mappings lock");
         mappings.clone()
     }
 

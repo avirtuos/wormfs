@@ -129,6 +129,12 @@ impl super::StorageNetworkFactory {
         // Wrap swarm in RwLock for interior mutability
         let swarm_lock = RwLock::new(swarm);
 
+        // Create peer ID store for learned peer IDs (AutoId mode)
+        let peer_id_store = Arc::new(
+            super::peer_id_store::PeerIdStore::new(&config.peer_id_store_path)
+                .expect("Failed to create peer ID store"),
+        );
+
         // Create inner state
         let inner = Arc::new(InnerState {
             swarm: swarm_lock,
@@ -138,6 +144,7 @@ impl super::StorageNetworkFactory {
             event_rx: RwLock::new(event_rx),
             pending_requests: RwLock::new(HashMap::new()),
             metrics: RwLock::new(None),
+            peer_id_store,
         });
 
         // Create cloneable handle
@@ -186,6 +193,9 @@ pub struct InnerState {
 
     /// Optional metrics service for tracking network operations
     pub(crate) metrics: RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>,
+
+    /// Persistent store for learned peer IDs (AutoId mode)
+    pub(crate) peer_id_store: Arc<super::peer_id_store::PeerIdStore>,
 }
 
 /// StorageNetworkInner implementation
@@ -875,6 +885,101 @@ impl super::StorageNetworkInner {
             let _ = metrics.publish_counter(name, value, UnitType::Operations);
         }
     }
+
+    /// Validate a peer's ID against configuration and stored values.
+    ///
+    /// This method implements two validation modes:
+    /// - **Explicit mode**: Validates against a configured peer ID
+    /// - **AutoId mode**: Learns and stores peer IDs on first connection, validates on subsequent connections
+    ///
+    /// # Arguments
+    ///
+    /// * `ip` - IP address of the connecting peer
+    /// * `peer_id` - Peer ID from libp2p handshake
+    ///
+    /// # Returns
+    ///
+    /// - `Validated`: Peer ID matches expected value
+    /// - `NewlyDiscovered(PeerId)`: First connection in AutoId mode, peer ID stored
+    /// - `Rejected { expected, actual }`: Peer ID mismatch
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the IP is not in the configured peer list or if
+    /// validation logic fails.
+    pub(crate) async fn validate_peer_id(
+        &self,
+        ip: std::net::IpAddr,
+        peer_id: PeerId,
+    ) -> Result<super::types::ValidationResult, Error> {
+        use super::types::{PeerIdConfig, ValidationResult};
+
+        // Find peer config for this IP
+        let peer_config = self.inner.config.peers.iter().find(|p| p.ip_address == ip);
+
+        let peer_config = match peer_config {
+            Some(config) => config,
+            None => {
+                return Err(Error::ValidationFailed(format!(
+                    "IP {} is not in configured peer list",
+                    ip
+                )))
+            }
+        };
+
+        // Validate based on peer ID configuration mode
+        match &peer_config.peer_id {
+            PeerIdConfig::Explicit(expected_id) => {
+                // Explicit mode: validate against configured peer ID
+                if expected_id == &peer_id {
+                    info!("Peer {} validated with explicit ID", ip);
+                    Ok(ValidationResult::Validated)
+                } else {
+                    warn!(
+                        "Peer {} rejected: expected ID {:?}, got {:?}",
+                        ip, expected_id, peer_id
+                    );
+                    Ok(ValidationResult::Rejected {
+                        expected: expected_id.clone(),
+                        actual: peer_id,
+                    })
+                }
+            }
+            PeerIdConfig::AutoId => {
+                // AutoId mode: check stored peer IDs
+                match self.inner.peer_id_store.get(&ip) {
+                    Some(stored_id) => {
+                        // Subsequent connection: validate against stored ID
+                        if stored_id == peer_id {
+                            info!("Peer {} validated with learned ID", ip);
+                            Ok(ValidationResult::Validated)
+                        } else {
+                            warn!(
+                                "Peer {} rejected: learned ID {:?}, got {:?}",
+                                ip, stored_id, peer_id
+                            );
+                            Ok(ValidationResult::Rejected {
+                                expected: stored_id,
+                                actual: peer_id,
+                            })
+                        }
+                    }
+                    None => {
+                        // First connection: store peer ID
+                        self.inner
+                            .peer_id_store
+                            .store(ip, peer_id.clone())
+                            .map_err(|e| {
+                                Error::ValidationFailed(format!("Failed to store peer ID: {}", e))
+                            })?;
+
+                        info!("Peer {} newly discovered with ID {:?}", ip, peer_id);
+                        Ok(ValidationResult::NewlyDiscovered(peer_id))
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Helper functions for converting between libp2p and internal types
@@ -1104,6 +1209,270 @@ mod tests {
         assert!(
             result.is_err(),
             "Request should timeout without event loop, even with no metrics"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_peer_id_explicit_mode_valid() {
+        // Test peer validation in explicit mode with matching peer ID
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
+
+        let config = Config {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![super::super::types::PeerConfig {
+                ip_address: ip,
+                peer_id: super::super::types::PeerIdConfig::Explicit(peer_id.clone()),
+            }],
+            peer_id_store_path: std::env::temp_dir().join("test_validate_explicit_valid.json"),
+            max_peers: 100,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        let result = inner
+            .validate_peer_id(ip, peer_id)
+            .await
+            .expect("Validation should succeed");
+
+        assert!(
+            matches!(result, super::super::types::ValidationResult::Validated),
+            "Expected Validated, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_peer_id_explicit_mode_rejected() {
+        // Test peer validation in explicit mode with mismatched peer ID
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101));
+        let expected_peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
+        let actual_peer_id = PeerId::new(vec![6, 7, 8, 9, 10]);
+
+        let config = Config {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![super::super::types::PeerConfig {
+                ip_address: ip,
+                peer_id: super::super::types::PeerIdConfig::Explicit(expected_peer_id.clone()),
+            }],
+            peer_id_store_path: std::env::temp_dir().join("test_validate_explicit_reject.json"),
+            max_peers: 100,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        let result = inner
+            .validate_peer_id(ip, actual_peer_id.clone())
+            .await
+            .expect("Validation should succeed");
+
+        match result {
+            super::super::types::ValidationResult::Rejected { expected, actual } => {
+                assert_eq!(expected, expected_peer_id);
+                assert_eq!(actual, actual_peer_id);
+            }
+            _ => panic!("Expected Rejected, got {:?}", result),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_peer_id_auto_mode_first_connection() {
+        // Test peer validation in AutoId mode on first connection (should learn ID)
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 102));
+        let peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
+
+        let temp_store = std::env::temp_dir().join("test_validate_auto_first.json");
+        let _ = std::fs::remove_file(&temp_store); // Clean up from previous test
+
+        let config = Config {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![super::super::types::PeerConfig {
+                ip_address: ip,
+                peer_id: super::super::types::PeerIdConfig::AutoId,
+            }],
+            peer_id_store_path: temp_store.clone(),
+            max_peers: 100,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        let result = inner
+            .validate_peer_id(ip, peer_id.clone())
+            .await
+            .expect("Validation should succeed");
+
+        match result {
+            super::super::types::ValidationResult::NewlyDiscovered(discovered_id) => {
+                assert_eq!(discovered_id, peer_id);
+            }
+            _ => panic!("Expected NewlyDiscovered, got {:?}", result),
+        }
+
+        // Verify peer ID was stored
+        let stored_id = inner.inner.peer_id_store.get(&ip);
+        assert_eq!(stored_id, Some(peer_id));
+    }
+
+    #[tokio::test]
+    async fn test_validate_peer_id_auto_mode_subsequent_connection_valid() {
+        // Test peer validation in AutoId mode on subsequent connection with matching ID
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 103));
+        let peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
+
+        let temp_store = std::env::temp_dir().join("test_validate_auto_subsequent_valid.json");
+        let _ = std::fs::remove_file(&temp_store);
+
+        let config = Config {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![super::super::types::PeerConfig {
+                ip_address: ip,
+                peer_id: super::super::types::PeerIdConfig::AutoId,
+            }],
+            peer_id_store_path: temp_store.clone(),
+            max_peers: 100,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        // First connection - learn the ID
+        inner
+            .validate_peer_id(ip, peer_id.clone())
+            .await
+            .expect("First validation should succeed");
+
+        // Second connection - validate against stored ID
+        let result = inner
+            .validate_peer_id(ip, peer_id)
+            .await
+            .expect("Second validation should succeed");
+
+        assert!(
+            matches!(result, super::super::types::ValidationResult::Validated),
+            "Expected Validated on subsequent connection, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_peer_id_auto_mode_subsequent_connection_rejected() {
+        // Test peer validation in AutoId mode on subsequent connection with mismatched ID
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 104));
+        let first_peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
+        let second_peer_id = PeerId::new(vec![6, 7, 8, 9, 10]);
+
+        let temp_store = std::env::temp_dir().join("test_validate_auto_subsequent_reject.json");
+        let _ = std::fs::remove_file(&temp_store);
+
+        let config = Config {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![super::super::types::PeerConfig {
+                ip_address: ip,
+                peer_id: super::super::types::PeerIdConfig::AutoId,
+            }],
+            peer_id_store_path: temp_store.clone(),
+            max_peers: 100,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        // First connection - learn the ID
+        inner
+            .validate_peer_id(ip, first_peer_id.clone())
+            .await
+            .expect("First validation should succeed");
+
+        // Second connection with different ID - should be rejected
+        let result = inner
+            .validate_peer_id(ip, second_peer_id.clone())
+            .await
+            .expect("Validation should succeed");
+
+        match result {
+            super::super::types::ValidationResult::Rejected { expected, actual } => {
+                assert_eq!(expected, first_peer_id);
+                assert_eq!(actual, second_peer_id);
+            }
+            _ => panic!("Expected Rejected, got {:?}", result),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_peer_id_unknown_ip() {
+        // Test peer validation with IP not in configured peer list
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let configured_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 105));
+        let unknown_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 106));
+        let peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
+
+        let config = Config {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![super::super::types::PeerConfig {
+                ip_address: configured_ip,
+                peer_id: super::super::types::PeerIdConfig::AutoId,
+            }],
+            peer_id_store_path: std::env::temp_dir().join("test_validate_unknown_ip.json"),
+            max_peers: 100,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        // Try to validate peer from unknown IP - should fail
+        let result = inner.validate_peer_id(unknown_ip, peer_id).await;
+
+        assert!(result.is_err(), "Expected error for unknown IP");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not in configured peer list"),
+            "Error should mention unknown IP"
         );
     }
 }
