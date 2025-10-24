@@ -269,12 +269,69 @@ impl super::StorageNetworkInner {
                 ..
             } => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&peer_id);
+                let remote_addr = endpoint.get_remote_address();
+
                 info!(
                     "Connection established with peer {:?} at {} (total connections: {})",
-                    internal_peer_id,
-                    endpoint.get_remote_address(),
-                    num_established
+                    internal_peer_id, remote_addr, num_established
                 );
+
+                // Extract IP address from multiaddr for validation
+                let (extracted_ip, validation_result) =
+                    if let Some(ip) = extract_ip_from_multiaddr(remote_addr) {
+                        match self.validate_peer_id(ip, internal_peer_id.clone()).await {
+                            Ok(result) => (Some(ip), Some(result)),
+                            Err(e) => {
+                                warn!("Peer validation failed for {:?}: {}", internal_peer_id, e);
+
+                                // Disconnect the peer
+                                let mut swarm = self
+                                    .inner
+                                    .swarm
+                                    .write()
+                                    .expect("Failed to acquire swarm lock");
+                                let _ = swarm.disconnect_peer_id(peer_id);
+                                return;
+                            }
+                        }
+                    } else {
+                        warn!(
+                        "Could not extract IP from address {} for peer {:?}, skipping validation",
+                        remote_addr, internal_peer_id
+                    );
+                        (None, None)
+                    };
+
+                // Check if peer was rejected
+                if let Some(super::types::ValidationResult::Rejected { expected, actual }) =
+                    &validation_result
+                {
+                    warn!(
+                        "Rejecting peer from {:?}: expected ID {:?}, got {:?}",
+                        extracted_ip, expected, actual
+                    );
+
+                    // Disconnect the peer
+                    let mut swarm = self
+                        .inner
+                        .swarm
+                        .write()
+                        .expect("Failed to acquire swarm lock");
+                    let _ = swarm.disconnect_peer_id(peer_id);
+                    return;
+                }
+
+                // Determine validation status based on result
+                let validation_status = match validation_result {
+                    Some(super::types::ValidationResult::Validated) => ValidationStatus::Validated,
+                    Some(super::types::ValidationResult::NewlyDiscovered(_)) => {
+                        ValidationStatus::AutoDiscovered
+                    }
+                    Some(super::types::ValidationResult::Rejected { .. }) => {
+                        unreachable!("Rejected case handled above")
+                    }
+                    None => ValidationStatus::Pending,
+                };
 
                 // Update peer state
                 let mut peers = self
@@ -286,10 +343,10 @@ impl super::StorageNetworkInner {
                     internal_peer_id.clone(),
                     PeerState {
                         peer_id: internal_peer_id,
-                        addresses: vec![endpoint.get_remote_address().to_string()],
+                        addresses: vec![remote_addr.to_string()],
                         connection_state: ConnectionState::Connected,
                         last_seen: SystemTime::now(),
-                        validation_status: ValidationStatus::Pending,
+                        validation_status,
                     },
                 );
             }
@@ -995,6 +1052,32 @@ fn libp2p_peer_id_to_internal(peer_id: &Libp2pPeerId) -> PeerId {
 fn internal_peer_id_to_libp2p(peer_id: &PeerId) -> Result<Libp2pPeerId, Error> {
     Libp2pPeerId::from_bytes(peer_id.as_bytes())
         .map_err(|e| Error::ConfigError(format!("Invalid peer ID: {}", e)))
+}
+
+/// Extract IP address from a libp2p Multiaddr.
+///
+/// This function parses a Multiaddr and extracts the IP address component.
+/// It supports both IPv4 and IPv6 addresses.
+///
+/// # Arguments
+///
+/// * `multiaddr` - The multiaddr to parse
+///
+/// # Returns
+///
+/// The extracted IP address, or `None` if no IP component was found.
+#[cfg(feature = "libp2p")]
+fn extract_ip_from_multiaddr(multiaddr: &libp2p::Multiaddr) -> Option<std::net::IpAddr> {
+    use libp2p::multiaddr::Protocol;
+
+    for component in multiaddr.iter() {
+        match component {
+            Protocol::Ip4(addr) => return Some(std::net::IpAddr::V4(addr)),
+            Protocol::Ip6(addr) => return Some(std::net::IpAddr::V6(addr)),
+            _ => continue,
+        }
+    }
+    None
 }
 
 #[cfg(all(test, feature = "libp2p"))]
