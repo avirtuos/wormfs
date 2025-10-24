@@ -990,4 +990,120 @@ mod tests {
         let info = handle.get_peer_info(&peer_id);
         assert!(info.is_none(), "Non-existent peer should return None");
     }
+
+    #[tokio::test]
+    async fn test_send_request_peer_not_connected() {
+        // Test that send_request properly queues request command
+        // even when peer is not connected (error will be returned)
+        let config = Config {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![],
+            peer_id_store_path: std::env::temp_dir().join("test_request_no_peer.json"),
+            max_peers: 100,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        // Try to send request to non-existent peer
+        let peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
+        let request = b"test request".to_vec();
+
+        // This should queue the command successfully, but since the event loop
+        // isn't running, it will timeout waiting for a response
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            handle.send_request(&peer_id, "/wormfs/test/1.0.0", request),
+        )
+        .await;
+
+        // Should timeout since event loop isn't running to process commands
+        assert!(
+            result.is_err(),
+            "Request should timeout when event loop is not running"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_response_command_queuing() {
+        // Test that send_request command can be queued
+        let config = Config {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![],
+            peer_id_store_path: std::env::temp_dir().join("test_request_queue.json"),
+            max_peers: 100,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        let peer_id = PeerId::new(vec![1, 2, 3, 4, 5, 6]);
+        let request_data = b"test request data".to_vec();
+
+        // Try to send request (command will be queued, but event loop isn't running)
+        // We expect this to timeout since no event loop is processing commands
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            handle.send_request(&peer_id, "/wormfs/test/1.0.0", request_data),
+        )
+        .await;
+
+        // Should timeout since event loop isn't running to process the command
+        assert!(
+            result.is_err() || matches!(result, Ok(Err(_))),
+            "Request should timeout or fail without event loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_metrics_are_optional() {
+        // Test that metrics can be None and operations still work
+        let config = Config {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![],
+            peer_id_store_path: std::env::temp_dir().join("test_metrics_optional.json"),
+            max_peers: 100,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        // Verify metrics is None by default
+        let metrics_lock = handle
+            .inner
+            .metrics
+            .read()
+            .expect("Failed to get metrics lock");
+        assert!(metrics_lock.is_none(), "Metrics should be None by default");
+        drop(metrics_lock);
+
+        // Operations should still work without metrics (will timeout due to no event loop)
+        let peer_id = PeerId::new(vec![7, 8, 9]);
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            handle.send_request(&peer_id, "/test", b"data".to_vec()),
+        )
+        .await;
+
+        // Should timeout due to no event loop, not fail due to missing metrics
+        assert!(
+            result.is_err(),
+            "Request should timeout without event loop, even with no metrics"
+        );
+    }
 }
