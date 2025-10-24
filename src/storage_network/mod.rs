@@ -213,6 +213,48 @@ impl StorageNetworkHandle {
             rtt: None,
         })
     }
+
+    /// Send a request to a specific peer and await response (request-response protocol).
+    ///
+    /// This method uses libp2p's request-response protocol for direct peer-to-peer RPC.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - Target peer identifier
+    /// * `protocol` - Protocol name (e.g., "/wormfs/rpc/1.0.0")
+    /// * `request` - Request data bytes
+    ///
+    /// # Returns
+    ///
+    /// Response data bytes from the peer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Peer is not connected
+    /// - Request times out
+    /// - Request fails for any reason
+    pub async fn send_request(
+        &self,
+        peer_id: &PeerId,
+        protocol: &str,
+        request: Vec<u8>,
+    ) -> Result<Vec<u8>, Error> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        self.event_tx
+            .send(NetworkCommand::SendRequest {
+                peer_id: peer_id.clone(),
+                protocol: protocol.to_string(),
+                request,
+                response: response_tx,
+            })
+            .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+
+        response_rx
+            .await
+            .map_err(|_| Error::EventLoopFailed("Event loop dropped response".to_string()))?
+    }
 }
 
 /// Factory for creating StorageNetwork instances.

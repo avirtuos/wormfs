@@ -136,6 +136,7 @@ impl super::StorageNetworkFactory {
             topics,
             config: config.clone(),
             event_rx: RwLock::new(event_rx),
+            pending_requests: RwLock::new(HashMap::new()),
         });
 
         // Create cloneable handle
@@ -173,6 +174,14 @@ pub struct InnerState {
 
     /// Command receiver for event loop
     pub(crate) event_rx: RwLock<mpsc::UnboundedReceiver<NetworkCommand>>,
+
+    /// Pending request-response requests (RequestId → response channel)
+    pub(crate) pending_requests: RwLock<
+        HashMap<
+            request_response::OutboundRequestId,
+            tokio::sync::oneshot::Sender<Result<Vec<u8>, Error>>,
+        >,
+    >,
 }
 
 /// StorageNetworkInner implementation
@@ -362,8 +371,7 @@ impl super::StorageNetworkInner {
             }
 
             WormFsBehaviourEvent::RequestResponse(rr_event) => {
-                // Day 3: Handle request-response events
-                debug!("Request-response event: {:?}", rr_event);
+                self.handle_request_response_event(rr_event).await;
             }
         }
     }
@@ -493,6 +501,133 @@ impl super::StorageNetworkInner {
         }
     }
 
+    /// Handle a request-response event.
+    async fn handle_request_response_event(
+        &self,
+        event: request_response::Event<Vec<u8>, Vec<u8>>,
+    ) {
+        use request_response::Event;
+
+        match event {
+            Event::Message { peer, message } => {
+                use request_response::Message;
+                match message {
+                    Message::Request {
+                        request_id,
+                        request,
+                        channel,
+                    } => {
+                        let internal_peer_id = libp2p_peer_id_to_internal(&peer);
+                        info!(
+                            "Received request from peer {:?} (ID: {:?}, {} bytes)",
+                            internal_peer_id,
+                            request_id,
+                            request.len()
+                        );
+
+                        // For now, echo the request back as response
+                        // In the future, this would route to a handler
+                        let response = request.clone();
+
+                        // Send response through the swarm
+                        let mut swarm = self
+                            .inner
+                            .swarm
+                            .write()
+                            .expect("Failed to acquire swarm lock");
+                        if swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_response(channel, response)
+                            .is_err()
+                        {
+                            warn!("Failed to send response to request {:?}", request_id);
+                        }
+                    }
+
+                    Message::Response {
+                        request_id,
+                        response,
+                    } => {
+                        debug!(
+                            "Received response (ID: {:?}, {} bytes)",
+                            request_id,
+                            response.len()
+                        );
+
+                        // Look up pending request and send response back
+                        let response_tx = {
+                            let mut pending = self
+                                .inner
+                                .pending_requests
+                                .write()
+                                .expect("Failed to acquire pending_requests lock");
+                            pending.remove(&request_id)
+                        };
+
+                        if let Some(tx) = response_tx {
+                            if tx.send(Ok(response)).is_err() {
+                                warn!("Failed to deliver response for request {:?} - receiver dropped", request_id);
+                            }
+                        } else {
+                            warn!("Received response for unknown request {:?}", request_id);
+                        }
+                    }
+                }
+            }
+
+            Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+            } => {
+                let internal_peer_id = libp2p_peer_id_to_internal(&peer);
+                warn!(
+                    "Outbound request {:?} to peer {:?} failed: {:?}",
+                    request_id, internal_peer_id, error
+                );
+
+                // Notify caller of failure
+                let response_tx = {
+                    let mut pending = self
+                        .inner
+                        .pending_requests
+                        .write()
+                        .expect("Failed to acquire pending_requests lock");
+                    pending.remove(&request_id)
+                };
+
+                if let Some(tx) = response_tx {
+                    let err = Error::RequestFailed {
+                        peer: internal_peer_id,
+                        reason: format!("{:?}", error),
+                    };
+                    let _ = tx.send(Err(err));
+                }
+            }
+
+            Event::InboundFailure {
+                peer,
+                request_id,
+                error,
+            } => {
+                let internal_peer_id = libp2p_peer_id_to_internal(&peer);
+                warn!(
+                    "Inbound request {:?} from peer {:?} failed: {:?}",
+                    request_id, internal_peer_id, error
+                );
+            }
+
+            Event::ResponseSent { peer, request_id } => {
+                let internal_peer_id = libp2p_peer_id_to_internal(&peer);
+                debug!(
+                    "Response sent to peer {:?} for request {:?}",
+                    internal_peer_id, request_id
+                );
+            }
+        }
+    }
+
     /// Handle a network command from the command channel.
     async fn handle_network_command(&self, command: NetworkCommand) {
         match command {
@@ -533,6 +668,20 @@ impl super::StorageNetworkInner {
                 ));
                 if response.send(result).is_err() {
                     error!("Failed to send OpenStream response");
+                }
+            }
+
+            NetworkCommand::SendRequest {
+                peer_id,
+                protocol,
+                request,
+                response,
+            } => {
+                if let Err(e) = self
+                    .send_request_internal(&peer_id, &protocol, request, response)
+                    .await
+                {
+                    error!("SendRequest failed to {:?}: {}", peer_id, e);
                 }
             }
         }
@@ -637,6 +786,67 @@ impl super::StorageNetworkInner {
 
         // For now, use broadcast (Day 3 will implement targeted messaging via request-response)
         self.broadcast_internal(topic_name, message).await
+    }
+
+    /// Internal implementation of sending a request and awaiting response.
+    ///
+    /// This uses libp2p's request-response protocol for direct peer-to-peer RPC.
+    async fn send_request_internal(
+        &self,
+        peer_id: &PeerId,
+        protocol: &str,
+        request: Vec<u8>,
+        response_tx: tokio::sync::oneshot::Sender<Result<Vec<u8>, Error>>,
+    ) -> Result<(), Error> {
+        info!(
+            "Sending request ({} bytes) to peer {:?} on protocol '{}'",
+            request.len(),
+            peer_id,
+            protocol
+        );
+
+        // Verify peer is connected
+        {
+            let peers = self
+                .inner
+                .peers
+                .read()
+                .expect("Failed to acquire peers lock");
+            if !peers.contains_key(peer_id) {
+                let _ = response_tx.send(Err(Error::PeerNotConnected(peer_id.clone())));
+                return Err(Error::PeerNotConnected(peer_id.clone()));
+            }
+        }
+
+        // Convert internal PeerId to libp2p PeerId
+        let libp2p_peer_id = internal_peer_id_to_libp2p(peer_id)?;
+
+        // Send request via request-response protocol
+        let request_id = {
+            let mut swarm = self
+                .inner
+                .swarm
+                .write()
+                .expect("Failed to acquire swarm lock");
+
+            swarm
+                .behaviour_mut()
+                .request_response
+                .send_request(&libp2p_peer_id, request)
+        };
+
+        // Store response channel for when we get the response
+        {
+            let mut pending = self
+                .inner
+                .pending_requests
+                .write()
+                .expect("Failed to acquire pending_requests lock");
+            pending.insert(request_id, response_tx);
+        }
+
+        debug!("Request sent with ID: {:?}", request_id);
+        Ok(())
     }
 }
 
