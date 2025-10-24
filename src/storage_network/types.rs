@@ -154,6 +154,18 @@ pub enum NetworkCommand {
         /// Channel to send response back
         response: tokio::sync::oneshot::Sender<Result<(), Error>>,
     },
+
+    /// Send a request to a peer and await response (request-response protocol)
+    SendRequest {
+        /// Target peer identifier
+        peer_id: PeerId,
+        /// Protocol name
+        protocol: String,
+        /// Request data
+        request: Vec<u8>,
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<Result<Vec<u8>, Error>>,
+    },
 }
 
 /// Errors that can occur during network operations.
@@ -178,6 +190,14 @@ pub enum Error {
     /// Stream establishment failed
     #[error("Failed to establish stream: {0}")]
     StreamFailed(String),
+
+    /// Request timeout
+    #[error("Request to peer {peer:?} timed out after {timeout_ms}ms")]
+    RequestTimeout { peer: PeerId, timeout_ms: u64 },
+
+    /// Request failed
+    #[error("Request to peer {peer:?} failed: {reason}")]
+    RequestFailed { peer: PeerId, reason: String },
 
     /// Send operation failed
     #[error("Failed to send message: {0}")]
