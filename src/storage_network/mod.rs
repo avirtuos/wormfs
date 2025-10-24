@@ -255,6 +255,19 @@ impl StorageNetworkHandle {
             .await
             .map_err(|_| Error::EventLoopFailed("Event loop dropped response".to_string()))?
     }
+
+    /// Set the metrics service for tracking network operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `metrics` - MetricService implementation for recording metrics
+    pub fn set_metrics(&self, metrics: std::sync::Arc<crate::metric_service::MetricServiceImpl>) {
+        *self
+            .inner
+            .metrics
+            .write()
+            .expect("Failed to acquire metrics lock") = Some(metrics);
+    }
 }
 
 /// Factory for creating StorageNetwork instances.

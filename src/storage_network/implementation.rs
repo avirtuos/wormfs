@@ -137,6 +137,7 @@ impl super::StorageNetworkFactory {
             config: config.clone(),
             event_rx: RwLock::new(event_rx),
             pending_requests: RwLock::new(HashMap::new()),
+            metrics: RwLock::new(None),
         });
 
         // Create cloneable handle
@@ -182,6 +183,9 @@ pub struct InnerState {
             tokio::sync::oneshot::Sender<Result<Vec<u8>, Error>>,
         >,
     >,
+
+    /// Optional metrics service for tracking network operations
+    pub(crate) metrics: RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>,
 }
 
 /// StorageNetworkInner implementation
@@ -568,6 +572,9 @@ impl super::StorageNetworkInner {
                         if let Some(tx) = response_tx {
                             if tx.send(Ok(response)).is_err() {
                                 warn!("Failed to deliver response for request {:?} - receiver dropped", request_id);
+                            } else {
+                                // Record successful request
+                                self.record_metric_counter("storage_network.requests.succeeded", 1);
                             }
                         } else {
                             warn!("Received response for unknown request {:?}", request_id);
@@ -603,6 +610,9 @@ impl super::StorageNetworkInner {
                         reason: format!("{:?}", error),
                     };
                     let _ = tx.send(Err(err));
+
+                    // Record failed request
+                    self.record_metric_counter("storage_network.requests.failed", 1);
                 }
             }
 
@@ -845,8 +855,25 @@ impl super::StorageNetworkInner {
             pending.insert(request_id, response_tx);
         }
 
+        // Record total request count
+        self.record_metric_counter("storage_network.requests.total", 1);
+
         debug!("Request sent with ID: {:?}", request_id);
         Ok(())
+    }
+
+    /// Helper method to record a counter metric if metrics service is available.
+    fn record_metric_counter(&self, name: &str, value: u64) {
+        if let Some(metrics) = self
+            .inner
+            .metrics
+            .read()
+            .expect("Failed to acquire metrics lock")
+            .as_ref()
+        {
+            use crate::metric_service::{MetricService, UnitType};
+            let _ = metrics.publish_counter(name, value, UnitType::Operations);
+        }
     }
 }
 
