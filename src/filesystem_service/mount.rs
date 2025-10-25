@@ -4,7 +4,6 @@
 //! with proper configuration and error handling.
 
 use super::factory::FileSystemServiceImplFactory;
-use super::implementation::FileSystemServiceImpl;
 use super::types::{Config, Error};
 use crate::file_store::FileStore;
 use crate::metadata_store::{MetadataStore, MetadataStoreFactory};
@@ -14,8 +13,6 @@ use std::sync::Arc;
 
 #[cfg(feature = "fuser")]
 use super::fuse_adapter::FuseAdapter;
-#[cfg(feature = "fuser")]
-use std::ffi::OsStr;
 
 // TODO: Proper solution is to make FileSystemServiceImpl generic over MetadataStore trait
 // For Phase 1, we work with the concrete type directly
@@ -228,7 +225,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
 
     // Create FUSE adapter
     let runtime_handle = Handle::current();
-    let mut fuse_adapter = FuseAdapter::new(Arc::clone(&service), runtime_handle);
+    let fuse_adapter = FuseAdapter::new(Arc::clone(&service), runtime_handle);
 
     // Build mount options
     let mut mount_opts = vec![fuser::MountOption::FSName(

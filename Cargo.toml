@@ -40,17 +40,17 @@ anyhow = "1.0"
 tracing = "0.1"
 
 # Networking (libp2p)
-libp2p = { version = "0.53", features = [
-    "gossipsub",          # Pub/sub messaging
-    "request-response",   # Direct RPC
-    "noise",              # Transport encryption
-    "tcp",                # TCP transport
-    "tokio",              # Tokio runtime support
-    "yamux",              # Connection multiplexing
-    "mdns",               # Local peer discovery (optional)
-    "identify",           # Peer info exchange
-    "ping",               # Keep-alive/connection health
-    "macros",             # NetworkBehaviour derive macro
+libp2p = { version = "0.56", features = [
+    "gossipsub",        # Pub/sub messaging
+    "request-response", # Direct RPC
+    "noise",            # Transport encryption
+    "tcp",              # TCP transport
+    "tokio",            # Tokio runtime support
+    "yamux",            # Connection multiplexing
+    "mdns",             # Local peer discovery (optional)
+    "identify",         # Peer info exchange
+    "ping",             # Keep-alive/connection health
+    "macros",           # NetworkBehaviour derive macro
 ] }
 
 # Raft consensus (OpenRaft)
@@ -59,7 +59,10 @@ openraft = { version = "0.9", optional = true }
 # Storage
 # Note: sqlx removed due to libsqlite3-sys conflict with rusqlite
 # sqlx = { version = "0.7", optional = true, features = ["runtime-tokio", "sqlite", "migrate"] }
-rusqlite = { version = "0.32", optional = true, features = ["bundled", "backup"] }
+rusqlite = { version = "0.32", optional = true, features = [
+    "bundled",
+    "backup",
+] }
 tokio-rusqlite = { version = "0.6", optional = true }
 redb = { version = "2.0", optional = true }
 
@@ -121,4 +124,13 @@ default = ["rusqlite", "tokio-rusqlite", "reed-solomon-erasure", "fuser"]
 test-utils = ["mockall"]
 # Note: sqlx and rusqlite cannot be used together due to libsqlite3-sys version conflicts
 # Note: libp2p is now always enabled (no longer optional)
-full = ["openraft", "rusqlite", "tokio-rusqlite", "redb", "reed-solomon-erasure", "tonic", "prost", "fuser"]
+full = [
+    "openraft",
+    "rusqlite",
+    "tokio-rusqlite",
+    "redb",
+    "reed-solomon-erasure",
+    "tonic",
+    "prost",
+    "fuser",
+]

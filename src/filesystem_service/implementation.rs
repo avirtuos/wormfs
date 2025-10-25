@@ -7,20 +7,17 @@
 use super::buffered_file_handle::BufferedFileHandle;
 use super::inode::{InodeCache, InodeManager, ROOT_INODE};
 use super::raft_commands::StorageRaftMemberStub;
-use super::types::{
-    ClientId, Config, DirEntry, Error, FileAttr, FileType, LockType, OpenFile, SetAttr,
-};
+use super::types::{ClientId, Config, DirEntry, Error, FileAttr, FileType, LockType, OpenFile};
 use super::FileSystemService;
-use crate::file_store::{FileStore, FileStoreImpl, StripeId, StripeMetadata};
+use crate::file_store::{FileStore, FileStoreImpl};
 use crate::metadata_store::{FileId, FileMetadata, FileRecord, MetadataStore, MetadataStoreImpl};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::time::Instant;
-use tracing::trace;
 
 // Import MetricService trait
 use crate::metric_service::MetricService;
@@ -1777,7 +1774,7 @@ impl FileSystemService for FileSystemServiceImpl {
                 .map_err(|e| Error::RaftError(format!("{}", e)))?;
 
             // [TEMP Phase 1] Update metadata store directly
-            let mut updated_metadata = FileMetadata {
+            let updated_metadata = FileMetadata {
                 file_type: record.file_type,
                 size: 0, // Truncated
                 permissions: record.permissions,

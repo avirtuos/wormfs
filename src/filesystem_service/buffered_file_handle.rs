@@ -1142,7 +1142,7 @@ impl BufferedFileHandle {
 
         // 2. Build batch of operations for Raft (only for flushed stripes)
         let (operations, flushed_indices) = {
-            let mut inner = self.inner.lock().expect(
+            let inner = self.inner.lock().expect(
                 "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
             );
             let mut ops = Vec::new();

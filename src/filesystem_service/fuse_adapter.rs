@@ -6,9 +6,7 @@
 #[cfg(feature = "fuser")]
 use super::implementation::FileSystemServiceImpl;
 #[cfg(feature = "fuser")]
-use super::inode::ROOT_INODE;
-#[cfg(feature = "fuser")]
-use super::types::{ClientId, Error, FileType};
+use super::types::{ClientId, FileType};
 #[cfg(feature = "fuser")]
 use super::FileSystemService;
 #[cfg(feature = "fuser")]
@@ -21,7 +19,7 @@ use std::ffi::OsStr;
 #[cfg(feature = "fuser")]
 use std::sync::Arc;
 #[cfg(feature = "fuser")]
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 #[cfg(feature = "fuser")]
 const TTL: Duration = Duration::from_secs(1);
