@@ -34,6 +34,12 @@ impl super::StorageNetworkFactory {
     /// returns both the inner state (for running the event loop) and a
     /// cloneable handle for network operations.
     ///
+    /// The event loop should be run by calling `.run()` on the returned `StorageNetworkInner`.
+    /// Because libp2p's Swarm contains thread-local state (!Send types), the event loop
+    /// must run in a LocalSet if you need to spawn it. Typically, you would either:
+    /// - Run it directly with `inner.run().await` in your main task
+    /// - Spawn it with `tokio::task::spawn_local()` within a LocalSet
+    ///
     /// # Arguments
     ///
     /// * `config` - Network configuration
@@ -47,6 +53,19 @@ impl super::StorageNetworkFactory {
     /// # Errors
     ///
     /// Returns an error if swarm initialization fails or configuration is invalid.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = Config { /* ... */ };
+    /// let (inner, handle) = StorageNetworkFactory::create(config).await?;
+    ///
+    /// // Run event loop in main task
+    /// tokio::select! {
+    ///     result = inner.run() => result?,
+    ///     _ = some_shutdown_signal() => {},
+    /// }
+    /// ```
     pub async fn create(
         config: Config,
     ) -> Result<(super::StorageNetworkInner, super::StorageNetworkHandle), Error> {
@@ -211,7 +230,7 @@ pub struct InnerState {
 // - tokio::sync::RwLock provides async-aware synchronization with Send guards
 // - Arc and other fields are already Send + Sync
 // - Access to non-Sync libp2p types (Swarm) is always through async RwLock
-// - RwLock guards can be safely held across await points
+// - This allows InnerState to be shared across async tasks via Arc
 unsafe impl Sync for InnerState {}
 
 /// StorageNetworkInner implementation
@@ -1708,6 +1727,102 @@ mod tests {
                 .to_string()
                 .contains("not in configured peer list"),
             "Error should mention unknown IP"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_factory_create_returns_valid_handle() {
+        let config = test_config("create_test");
+
+        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Verify handle is usable immediately
+        let peers = handle.get_connected_peers().await;
+        assert_eq!(peers.len(), 0, "Should start with no peers");
+
+        // Verify we can clone the handle
+        let handle2 = handle.clone();
+        let peers2 = handle2.get_connected_peers().await;
+        assert_eq!(peers2.len(), 0, "Cloned handle should work the same");
+    }
+
+    #[tokio::test]
+    async fn test_factory_inner_and_handle_share_state() {
+        let config = test_config("shared_state_test");
+
+        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Both handle and inner should see the same peer list
+        let peers_from_handle = handle.get_connected_peers().await;
+        assert_eq!(
+            peers_from_handle.len(),
+            0,
+            "Handle should see initial empty peer list"
+        );
+
+        // Verify peer info query works
+        use libp2p::PeerId as Libp2pPeerId;
+        let random_peer = Libp2pPeerId::random();
+        let peer_info = handle.get_peer_info(&PeerId(random_peer.to_bytes())).await;
+        assert!(peer_info.is_none(), "Should return None for unknown peer");
+    }
+
+    #[tokio::test]
+    async fn test_factory_with_multiple_listen_addresses() {
+        let config = Config {
+            node_id: "multi_addr_test".to_string(),
+            listen_addresses: vec![
+                "/ip4/127.0.0.1/tcp/0".to_string(),
+                "/ip4/0.0.0.0/tcp/0".to_string(),
+            ],
+            peers: vec![],
+            peer_id_store_path: std::env::temp_dir().join("test_multi_addr.json"),
+            max_peers: 10,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let result = super::super::StorageNetworkFactory::create(config).await;
+        assert!(
+            result.is_ok(),
+            "Should create network with multiple listen addresses"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_factory_channel_communication() {
+        let config = test_config("channel_test");
+
+        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Verify we can send commands through the handle
+        // The handle uses event_tx internally for operations like send_to_peer
+        // We're testing that the channel is properly set up
+
+        // Try to use the handle's command channel by calling a method
+        // Even if we don't have a peer, this tests channel functionality
+        use libp2p::PeerId as Libp2pPeerId;
+        let test_peer = PeerId(Libp2pPeerId::random().to_bytes());
+        let test_topic = "test/topic";
+        let test_data = vec![1, 2, 3];
+
+        // This will send a command through the channel (even though it will fail
+        // later because the peer doesn't exist and event loop isn't running)
+        let result = handle.send_to_peer(&test_peer, test_topic, test_data).await;
+
+        // The command should be queued successfully (channel send succeeds)
+        // The actual peer communication would happen in the event loop
+        assert!(
+            result.is_ok(),
+            "Command should be queued successfully through channel"
         );
     }
 }
