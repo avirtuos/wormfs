@@ -3,15 +3,12 @@
 //! This module provides the concrete implementation of the StorageNetwork trait,
 //! including swarm initialization, peer management, and event handling.
 
-#[cfg(feature = "libp2p")]
 use crate::storage_network::behaviour::WormFsBehaviourEvent;
-#[cfg(feature = "libp2p")]
 use crate::storage_network::{
     behaviour::{BehaviourConfig, WormFsBehaviour, WormFsCodec},
     types::*,
 };
 use futures::StreamExt;
-#[cfg(feature = "libp2p")]
 use libp2p::{
     gossipsub, identify, identity, noise, ping, request_response, swarm::SwarmEvent, tcp, yamux,
     PeerId as Libp2pPeerId, StreamProtocol, Swarm, SwarmBuilder,
@@ -30,7 +27,6 @@ const HEARTBEAT_TOPIC: &str = "wormfs/heartbeat/1.0.0";
 const HEARTBEAT_INTERVAL_SECS: u64 = 5;
 
 /// Factory for creating StorageNetwork instances.
-#[cfg(feature = "libp2p")]
 impl super::StorageNetworkFactory {
     /// Create a new StorageNetwork instance with the given configuration.
     ///
@@ -167,14 +163,12 @@ impl super::StorageNetworkFactory {
 }
 
 /// Internal topic state for routing messages.
-#[cfg(feature = "libp2p")]
 pub(crate) struct TopicState {
     /// Sender for routing messages to subscribers
     pub(crate) tx: mpsc::UnboundedSender<TopicMessage>,
 }
 
 /// Internal state shared between event loop and network handle.
-#[cfg(feature = "libp2p")]
 pub struct InnerState {
     /// libp2p swarm
     pub(crate) swarm: RwLock<Swarm<WormFsBehaviour>>,
@@ -216,11 +210,9 @@ pub struct InnerState {
 // - All mutable state (swarm, peers, topics, etc.) is protected by RwLock
 // - Arc and other fields are already Sync
 // - Access to non-Sync libp2p types is always through locks
-#[cfg(feature = "libp2p")]
 unsafe impl Sync for InnerState {}
 
 /// StorageNetworkInner implementation
-#[cfg(feature = "libp2p")]
 impl super::StorageNetworkInner {
     /// Start the network event loop.
     ///
@@ -1215,7 +1207,6 @@ impl super::StorageNetworkInner {
 }
 
 /// Implementation for InnerState to expose methods needed by StorageNetworkHandle.
-#[cfg(feature = "libp2p")]
 impl InnerState {
     /// Validate a peer's ID against configuration and stored values.
     ///
@@ -1292,14 +1283,12 @@ impl InnerState {
 }
 
 // Helper functions for converting between libp2p and internal types
-#[cfg(feature = "libp2p")]
 fn libp2p_peer_id_to_internal(peer_id: &Libp2pPeerId) -> PeerId {
     PeerId::new(peer_id.to_bytes())
 }
 
 /// Convert internal PeerId to libp2p PeerId.
 /// Day 3: Will be used for request-response protocol.
-#[cfg(feature = "libp2p")]
 #[allow(dead_code)]
 fn internal_peer_id_to_libp2p(peer_id: &PeerId) -> Result<Libp2pPeerId, Error> {
     Libp2pPeerId::from_bytes(peer_id.as_bytes())
@@ -1318,7 +1307,6 @@ fn internal_peer_id_to_libp2p(peer_id: &PeerId) -> Result<Libp2pPeerId, Error> {
 /// # Returns
 ///
 /// The extracted IP address, or `None` if no IP component was found.
-#[cfg(feature = "libp2p")]
 fn extract_ip_from_multiaddr(multiaddr: &libp2p::Multiaddr) -> Option<std::net::IpAddr> {
     use libp2p::multiaddr::Protocol;
 
@@ -1332,7 +1320,7 @@ fn extract_ip_from_multiaddr(multiaddr: &libp2p::Multiaddr) -> Option<std::net::
     None
 }
 
-#[cfg(all(test, feature = "libp2p"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
