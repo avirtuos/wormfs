@@ -15,9 +15,9 @@ use libp2p::{
 };
 use std::collections::HashMap;
 use std::iter;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
 /// Topic name for heartbeat messages
@@ -207,9 +207,11 @@ pub struct InnerState {
 }
 
 // Safety: InnerState is Sync because:
-// - All mutable state (swarm, peers, topics, etc.) is protected by RwLock
-// - Arc and other fields are already Sync
-// - Access to non-Sync libp2p types is always through locks
+// - All mutable state (swarm, peers, topics, etc.) is protected by tokio::sync::RwLock
+// - tokio::sync::RwLock provides async-aware synchronization with Send guards
+// - Arc and other fields are already Send + Sync
+// - Access to non-Sync libp2p types (Swarm) is always through async RwLock
+// - RwLock guards can be safely held across await points
 unsafe impl Sync for InnerState {}
 
 /// StorageNetworkInner implementation
@@ -223,11 +225,7 @@ impl super::StorageNetworkInner {
 
         // Set up listen addresses
         {
-            let mut swarm = self
-                .inner
-                .swarm
-                .write()
-                .expect("Failed to acquire swarm lock");
+            let mut swarm = self.inner.swarm.write().await;
             for addr_str in &self.inner.config.listen_addresses {
                 match addr_str.parse() {
                     Ok(addr) => match swarm.listen_on(addr) {
@@ -241,11 +239,7 @@ impl super::StorageNetworkInner {
 
         // Subscribe to heartbeat topic
         {
-            let mut swarm = self
-                .inner
-                .swarm
-                .write()
-                .expect("Failed to acquire swarm lock");
+            let mut swarm = self.inner.swarm.write().await;
             let topic = gossipsub::IdentTopic::new(HEARTBEAT_TOPIC);
             if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
                 warn!("Failed to subscribe to heartbeat topic: {}", e);
@@ -265,7 +259,7 @@ impl super::StorageNetworkInner {
             tokio::select! {
                 // Process swarm events
                 event = async {
-                    let mut swarm = self.inner.swarm.write().expect("Failed to acquire swarm lock");
+                    let mut swarm = self.inner.swarm.write().await;
                     swarm.select_next_some().await
                 } => {
                     self.handle_swarm_event(event).await;
@@ -273,7 +267,7 @@ impl super::StorageNetworkInner {
 
                 // Process network commands
                 command = async {
-                    let mut rx = self.inner.event_rx.write().expect("Failed to acquire rx lock");
+                    let mut rx = self.inner.event_rx.write().await;
                     rx.recv().await
                 } => {
                     match command {
@@ -322,11 +316,7 @@ impl super::StorageNetworkInner {
                                 warn!("Peer validation failed for {:?}: {}", internal_peer_id, e);
 
                                 // Disconnect the peer
-                                let mut swarm = self
-                                    .inner
-                                    .swarm
-                                    .write()
-                                    .expect("Failed to acquire swarm lock");
+                                let mut swarm = self.inner.swarm.write().await;
                                 let _ = swarm.disconnect_peer_id(peer_id);
                                 return;
                             }
@@ -349,11 +339,7 @@ impl super::StorageNetworkInner {
                     );
 
                     // Disconnect the peer
-                    let mut swarm = self
-                        .inner
-                        .swarm
-                        .write()
-                        .expect("Failed to acquire swarm lock");
+                    let mut swarm = self.inner.swarm.write().await;
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 }
@@ -371,11 +357,7 @@ impl super::StorageNetworkInner {
                 };
 
                 // Update peer state
-                let mut peers = self
-                    .inner
-                    .peers
-                    .write()
-                    .expect("Failed to acquire peers lock");
+                let mut peers = self.inner.peers.write().await;
                 peers.insert(
                     internal_peer_id.clone(),
                     PeerState {
@@ -403,11 +385,7 @@ impl super::StorageNetworkInner {
 
                 // Update peer state to disconnected if no more connections
                 if num_established == 0 {
-                    let mut peers = self
-                        .inner
-                        .peers
-                        .write()
-                        .expect("Failed to acquire peers lock");
+                    let mut peers = self.inner.peers.write().await;
                     if let Some(peer_state) = peers.get_mut(&internal_peer_id) {
                         peer_state.connection_state = ConnectionState::Disconnected;
                     }
@@ -507,11 +485,7 @@ impl super::StorageNetworkInner {
                 }
 
                 // Route message to topic subscribers
-                let topics = self
-                    .inner
-                    .topics
-                    .read()
-                    .expect("Failed to acquire topics lock");
+                let topics = self.inner.topics.read().await;
                 if let Some(topic_state) = topics.get(topic) {
                     let topic_message = TopicMessage {
                         source,
@@ -562,11 +536,7 @@ impl super::StorageNetworkInner {
                 );
 
                 // Update peer info with addresses and protocols
-                let mut peers = self
-                    .inner
-                    .peers
-                    .write()
-                    .expect("Failed to acquire peers lock");
+                let mut peers = self.inner.peers.write().await;
                 if let Some(peer_state) = peers.get_mut(&internal_peer_id) {
                     peer_state.addresses =
                         info.listen_addrs.iter().map(|a| a.to_string()).collect();
@@ -599,11 +569,7 @@ impl super::StorageNetworkInner {
                 debug!("Ping to peer {:?}: {}ms", internal_peer_id, rtt.as_millis());
 
                 // Update last_seen timestamp
-                let mut peers = self
-                    .inner
-                    .peers
-                    .write()
-                    .expect("Failed to acquire peers lock");
+                let mut peers = self.inner.peers.write().await;
                 if let Some(peer_state) = peers.get_mut(&internal_peer_id) {
                     peer_state.last_seen = SystemTime::now();
                 }
@@ -625,11 +591,7 @@ impl super::StorageNetworkInner {
                 );
 
                 // Update peer's last_heartbeat time
-                let mut peers = self
-                    .inner
-                    .peers
-                    .write()
-                    .expect("Failed to acquire peers lock");
+                let mut peers = self.inner.peers.write().await;
 
                 if let Some(peer_state) = peers.get_mut(source) {
                     peer_state.last_heartbeat = Some(SystemTime::now());
@@ -649,11 +611,7 @@ impl super::StorageNetworkInner {
     async fn broadcast_heartbeat(&self) {
         // Increment sequence number
         let sequence = {
-            let mut seq = self
-                .inner
-                .heartbeat_sequence
-                .write()
-                .expect("Failed to acquire sequence lock");
+            let mut seq = self.inner.heartbeat_sequence.write().await;
             *seq += 1;
             *seq
         };
@@ -664,11 +622,7 @@ impl super::StorageNetworkInner {
         match heartbeat.to_bytes() {
             Ok(bytes) => {
                 // Publish to gossipsub
-                let mut swarm = self
-                    .inner
-                    .swarm
-                    .write()
-                    .expect("Failed to acquire swarm lock");
+                let mut swarm = self.inner.swarm.write().await;
 
                 let topic = gossipsub::IdentTopic::new(HEARTBEAT_TOPIC);
                 if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, bytes) {
@@ -712,11 +666,7 @@ impl super::StorageNetworkInner {
                         let response = request.clone();
 
                         // Send response through the swarm
-                        let mut swarm = self
-                            .inner
-                            .swarm
-                            .write()
-                            .expect("Failed to acquire swarm lock");
+                        let mut swarm = self.inner.swarm.write().await;
                         if swarm
                             .behaviour_mut()
                             .request_response
@@ -739,11 +689,7 @@ impl super::StorageNetworkInner {
 
                         // Look up pending request and send response back
                         let response_tx = {
-                            let mut pending = self
-                                .inner
-                                .pending_requests
-                                .write()
-                                .expect("Failed to acquire pending_requests lock");
+                            let mut pending = self.inner.pending_requests.write().await;
                             pending.remove(&request_id)
                         };
 
@@ -752,7 +698,8 @@ impl super::StorageNetworkInner {
                                 warn!("Failed to deliver response for request {:?} - receiver dropped", request_id);
                             } else {
                                 // Record successful request
-                                self.record_metric_counter("storage_network.requests.succeeded", 1);
+                                self.record_metric_counter("storage_network.requests.succeeded", 1)
+                                    .await;
                             }
                         } else {
                             warn!("Received response for unknown request {:?}", request_id);
@@ -774,11 +721,7 @@ impl super::StorageNetworkInner {
 
                 // Notify caller of failure
                 let response_tx = {
-                    let mut pending = self
-                        .inner
-                        .pending_requests
-                        .write()
-                        .expect("Failed to acquire pending_requests lock");
+                    let mut pending = self.inner.pending_requests.write().await;
                     pending.remove(&request_id)
                 };
 
@@ -790,7 +733,8 @@ impl super::StorageNetworkInner {
                     let _ = tx.send(Err(err));
 
                     // Record failed request
-                    self.record_metric_counter("storage_network.requests.failed", 1);
+                    self.record_metric_counter("storage_network.requests.failed", 1)
+                        .await;
                 }
             }
 
@@ -889,11 +833,7 @@ impl super::StorageNetworkInner {
         // Subscribe to gossipsub topic
         let topic = gossipsub::IdentTopic::new(topic_name);
         {
-            let mut swarm = self
-                .inner
-                .swarm
-                .write()
-                .expect("Failed to acquire swarm lock");
+            let mut swarm = self.inner.swarm.write().await;
             swarm
                 .behaviour_mut()
                 .gossipsub
@@ -911,11 +851,7 @@ impl super::StorageNetworkInner {
         let (internal_tx, rx) = mpsc::unbounded_channel();
 
         // Store internal_tx in topics map so event loop can route messages here
-        let mut topics = self
-            .inner
-            .topics
-            .write()
-            .expect("Failed to acquire topics lock");
+        let mut topics = self.inner.topics.write().await;
 
         // We need to store something that can receive TopicMessages
         // For now, create a simple struct to hold the sender
@@ -935,11 +871,7 @@ impl super::StorageNetworkInner {
         );
 
         let topic = gossipsub::IdentTopic::new(topic_name);
-        let mut swarm = self
-            .inner
-            .swarm
-            .write()
-            .expect("Failed to acquire swarm lock");
+        let mut swarm = self.inner.swarm.write().await;
 
         swarm
             .behaviour_mut()
@@ -969,11 +901,7 @@ impl super::StorageNetworkInner {
 
         // Verify peer is connected
         {
-            let peers = self
-                .inner
-                .peers
-                .read()
-                .expect("Failed to acquire peers lock");
+            let peers = self.inner.peers.read().await;
             if !peers.contains_key(peer_id) {
                 return Err(Error::PeerNotConnected(peer_id.clone()));
             }
@@ -1002,11 +930,7 @@ impl super::StorageNetworkInner {
 
         // Verify peer is connected
         {
-            let peers = self
-                .inner
-                .peers
-                .read()
-                .expect("Failed to acquire peers lock");
+            let peers = self.inner.peers.read().await;
             if !peers.contains_key(peer_id) {
                 let _ = response_tx.send(Err(Error::PeerNotConnected(peer_id.clone())));
                 return Err(Error::PeerNotConnected(peer_id.clone()));
@@ -1018,11 +942,7 @@ impl super::StorageNetworkInner {
 
         // Send request via request-response protocol
         let request_id = {
-            let mut swarm = self
-                .inner
-                .swarm
-                .write()
-                .expect("Failed to acquire swarm lock");
+            let mut swarm = self.inner.swarm.write().await;
 
             swarm
                 .behaviour_mut()
@@ -1032,16 +952,13 @@ impl super::StorageNetworkInner {
 
         // Store response channel for when we get the response
         {
-            let mut pending = self
-                .inner
-                .pending_requests
-                .write()
-                .expect("Failed to acquire pending_requests lock");
+            let mut pending = self.inner.pending_requests.write().await;
             pending.insert(request_id, response_tx);
         }
 
         // Record total request count
-        self.record_metric_counter("storage_network.requests.total", 1);
+        self.record_metric_counter("storage_network.requests.total", 1)
+            .await;
 
         debug!("Request sent with ID: {:?}", request_id);
         Ok(())
@@ -1053,11 +970,7 @@ impl super::StorageNetworkInner {
 
         // Verify peer exists
         {
-            let peers = self
-                .inner
-                .peers
-                .read()
-                .expect("Failed to acquire peers lock");
+            let peers = self.inner.peers.read().await;
             if !peers.contains_key(peer_id) {
                 return Err(Error::PeerNotConnected(peer_id.clone()));
             }
@@ -1068,11 +981,7 @@ impl super::StorageNetworkInner {
 
         // Disconnect via swarm
         {
-            let mut swarm = self
-                .inner
-                .swarm
-                .write()
-                .expect("Failed to acquire swarm lock");
+            let mut swarm = self.inner.swarm.write().await;
 
             swarm
                 .disconnect_peer_id(libp2p_peer_id)
@@ -1084,11 +993,7 @@ impl super::StorageNetworkInner {
 
         // Remove peer from our tracking
         {
-            let mut peers = self
-                .inner
-                .peers
-                .write()
-                .expect("Failed to acquire peers lock");
+            let mut peers = self.inner.peers.write().await;
             peers.remove(peer_id);
         }
 
@@ -1097,14 +1002,8 @@ impl super::StorageNetworkInner {
     }
 
     /// Helper method to record a counter metric if metrics service is available.
-    fn record_metric_counter(&self, name: &str, value: u64) {
-        if let Some(metrics) = self
-            .inner
-            .metrics
-            .read()
-            .expect("Failed to acquire metrics lock")
-            .as_ref()
-        {
+    async fn record_metric_counter(&self, name: &str, value: u64) {
+        if let Some(metrics) = self.inner.metrics.read().await.as_ref() {
             use crate::metric_service::{MetricService, UnitType};
             let _ = metrics.publish_counter(name, value, UnitType::Operations);
         }
@@ -1418,12 +1317,12 @@ mod tests {
             .expect("Factory should create network");
 
         // Initially no peers
-        let peers = handle.get_connected_peers();
+        let peers = handle.get_connected_peers().await;
         assert_eq!(peers.len(), 0, "Should start with no peers");
 
         // Test get_peer_info for non-existent peer
         let peer_id = PeerId::new(vec![1, 2, 3, 4]);
-        let info = handle.get_peer_info(&peer_id);
+        let info = handle.get_peer_info(&peer_id).await;
         assert!(info.is_none(), "Non-existent peer should return None");
     }
 
@@ -1523,11 +1422,7 @@ mod tests {
             .expect("Factory should create network");
 
         // Verify metrics is None by default
-        let metrics_lock = handle
-            .inner
-            .metrics
-            .read()
-            .expect("Failed to get metrics lock");
+        let metrics_lock = handle.inner.metrics.read().await;
         assert!(metrics_lock.is_none(), "Metrics should be None by default");
         drop(metrics_lock);
 

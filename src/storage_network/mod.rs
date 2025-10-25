@@ -174,12 +174,8 @@ impl StorageNetworkHandle {
     }
 
     /// Get list of currently connected peers.
-    pub fn get_connected_peers(&self) -> Vec<PeerInfo> {
-        let peers = self
-            .inner
-            .peers
-            .read()
-            .expect("Failed to acquire peers lock");
+    pub async fn get_connected_peers(&self) -> Vec<PeerInfo> {
+        let peers = self.inner.peers.read().await;
 
         peers
             .values()
@@ -201,12 +197,8 @@ impl StorageNetworkHandle {
     }
 
     /// Get detailed information about a specific peer.
-    pub fn get_peer_info(&self, peer_id: &PeerId) -> Option<PeerInfo> {
-        let peers = self
-            .inner
-            .peers
-            .read()
-            .expect("Failed to acquire peers lock");
+    pub async fn get_peer_info(&self, peer_id: &PeerId) -> Option<PeerInfo> {
+        let peers = self.inner.peers.read().await;
 
         peers.get(peer_id).map(|state| PeerInfo {
             peer_id: state.peer_id.clone(),
@@ -270,12 +262,11 @@ impl StorageNetworkHandle {
     /// # Arguments
     ///
     /// * `metrics` - MetricService implementation for recording metrics
-    pub fn set_metrics(&self, metrics: std::sync::Arc<crate::metric_service::MetricServiceImpl>) {
-        *self
-            .inner
-            .metrics
-            .write()
-            .expect("Failed to acquire metrics lock") = Some(metrics);
+    pub async fn set_metrics(
+        &self,
+        metrics: std::sync::Arc<crate::metric_service::MetricServiceImpl>,
+    ) {
+        *self.inner.metrics.write().await = Some(metrics);
     }
 
     /// Disconnect from a specific peer.
@@ -402,12 +393,12 @@ impl StorageNetwork for StorageNetworkHandle {
         StorageNetworkHandle::open_stream(self, peer_id, protocol).await
     }
 
-    fn get_connected_peers(&self) -> Vec<PeerInfo> {
-        StorageNetworkHandle::get_connected_peers(self)
+    async fn get_connected_peers(&self) -> Vec<PeerInfo> {
+        StorageNetworkHandle::get_connected_peers(self).await
     }
 
-    fn get_peer_info(&self, peer_id: &PeerId) -> Option<PeerInfo> {
-        StorageNetworkHandle::get_peer_info(self, peer_id)
+    async fn get_peer_info(&self, peer_id: &PeerId) -> Option<PeerInfo> {
+        StorageNetworkHandle::get_peer_info(self, peer_id).await
     }
 
     async fn disconnect_peer(&self, peer_id: &PeerId) -> Result<(), Error> {
@@ -558,7 +549,7 @@ pub trait StorageNetwork: Send + Sync + Clone {
     /// # Returns
     ///
     /// A vector of peer information for all connected peers.
-    fn get_connected_peers(&self) -> Vec<PeerInfo>;
+    async fn get_connected_peers(&self) -> Vec<PeerInfo>;
 
     /// Get detailed information about a specific peer.
     ///
@@ -569,7 +560,7 @@ pub trait StorageNetwork: Send + Sync + Clone {
     /// # Returns
     ///
     /// Peer information if the peer is known, `None` otherwise.
-    fn get_peer_info(&self, peer_id: &PeerId) -> Option<PeerInfo>;
+    async fn get_peer_info(&self, peer_id: &PeerId) -> Option<PeerInfo>;
 
     /// Disconnect from a specific peer.
     ///
