@@ -216,7 +216,6 @@ async fn test_stripe_lookup_at_boundaries() {
 }
 
 #[tokio::test]
-#[ignore = "BufferedFileHandle limitation: doesn't handle external truncations via setattr() - file handle should be released before truncation"]
 async fn test_stripe_metadata_after_truncation() {
     const STRIPE_SIZE: usize = 4 * 1024 * 1024; // 4MB
 
@@ -247,10 +246,11 @@ async fn test_stripe_metadata_after_truncation() {
     }
 
     // Truncate to 6MB (1.5 stripes)
+    // Pass file handle so BufferedFileHandle is informed of the truncation
     service
         .setattr(
             inode,
-            None, // file_handle
+            Some(fh), // file_handle - ensures BufferedFileHandle sees the size change
             None,
             None,
             None,

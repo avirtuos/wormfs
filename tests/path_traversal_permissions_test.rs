@@ -161,7 +161,6 @@ async fn test_access_file_with_no_execute_on_intermediate_dir() {
 }
 
 #[tokio::test]
-#[ignore = "BufferedFileHandle limitation: pads reads past EOF with zeros instead of returning actual file size"]
 async fn test_access_file_with_execute_on_all_dirs() {
     let (service, _temp) = create_test_filesystem_service().await;
     let client_id = ClientId::new(1);
