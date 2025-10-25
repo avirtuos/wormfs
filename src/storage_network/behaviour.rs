@@ -7,6 +7,57 @@ use libp2p::swarm::NetworkBehaviour;
 use libp2p::{gossipsub, identify, ping, request_response, StreamProtocol};
 use std::time::Duration;
 
+// Protocol Configuration Constants
+
+/// Default maximum message size for request-response protocol (10MB).
+///
+/// This limit prevents memory exhaustion from malicious peers sending
+/// excessively large messages. Based on WormFS design specification.
+const DEFAULT_MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Default request-response timeout in seconds.
+///
+/// Maximum time to wait for a response to a request before timing out.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 5;
+
+// Gossipsub Protocol Constants
+
+/// Gossipsub heartbeat interval in seconds.
+///
+/// How frequently the gossipsub protocol performs maintenance operations
+/// like mesh management and sending control messages.
+const GOSSIPSUB_HEARTBEAT_SECS: u64 = 1;
+
+/// Gossipsub message history length.
+///
+/// Number of heartbeat intervals to retain message IDs for deduplication.
+/// Higher values improve deduplication but increase memory usage.
+const GOSSIPSUB_HISTORY_LENGTH: usize = 5;
+
+/// Gossipsub history gossip rounds.
+///
+/// Number of past heartbeat intervals to gossip about during each heartbeat.
+/// Helps with message propagation in case of network partitions.
+const GOSSIPSUB_HISTORY_GOSSIP: usize = 3;
+
+/// Gossipsub target mesh size (D parameter).
+///
+/// Target number of peers to maintain in the mesh for each topic.
+/// Balances message redundancy with bandwidth usage.
+const GOSSIPSUB_MESH_N: usize = 6;
+
+/// Gossipsub minimum mesh size (D_lo parameter).
+///
+/// Minimum peers in mesh before grafting new connections.
+/// Lower bound to maintain message delivery reliability.
+const GOSSIPSUB_MESH_N_LOW: usize = 4;
+
+/// Gossipsub maximum mesh size (D_hi parameter).
+///
+/// Maximum peers in mesh before pruning connections.
+/// Upper bound to prevent excessive message duplication.
+const GOSSIPSUB_MESH_N_HIGH: usize = 12;
+
 /// Combined network behavior for WormFS.
 ///
 /// This behavior integrates multiple libp2p protocols:
@@ -56,8 +107,7 @@ pub struct WormFsCodec {
 impl Default for WormFsCodec {
     fn default() -> Self {
         Self {
-            // 10MB max message size per design doc
-            max_message_size: 10 * 1024 * 1024,
+            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
         }
     }
 }
@@ -203,17 +253,17 @@ impl Default for BehaviourConfig {
 
         Self {
             gossipsub: gossipsub::ConfigBuilder::default()
-                .heartbeat_interval(Duration::from_secs(1))
-                .history_length(5)
-                .history_gossip(3)
-                .mesh_n(6)
-                .mesh_n_low(4)
-                .mesh_n_high(12)
+                .heartbeat_interval(Duration::from_secs(GOSSIPSUB_HEARTBEAT_SECS))
+                .history_length(GOSSIPSUB_HISTORY_LENGTH)
+                .history_gossip(GOSSIPSUB_HISTORY_GOSSIP)
+                .mesh_n(GOSSIPSUB_MESH_N)
+                .mesh_n_low(GOSSIPSUB_MESH_N_LOW)
+                .mesh_n_high(GOSSIPSUB_MESH_N_HIGH)
                 .message_id_fn(message_id_fn)
                 .build()
                 .expect("Valid gossipsub config"),
-            request_timeout: Duration::from_secs(5),
-            max_message_size: 10 * 1024 * 1024, // 10MB
+            request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
         }
     }
 }
@@ -229,7 +279,7 @@ mod tests {
         let codec = WormFsCodec::default();
         assert_eq!(
             codec.max_message_size(),
-            10 * 1024 * 1024,
+            DEFAULT_MAX_MESSAGE_SIZE,
             "Default max message size should be 10MB"
         );
     }
@@ -384,14 +434,13 @@ mod tests {
         // Verify request-response timeout
         assert_eq!(
             config.request_timeout,
-            Duration::from_secs(5),
+            Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             "Default request timeout should be 5 seconds"
         );
 
         // Verify max message size
         assert_eq!(
-            config.max_message_size,
-            10 * 1024 * 1024,
+            config.max_message_size, DEFAULT_MAX_MESSAGE_SIZE,
             "Default max message size should be 10MB"
         );
     }
@@ -404,7 +453,7 @@ mod tests {
         // Note: We can't easily inspect the gossipsub config directly,
         // but we can verify it was created without panicking
         assert!(
-            config.gossipsub.heartbeat_interval() == Duration::from_secs(1),
+            config.gossipsub.heartbeat_interval() == Duration::from_secs(GOSSIPSUB_HEARTBEAT_SECS),
             "Gossipsub heartbeat should be 1 second"
         );
     }
