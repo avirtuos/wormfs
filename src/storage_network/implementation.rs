@@ -601,13 +601,32 @@ impl super::StorageNetworkInner {
                 let internal_peer_id = libp2p_peer_id_to_internal(&peer_id);
                 warn!("Peer {:?} does not support gossipsub", internal_peer_id);
             }
+
+            gossipsub::Event::SlowPeer {
+                peer_id,
+                failed_messages,
+            } => {
+                let internal_peer_id = libp2p_peer_id_to_internal(&peer_id);
+                warn!(
+                    "Peer {:?} is slow to respond to gossipsub messages ({:?} failed messages)",
+                    internal_peer_id, failed_messages
+                );
+
+                // Record metric for monitoring slow peers
+                self.record_metric_counter("storage_network.gossipsub.slow_peers", 1)
+                    .await;
+            }
         }
     }
 
     /// Handle an identify event.
     async fn handle_identify_event(&self, event: identify::Event) {
         match event {
-            identify::Event::Received { peer_id, info } => {
+            identify::Event::Received {
+                peer_id,
+                info,
+                connection_id: _,
+            } => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&peer_id);
                 debug!(
                     "Identified peer {:?}: protocol_version={}, agent_version={}",
@@ -623,7 +642,10 @@ impl super::StorageNetworkInner {
                 }
             }
 
-            identify::Event::Sent { peer_id } => {
+            identify::Event::Sent {
+                peer_id,
+                connection_id: _,
+            } => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&peer_id);
                 debug!("Sent identify info to peer {:?}", internal_peer_id);
             }
@@ -633,7 +655,11 @@ impl super::StorageNetworkInner {
                 debug!("Pushed identify info to peer {:?}", internal_peer_id);
             }
 
-            identify::Event::Error { peer_id, error } => {
+            identify::Event::Error {
+                peer_id,
+                error,
+                connection_id: _,
+            } => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&peer_id);
                 warn!("Identify error with peer {:?}: {}", internal_peer_id, error);
             }
@@ -742,7 +768,11 @@ impl super::StorageNetworkInner {
         use request_response::Event;
 
         match event {
-            Event::Message { peer, message } => {
+            Event::Message {
+                peer,
+                message,
+                connection_id: _,
+            } => {
                 use request_response::Message;
                 match message {
                     Message::Request {
@@ -832,6 +862,7 @@ impl super::StorageNetworkInner {
                 peer,
                 request_id,
                 error,
+                connection_id: _,
             } => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&peer);
                 warn!(
@@ -862,6 +893,7 @@ impl super::StorageNetworkInner {
                 peer,
                 request_id,
                 error,
+                connection_id: _,
             } => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&peer);
                 warn!(
@@ -870,7 +902,11 @@ impl super::StorageNetworkInner {
                 );
             }
 
-            Event::ResponseSent { peer, request_id } => {
+            Event::ResponseSent {
+                peer,
+                request_id,
+                connection_id: _,
+            } => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&peer);
                 debug!(
                     "Response sent to peer {:?} for request {:?}",
@@ -1185,13 +1221,14 @@ impl super::StorageNetworkInner {
             let mut swarm = self.inner.swarm.write().await;
             for topic_name in topics {
                 let topic = gossipsub::IdentTopic::new(&topic_name);
-                if let Err(e) = swarm.behaviour_mut().gossipsub.unsubscribe(&topic) {
-                    warn!(
-                        "Failed to unsubscribe from topic '{}' during shutdown: {}",
-                        topic_name, e
-                    );
-                } else {
+                let success = swarm.behaviour_mut().gossipsub.unsubscribe(&topic);
+                if success {
                     debug!("Unsubscribed from topic '{}'", topic_name);
+                } else {
+                    warn!(
+                        "Failed to unsubscribe from topic '{}' during shutdown (not subscribed)",
+                        topic_name
+                    );
                 }
             }
             drop(swarm);

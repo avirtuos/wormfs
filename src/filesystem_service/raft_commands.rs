@@ -5,7 +5,6 @@
 
 use crate::file_store::{FileId, StripeId, StripeMetadata};
 use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::SystemTime;
