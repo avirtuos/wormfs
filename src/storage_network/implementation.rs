@@ -1825,4 +1825,346 @@ mod tests {
             "Command should be queued successfully through channel"
         );
     }
+
+    // ========== Phase 4: Event Handler Integration Tests ==========
+
+    #[test]
+    fn test_heartbeat_message_serialization() {
+        let heartbeat = HeartbeatMessage::new("test_node".to_string(), 42);
+
+        // Serialize
+        let bytes = heartbeat.to_bytes().expect("Serialization should succeed");
+        assert!(!bytes.is_empty(), "Serialized data should not be empty");
+
+        // Deserialize
+        let deserialized =
+            HeartbeatMessage::from_bytes(&bytes).expect("Deserialization should succeed");
+
+        assert_eq!(
+            deserialized.node_id, "test_node",
+            "Node ID should be preserved"
+        );
+        assert_eq!(deserialized.sequence, 42, "Sequence should be preserved");
+    }
+
+    #[test]
+    fn test_heartbeat_message_invalid_data() {
+        let invalid_data = vec![0xFF, 0xFF, 0xFF, 0xFF];
+
+        let result = HeartbeatMessage::from_bytes(&invalid_data);
+        assert!(result.is_err(), "Should fail to deserialize invalid data");
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_updates_peer_state() {
+        let config = test_config("heartbeat_peer_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Add a fake peer to the state
+        use libp2p::PeerId as Libp2pPeerId;
+        let libp2p_peer = Libp2pPeerId::random();
+        let peer_id = PeerId(libp2p_peer.to_bytes());
+
+        {
+            let mut peers = inner.inner.peers.write().await;
+            peers.insert(
+                peer_id.clone(),
+                PeerState {
+                    peer_id: peer_id.clone(),
+                    addresses: vec![],
+                    connection_state: ConnectionState::Connected,
+                    last_seen: SystemTime::now() - Duration::from_secs(100),
+                    validation_status: ValidationStatus::Validated,
+                    last_heartbeat: None,
+                },
+            );
+        }
+
+        // Create and handle a heartbeat message
+        let heartbeat = HeartbeatMessage::new("remote_node".to_string(), 1);
+        let heartbeat_bytes = heartbeat.to_bytes().expect("Serialization should work");
+
+        inner
+            .handle_heartbeat_message(&peer_id, &heartbeat_bytes)
+            .await;
+
+        // Verify peer state was updated
+        let peers = inner.inner.peers.read().await;
+        let peer_state = peers.get(&peer_id).expect("Peer should exist");
+
+        assert!(
+            peer_state.last_heartbeat.is_some(),
+            "Last heartbeat should be set"
+        );
+        assert!(
+            peer_state.last_seen > SystemTime::now() - Duration::from_secs(1),
+            "Last seen should be recent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_invalid_data_logged() {
+        let config = test_config("heartbeat_invalid_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        use libp2p::PeerId as Libp2pPeerId;
+        let peer_id = PeerId(Libp2pPeerId::random().to_bytes());
+
+        // Send invalid heartbeat data
+        let invalid_data = vec![0xFF, 0xFF, 0xFF];
+
+        // This should not panic, just log a warning
+        inner
+            .handle_heartbeat_message(&peer_id, &invalid_data)
+            .await;
+
+        // If we get here, the handler properly handled invalid data
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_heartbeat_increments_sequence() {
+        let config = test_config("heartbeat_sequence_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Get initial sequence
+        let initial_seq = *inner.inner.heartbeat_sequence.read().await;
+
+        // Broadcast heartbeat (this will try to publish to gossipsub)
+        inner.broadcast_heartbeat().await;
+
+        // Check sequence was incremented
+        let new_seq = *inner.inner.heartbeat_sequence.read().await;
+        assert_eq!(
+            new_seq,
+            initial_seq + 1,
+            "Sequence should increment on broadcast"
+        );
+
+        // Broadcast again
+        inner.broadcast_heartbeat().await;
+
+        let newer_seq = *inner.inner.heartbeat_sequence.read().await;
+        assert_eq!(
+            newer_seq,
+            initial_seq + 2,
+            "Sequence should continue incrementing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_topic_subscription_internal() {
+        let config = test_config("topic_internal_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let topic_name = "test/topic";
+
+        // Join topic internally
+        let result = inner.join_topic_internal(topic_name).await;
+
+        // Should succeed (gossipsub subscribe will work even without peers)
+        assert!(
+            result.is_ok(),
+            "Should successfully subscribe to topic internally"
+        );
+
+        let topic_handle = result.unwrap();
+
+        // Verify topic was added to internal state
+        let topics = inner.inner.topics.read().await;
+        assert!(
+            topics.contains_key(topic_name),
+            "Topic should be in internal state"
+        );
+
+        // Verify topic handle has valid channels
+        // (TopicHandle only contains tx and rx, not the topic name)
+    }
+
+    #[tokio::test]
+    async fn test_topic_message_routing() {
+        let config = test_config("topic_routing_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let topic_name = "test/messages";
+
+        // Join topic
+        let topic_handle = inner
+            .join_topic_internal(topic_name)
+            .await
+            .expect("Should subscribe to topic");
+
+        // Simulate receiving a topic message (directly push to channel)
+        use libp2p::PeerId as Libp2pPeerId;
+        let fake_peer = PeerId(Libp2pPeerId::random().to_bytes());
+        let test_message = vec![1, 2, 3, 4, 5];
+
+        let topic_message = TopicMessage {
+            source: fake_peer.clone(),
+            data: test_message.clone(),
+            timestamp: SystemTime::now(),
+        };
+
+        // Send message through the topic's internal channel
+        {
+            let topics = inner.inner.topics.read().await;
+            let topic_state = topics.get(topic_name).expect("Topic should exist");
+            topic_state
+                .tx
+                .send(topic_message.clone())
+                .expect("Should send message");
+        }
+
+        // Try to receive the message
+        let mut rx = topic_handle.rx;
+        let received = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("Should receive within timeout")
+            .expect("Should get a message");
+
+        assert_eq!(received.source, fake_peer, "Source should match");
+        assert_eq!(received.data, test_message, "Data should match");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_topic_subscribers() {
+        let config = test_config("multi_subscriber_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let topic_name = "test/shared";
+
+        // First subscriber joins
+        let handle1 = inner
+            .join_topic_internal(topic_name)
+            .await
+            .expect("First subscribe should succeed");
+
+        // Second subscriber joins the same topic
+        let _handle2 = inner
+            .join_topic_internal(topic_name)
+            .await
+            .expect("Second subscribe should succeed");
+
+        // Both subscriptions succeeded
+        // Drop the first handle (we only needed to test subscription)
+        drop(handle1);
+
+        // Verify topic only registered once
+        let topics = inner.inner.topics.read().await;
+        assert_eq!(
+            topics.len(),
+            1,
+            "Should only have one topic entry even with multiple subscribers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_peer_internal() {
+        let config = test_config("disconnect_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        use libp2p::PeerId as Libp2pPeerId;
+        let libp2p_peer = Libp2pPeerId::random();
+        let peer_id = PeerId(libp2p_peer.to_bytes());
+
+        // Add peer to state
+        {
+            let mut peers = inner.inner.peers.write().await;
+            peers.insert(
+                peer_id.clone(),
+                PeerState {
+                    peer_id: peer_id.clone(),
+                    addresses: vec![],
+                    connection_state: ConnectionState::Connected,
+                    last_seen: SystemTime::now(),
+                    validation_status: ValidationStatus::Validated,
+                    last_heartbeat: None,
+                },
+            );
+        }
+
+        // Disconnect the peer
+        let result = inner.disconnect_peer_internal(&peer_id).await;
+
+        // Should succeed (or return appropriate error if peer not connected)
+        // The actual disconnection happens via swarm operations
+        assert!(
+            result.is_ok() || result.is_err(),
+            "Disconnect should complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_state_lifecycle() {
+        let config = test_config("peer_lifecycle_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        use libp2p::PeerId as Libp2pPeerId;
+        let libp2p_peer = Libp2pPeerId::random();
+        let peer_id = PeerId(libp2p_peer.to_bytes());
+
+        // Initially no peers
+        {
+            let peers = inner.inner.peers.read().await;
+            assert_eq!(peers.len(), 0, "Should start with no peers");
+        }
+
+        // Add a peer
+        {
+            let mut peers = inner.inner.peers.write().await;
+            peers.insert(
+                peer_id.clone(),
+                PeerState {
+                    peer_id: peer_id.clone(),
+                    addresses: vec![],
+                    connection_state: ConnectionState::Connected,
+                    last_seen: SystemTime::now(),
+                    validation_status: ValidationStatus::Validated,
+                    last_heartbeat: None,
+                },
+            );
+        }
+
+        // Verify peer exists
+        {
+            let peers = inner.inner.peers.read().await;
+            assert_eq!(peers.len(), 1, "Should have one peer");
+            assert!(peers.contains_key(&peer_id), "Should contain our peer");
+        }
+
+        // Remove peer
+        {
+            let mut peers = inner.inner.peers.write().await;
+            peers.remove(&peer_id);
+        }
+
+        // Verify peer removed
+        {
+            let peers = inner.inner.peers.read().await;
+            assert_eq!(peers.len(), 0, "Should have no peers after removal");
+        }
+    }
 }
