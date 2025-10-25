@@ -752,19 +752,42 @@ impl super::StorageNetworkInner {
                             request.len()
                         );
 
-                        // For now, echo the request back as response
-                        // In the future, this would route to a handler
-                        let response = request.clone();
+                        // TODO: Protocol detection limitation
+                        // The current libp2p request-response implementation doesn't pass
+                        // the protocol identifier to the message handler. Options:
+                        // 1. Encode protocol in first bytes of request (protocol framing)
+                        // 2. Use separate request-response behaviors per protocol
+                        // 3. Wait for libp2p API improvement
+                        //
+                        // For now, we default to echo protocol for all requests.
+                        // This works for testing but limits multi-protocol support.
+                        let protocol = "/wormfs/echo";
 
-                        // Send response through the swarm
-                        let mut swarm = self.inner.swarm.write().await;
-                        if swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_response(channel, response)
-                            .is_err()
-                        {
-                            warn!("Failed to send response to request {:?}", request_id);
+                        // Route the request to the appropriate protocol handler
+                        let response_result = self.route_request(protocol, request).await;
+
+                        // Send response or handle error
+                        match response_result {
+                            Ok(response) => {
+                                // Send successful response through the swarm
+                                let mut swarm = self.inner.swarm.write().await;
+                                if swarm
+                                    .behaviour_mut()
+                                    .request_response
+                                    .send_response(channel, response)
+                                    .is_err()
+                                {
+                                    warn!("Failed to send response to request {:?}", request_id);
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Request handler failed for request {:?}: {}",
+                                    request_id, e
+                                );
+                                // libp2p request-response doesn't support sending error responses
+                                // The channel will be dropped, which signals failure to the peer
+                            }
                         }
                     }
 
@@ -1099,6 +1122,114 @@ impl super::StorageNetworkInner {
 
         info!("Successfully disconnected from peer {:?}", peer_id);
         Ok(())
+    }
+
+    /// Route incoming request to the appropriate protocol handler.
+    ///
+    /// This function dispatches requests based on the protocol identifier
+    /// to specialized handler functions. Currently supports:
+    /// - `/wormfs/echo` - Echo service for testing and diagnostics
+    /// - `/wormfs/raft/1.0.0` - Raft consensus protocol (placeholder)
+    ///
+    /// # Arguments
+    ///
+    /// * `protocol` - The protocol identifier (e.g., "/wormfs/echo")
+    /// * `request` - The request data bytes
+    ///
+    /// # Returns
+    ///
+    /// Response data bytes from the appropriate handler
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::ProtocolNotSupported` if the protocol is not recognized
+    async fn route_request(&self, protocol: &str, request: Vec<u8>) -> Result<Vec<u8>, Error> {
+        debug!(
+            "Routing request for protocol '{}' ({} bytes)",
+            protocol,
+            request.len()
+        );
+
+        // Record request metric
+        self.record_metric_counter("storage_network.request_response.requests_total", 1)
+            .await;
+
+        match protocol {
+            "/wormfs/echo" => self.handle_echo_request(request).await,
+            "/wormfs/raft/1.0.0" => self.handle_raft_request(request).await,
+            _ => {
+                warn!("Unsupported protocol: {}", protocol);
+                self.record_metric_counter("storage_network.request_response.unknown_protocol", 1)
+                    .await;
+                Err(Error::ProtocolNotSupported(protocol.to_string()))
+            }
+        }
+    }
+
+    /// Handle echo protocol requests.
+    ///
+    /// Protocol: `/wormfs/echo`
+    ///
+    /// This is a diagnostic handler that prepends "ECHO: " to the request
+    /// and returns it. Useful for testing request-response functionality
+    /// and network connectivity.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The request data bytes
+    ///
+    /// # Returns
+    ///
+    /// The request data prepended with "ECHO: "
+    async fn handle_echo_request(&self, request: Vec<u8>) -> Result<Vec<u8>, Error> {
+        debug!("Handling echo request ({} bytes)", request.len());
+
+        // Prepend "ECHO: " to the request
+        let mut response = b"ECHO: ".to_vec();
+        response.extend_from_slice(&request);
+
+        // Record metric
+        self.record_metric_counter("storage_network.request_response.echo_requests", 1)
+            .await;
+
+        Ok(response)
+    }
+
+    /// Handle Raft protocol requests.
+    ///
+    /// Protocol: `/wormfs/raft/1.0.0`
+    ///
+    /// This is a placeholder handler for Raft consensus protocol messages.
+    /// Currently returns `ProtocolNotSupported` as the actual Raft RPC
+    /// handling is not yet implemented.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The request data bytes
+    ///
+    /// # Returns
+    ///
+    /// Currently returns an error. Will return Raft RPC response when implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::ProtocolNotSupported` until Raft RPC handler is implemented
+    async fn handle_raft_request(&self, request: Vec<u8>) -> Result<Vec<u8>, Error> {
+        warn!(
+            "Raft request handler not yet implemented (received {} bytes)",
+            request.len()
+        );
+
+        // Record metric
+        self.record_metric_counter("storage_network.request_response.raft_requests", 1)
+            .await;
+        self.record_metric_counter("storage_network.request_response.handler_errors", 1)
+            .await;
+
+        // TODO: Route to actual Raft RPC handler when implemented
+        Err(Error::ProtocolNotSupported(
+            "/wormfs/raft/1.0.0".to_string(),
+        ))
     }
 
     /// Helper method to record a counter metric if metrics service is available.
@@ -2583,5 +2714,172 @@ mod tests {
             u64::MAX,
             "Large sequence should be preserved"
         );
+    }
+
+    #[tokio::test]
+    async fn test_echo_handler() {
+        // Test that echo handler prepends "ECHO: " to the request
+        let config = test_config("echo_handler");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let request = b"Hello, World!".to_vec();
+        let response = inner
+            .handle_echo_request(request.clone())
+            .await
+            .expect("Echo handler should succeed");
+
+        // Verify response has "ECHO: " prepended
+        assert!(
+            response.starts_with(b"ECHO: "),
+            "Response should start with 'ECHO: '"
+        );
+
+        // Verify original message follows the prefix
+        assert_eq!(
+            &response[6..],
+            &request[..],
+            "Response should contain original message after prefix"
+        );
+
+        // Verify exact expected response
+        let expected = b"ECHO: Hello, World!".to_vec();
+        assert_eq!(response, expected, "Response should match expected");
+    }
+
+    #[tokio::test]
+    async fn test_echo_handler_empty_request() {
+        // Test echo handler with empty request
+        let config = test_config("echo_empty");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let request = vec![];
+        let response = inner
+            .handle_echo_request(request)
+            .await
+            .expect("Echo handler should succeed with empty request");
+
+        // Should still have the "ECHO: " prefix
+        assert_eq!(response, b"ECHO: ", "Empty request should get prefix only");
+    }
+
+    #[tokio::test]
+    async fn test_raft_handler_not_implemented() {
+        // Test that raft handler returns ProtocolNotSupported error
+        let config = test_config("raft_handler");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let request = b"Raft RPC data".to_vec();
+        let result = inner.handle_raft_request(request).await;
+
+        // Should return error since not implemented
+        assert!(
+            result.is_err(),
+            "Raft handler should return error (not implemented)"
+        );
+
+        // Verify it's the right error type
+        match result {
+            Err(Error::ProtocolNotSupported(protocol)) => {
+                assert_eq!(
+                    protocol, "/wormfs/raft/1.0.0",
+                    "Should indicate raft protocol not supported"
+                );
+            }
+            _ => panic!("Expected ProtocolNotSupported error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_route_request_echo_protocol() {
+        // Test routing to echo handler
+        let config = test_config("route_echo");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let request = b"Test message".to_vec();
+        let response = inner
+            .route_request("/wormfs/echo", request.clone())
+            .await
+            .expect("Routing to echo should succeed");
+
+        // Verify it went through echo handler
+        assert!(
+            response.starts_with(b"ECHO: "),
+            "Routed request should be handled by echo handler"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_route_request_raft_protocol() {
+        // Test routing to raft handler
+        let config = test_config("route_raft");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let request = b"Raft data".to_vec();
+        let result = inner.route_request("/wormfs/raft/1.0.0", request).await;
+
+        // Should fail since raft not implemented
+        assert!(result.is_err(), "Routing to unimplemented raft should fail");
+    }
+
+    #[tokio::test]
+    async fn test_route_request_unknown_protocol() {
+        // Test routing to unknown protocol
+        let config = test_config("route_unknown");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let request = b"Some data".to_vec();
+        let result = inner.route_request("/wormfs/unknown/1.0.0", request).await;
+
+        // Should return ProtocolNotSupported error
+        assert!(result.is_err(), "Unknown protocol should fail");
+
+        match result {
+            Err(Error::ProtocolNotSupported(protocol)) => {
+                assert_eq!(
+                    protocol, "/wormfs/unknown/1.0.0",
+                    "Should indicate unknown protocol"
+                );
+            }
+            _ => panic!("Expected ProtocolNotSupported error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_route_request_binary_data() {
+        // Test echo handler with binary data
+        let config = test_config("route_binary");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Binary data including null bytes
+        let request = vec![0x00, 0xFF, 0x42, 0xAB, 0xCD];
+        let response = inner
+            .route_request("/wormfs/echo", request.clone())
+            .await
+            .expect("Binary data should work");
+
+        // Verify prefix and data
+        assert_eq!(&response[0..6], b"ECHO: ", "Should have prefix");
+        assert_eq!(&response[6..], &request[..], "Should preserve binary data");
     }
 }
