@@ -173,6 +173,14 @@ pub enum NetworkCommand {
         /// Channel to send response back
         response: tokio::sync::oneshot::Sender<Result<Vec<u8>, Error>>,
     },
+
+    /// Disconnect from a specific peer
+    DisconnectPeer {
+        /// Target peer identifier
+        peer_id: PeerId,
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<Result<(), Error>>,
+    },
 }
 
 /// Errors that can occur during network operations.

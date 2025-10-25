@@ -212,6 +212,13 @@ pub struct InnerState {
     pub(crate) heartbeat_sequence: RwLock<u64>,
 }
 
+// Safety: InnerState is Sync because:
+// - All mutable state (swarm, peers, topics, etc.) is protected by RwLock
+// - Arc and other fields are already Sync
+// - Access to non-Sync libp2p types is always through locks
+#[cfg(feature = "libp2p")]
+unsafe impl Sync for InnerState {}
+
 /// StorageNetworkInner implementation
 #[cfg(feature = "libp2p")]
 impl super::StorageNetworkInner {
@@ -873,6 +880,13 @@ impl super::StorageNetworkInner {
                     error!("SendRequest failed to {:?}: {}", peer_id, e);
                 }
             }
+
+            NetworkCommand::DisconnectPeer { peer_id, response } => {
+                let result = self.disconnect_peer_internal(&peer_id).await;
+                if response.send(result).is_err() {
+                    error!("Failed to send DisconnectPeer response");
+                }
+            }
         }
     }
 
@@ -1041,6 +1055,55 @@ impl super::StorageNetworkInner {
         Ok(())
     }
 
+    /// Internal implementation of disconnecting from a peer.
+    async fn disconnect_peer_internal(&self, peer_id: &PeerId) -> Result<(), Error> {
+        info!("Disconnecting from peer {:?}", peer_id);
+
+        // Verify peer exists
+        {
+            let peers = self
+                .inner
+                .peers
+                .read()
+                .expect("Failed to acquire peers lock");
+            if !peers.contains_key(peer_id) {
+                return Err(Error::PeerNotConnected(peer_id.clone()));
+            }
+        }
+
+        // Convert internal PeerId to libp2p PeerId
+        let libp2p_peer_id = internal_peer_id_to_libp2p(peer_id)?;
+
+        // Disconnect via swarm
+        {
+            let mut swarm = self
+                .inner
+                .swarm
+                .write()
+                .expect("Failed to acquire swarm lock");
+
+            swarm
+                .disconnect_peer_id(libp2p_peer_id)
+                .map_err(|_| Error::DisconnectFailed {
+                    peer: peer_id.clone(),
+                    reason: "Failed to disconnect peer".to_string(),
+                })?;
+        }
+
+        // Remove peer from our tracking
+        {
+            let mut peers = self
+                .inner
+                .peers
+                .write()
+                .expect("Failed to acquire peers lock");
+            peers.remove(peer_id);
+        }
+
+        info!("Successfully disconnected from peer {:?}", peer_id);
+        Ok(())
+    }
+
     /// Helper method to record a counter metric if metrics service is available.
     fn record_metric_counter(&self, name: &str, value: u64) {
         if let Some(metrics) = self
@@ -1142,6 +1205,83 @@ impl super::StorageNetworkInner {
                                 Error::ValidationFailed(format!("Failed to store peer ID: {}", e))
                             })?;
 
+                        info!("Peer {} newly discovered with ID {:?}", ip, peer_id);
+                        Ok(ValidationResult::NewlyDiscovered(peer_id))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Implementation for InnerState to expose methods needed by StorageNetworkHandle.
+#[cfg(feature = "libp2p")]
+impl InnerState {
+    /// Validate a peer's ID against configuration and stored values.
+    ///
+    /// This method delegates to the same validation logic used by StorageNetworkInner.
+    pub(crate) async fn validate_peer_id(
+        &self,
+        ip: std::net::IpAddr,
+        peer_id: PeerId,
+    ) -> Result<super::types::ValidationResult, Error> {
+        use super::types::{PeerIdConfig, ValidationResult};
+
+        // Find peer config for this IP
+        let peer_config = self.config.peers.iter().find(|p| p.ip_address == ip);
+
+        let peer_config = match peer_config {
+            Some(config) => config,
+            None => {
+                return Err(Error::ValidationFailed(format!(
+                    "IP {} is not in configured peer list",
+                    ip
+                )))
+            }
+        };
+
+        // Validate based on peer ID configuration mode
+        match &peer_config.peer_id {
+            PeerIdConfig::Explicit(expected_id) => {
+                // Explicit mode: validate against configured peer ID
+                if expected_id == &peer_id {
+                    info!("Peer {} validated with explicit ID", ip);
+                    Ok(ValidationResult::Validated)
+                } else {
+                    warn!(
+                        "Peer {} rejected: expected ID {:?}, got {:?}",
+                        ip, expected_id, peer_id
+                    );
+                    Ok(ValidationResult::Rejected {
+                        expected: expected_id.clone(),
+                        actual: peer_id,
+                    })
+                }
+            }
+            PeerIdConfig::AutoId => {
+                // AutoId mode: check if we've seen this peer before
+                match self.peer_id_store.get(&ip) {
+                    Some(stored_id) => {
+                        // We've seen this peer before, validate against stored ID
+                        if stored_id == peer_id {
+                            info!("Peer {} validated with learned ID", ip);
+                            Ok(ValidationResult::Validated)
+                        } else {
+                            warn!(
+                                "Peer {} rejected: learned ID {:?}, got {:?}",
+                                ip, stored_id, peer_id
+                            );
+                            Ok(ValidationResult::Rejected {
+                                expected: stored_id,
+                                actual: peer_id,
+                            })
+                        }
+                    }
+                    None => {
+                        // First time seeing this peer, store its ID
+                        self.peer_id_store.store(ip, peer_id.clone()).map_err(|e| {
+                            Error::ValidationFailed(format!("Failed to store peer ID: {}", e))
+                        })?;
                         info!("Peer {} newly discovered with ID {:?}", ip, peer_id);
                         Ok(ValidationResult::NewlyDiscovered(peer_id))
                     }

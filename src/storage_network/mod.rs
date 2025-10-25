@@ -95,6 +95,16 @@ pub struct StorageNetworkHandle {
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
 }
 
+// Safety: StorageNetworkHandle is Send + Sync because:
+// - Arc<InnerState> is Send + Sync (shared ownership)
+// - UnboundedSender is Send + Sync
+// - The Swarm inside InnerState is protected by RwLock which provides interior mutability
+#[cfg(feature = "libp2p")]
+unsafe impl Send for StorageNetworkHandle {}
+
+#[cfg(feature = "libp2p")]
+unsafe impl Sync for StorageNetworkHandle {}
+
 #[cfg(feature = "libp2p")]
 impl StorageNetworkHandle {
     /// Join a topic and get channels for pub/sub communication.
@@ -270,6 +280,151 @@ impl StorageNetworkHandle {
             .metrics
             .write()
             .expect("Failed to acquire metrics lock") = Some(metrics);
+    }
+
+    /// Disconnect from a specific peer.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - Identifier of peer to disconnect
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the peer is not connected or disconnection fails.
+    pub async fn disconnect_peer(&self, peer_id: &PeerId) -> Result<(), Error> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        self.event_tx
+            .send(NetworkCommand::DisconnectPeer {
+                peer_id: peer_id.clone(),
+                response: response_tx,
+            })
+            .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+
+        response_rx
+            .await
+            .map_err(|_| Error::EventLoopFailed("Event loop dropped response".to_string()))?
+    }
+
+    /// Open a direct stream to a peer for bulk data transfer.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - Target peer identifier
+    /// * `protocol` - Protocol name
+    ///
+    /// # Errors
+    ///
+    /// Returns an error indicating streams are not yet implemented (Phase 3+).
+    pub async fn open_stream(&self, _peer_id: &PeerId, _protocol: &str) -> Result<(), Error> {
+        Err(Error::StreamFailed(
+            "Stream opening not yet implemented (Phase 3+)".to_string(),
+        ))
+    }
+
+    /// Validate and potentially update stored peer ID for auto-ID mode.
+    ///
+    /// This method validates a peer's ID against configuration. In auto-ID mode,
+    /// it learns peer IDs on first connection and enforces them on subsequent connections.
+    ///
+    /// # Arguments
+    ///
+    /// * `ip` - IP address of the peer
+    /// * `peer_id` - Peer ID from libp2p handshake
+    ///
+    /// # Returns
+    ///
+    /// Validation result indicating if the peer was validated, newly discovered,
+    /// or rejected due to ID mismatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation cannot be performed.
+    pub async fn validate_peer_id(
+        &self,
+        ip: IpAddr,
+        peer_id: PeerId,
+    ) -> Result<ValidationResult, Error> {
+        // Access the inner's validate_peer_id method
+        self.inner.validate_peer_id(ip, peer_id).await
+    }
+}
+
+/// Implementation of the StorageNetwork trait for StorageNetworkHandle.
+#[cfg(feature = "libp2p")]
+#[async_trait]
+impl StorageNetwork for StorageNetworkHandle {
+    /// Stream type for direct data transfer.
+    /// Currently using () as placeholder until Phase 3+ implements streaming.
+    type Stream = ();
+
+    /// Create a new network instance with the given configuration.
+    ///
+    /// **Important**: This method returns the handle immediately, but the network
+    /// event loop must be started separately by calling `run()` on the returned
+    /// `StorageNetworkInner` from `StorageNetworkFactory::create()`.
+    ///
+    /// Due to libp2p's architecture, the event loop cannot be automatically spawned
+    /// here. Users should instead use `StorageNetworkFactory::create()` which returns
+    /// both the `Inner` (for running) and `Handle` (for operations).
+    async fn new(_config: Config) -> Result<Self, Error> {
+        // Cannot use this method with the current architecture
+        // Use StorageNetworkFactory::create() instead
+        Err(Error::EventLoopFailed(
+            "Use StorageNetworkFactory::create() to create network instances".to_string(),
+        ))
+    }
+
+    /// Start the swarm event loop.
+    ///
+    /// This method is not applicable for `StorageNetworkHandle` because the event
+    /// loop runs on `StorageNetworkInner`. Use `StorageNetworkFactory::create()`
+    /// to get both components, then call `run()` on the Inner.
+    async fn run(&self) -> Result<(), Error> {
+        Err(Error::EventLoopFailed(
+            "Call run() on StorageNetworkInner, not on StorageNetworkHandle".to_string(),
+        ))
+    }
+
+    async fn join_topic(&self, topic_name: &str) -> Result<(TopicSender, TopicReceiver), Error> {
+        StorageNetworkHandle::join_topic(self, topic_name).await
+    }
+
+    async fn send_to_peer(
+        &self,
+        peer_id: &PeerId,
+        topic: &str,
+        message: Vec<u8>,
+    ) -> Result<(), Error> {
+        StorageNetworkHandle::send_to_peer(self, peer_id, topic, message).await
+    }
+
+    async fn broadcast(&self, topic: &str, message: Vec<u8>) -> Result<(), Error> {
+        StorageNetworkHandle::broadcast(self, topic, message).await
+    }
+
+    async fn open_stream(&self, peer_id: &PeerId, protocol: &str) -> Result<Self::Stream, Error> {
+        StorageNetworkHandle::open_stream(self, peer_id, protocol).await
+    }
+
+    fn get_connected_peers(&self) -> Vec<PeerInfo> {
+        StorageNetworkHandle::get_connected_peers(self)
+    }
+
+    fn get_peer_info(&self, peer_id: &PeerId) -> Option<PeerInfo> {
+        StorageNetworkHandle::get_peer_info(self, peer_id)
+    }
+
+    async fn disconnect_peer(&self, peer_id: &PeerId) -> Result<(), Error> {
+        StorageNetworkHandle::disconnect_peer(self, peer_id).await
+    }
+
+    async fn validate_peer_id(
+        &self,
+        ip: IpAddr,
+        peer_id: PeerId,
+    ) -> Result<ValidationResult, Error> {
+        StorageNetworkHandle::validate_peer_id(self, ip, peer_id).await
     }
 }
 
