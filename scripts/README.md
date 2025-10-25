@@ -77,13 +77,13 @@ Runs comprehensive quality checks including build, tests, formatting, and lintin
 
 ---
 
-### 🧪 `run_integration_tests.sh` - FUSE Integration Tests
+### 🧪 `run_fuse_integration_tests.sh` - FUSE Integration Tests
 
 Runs complete end-to-end FUSE integration tests that mount actual filesystems and verify all Phase 1 functionality.
 
 **Usage:**
 ```bash
-./scripts/run_integration_tests.sh [OPTIONS]
+./scripts/run_fuse_integration_tests.sh [OPTIONS]
 ```
 
 **Options:**
@@ -104,20 +104,20 @@ Runs complete end-to-end FUSE integration tests that mount actual filesystems an
 
 **Example:**
 ```bash
-# Run all integration tests
-./scripts/run_integration_tests.sh
+# Run all FUSE integration tests
+./scripts/run_fuse_integration_tests.sh
 
 # Run with verbose output
-./scripts/run_integration_tests.sh --verbose
+./scripts/run_fuse_integration_tests.sh --verbose
 
 # Run specific test
-./scripts/run_integration_tests.sh -t test_basic_operations
+./scripts/run_fuse_integration_tests.sh -t test_basic_operations
 
 # Build only (no tests)
-./scripts/run_integration_tests.sh --build-only
+./scripts/run_fuse_integration_tests.sh --build-only
 
 # Keep artifacts for debugging
-./scripts/run_integration_tests.sh --keep-artifacts
+./scripts/run_fuse_integration_tests.sh --keep-artifacts
 ```
 
 **Features:**
@@ -185,10 +185,10 @@ brew install macfuse
 ### Integration Testing
 ```bash
 # Run FUSE integration tests (pre-release QA)
-./scripts/run_integration_tests.sh
+./scripts/run_fuse_integration_tests.sh
 
 # Run specific integration test
-./scripts/run_integration_tests.sh -t test_basic_operations
+./scripts/run_fuse_integration_tests.sh -t test_basic_operations
 ```
 
 ### Manual Testing

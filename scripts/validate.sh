@@ -54,7 +54,7 @@ run_check "Cargo Integration Tests" "cargo test --tests --features test-utils 2>
 
 # 4. FUSE Integration Tests - Run ignored integration tests that mount filesystems
 echo -e "${YELLOW}Step 4/7: Running FUSE integration tests (ignored)...${NC}"
-run_check "FUSE Integration Tests" "./scripts/run_integration_tests.sh"
+run_check "FUSE Integration Tests" "./scripts/run_fuse_integration_tests.sh"
 
 # 5. Cargo Check (test-utils feature) - Verify test utilities compile
 echo -e "${YELLOW}Step 5/7: Checking test-utils feature...${NC}"

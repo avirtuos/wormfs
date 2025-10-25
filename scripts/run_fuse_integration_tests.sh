@@ -304,7 +304,7 @@ fi
 print_success "Test environment ready"
 
 # Build test command
-TEST_CMD="cargo test --test integration"
+TEST_CMD="cargo test --test fuse_integration_test"
 
 if [ -n "$SPECIFIC_TEST" ]; then
     TEST_CMD="$TEST_CMD $SPECIFIC_TEST --exact"
