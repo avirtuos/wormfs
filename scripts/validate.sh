@@ -41,27 +41,31 @@ run_check() {
 }
 
 # 1. Cargo Build - Check for errors and warnings
-echo -e "${YELLOW}Step 1/4: Building project...${NC}"
+echo -e "${YELLOW}Step 1/7: Building project...${NC}"
 run_check "Cargo Build" "cargo build 2>&1 | tee /tmp/wormfs_build.log && ! grep -i 'error' /tmp/wormfs_build.log && ! grep -i 'warning' /tmp/wormfs_build.log"
 
 # 2. Cargo Test - Run all tests (hide successful test output)
-echo -e "${YELLOW}Step 2/6: Running tests...${NC}"
+echo -e "${YELLOW}Step 2/7: Running tests...${NC}"
 run_check "Cargo Test" "cargo test 2>&1 | grep -v ' ... ok$' | grep -v '^$'"
 
 # 3. Cargo Test (Integration Tests) - Run integration tests with test-utils feature
-echo -e "${YELLOW}Step 3/6: Running integration tests...${NC}"
+echo -e "${YELLOW}Step 3/7: Running integration tests...${NC}"
 run_check "Cargo Integration Tests" "cargo test --tests --features test-utils 2>&1 | grep -v ' ... ok$' | grep -v '^$'"
 
-# 4. Cargo Check (test-utils feature) - Verify test utilities compile
-echo -e "${YELLOW}Step 4/6: Checking test-utils feature...${NC}"
+# 4. FUSE Integration Tests - Run ignored integration tests that mount filesystems
+echo -e "${YELLOW}Step 4/7: Running FUSE integration tests (ignored)...${NC}"
+run_check "FUSE Integration Tests" "./scripts/run_integration_tests.sh"
+
+# 5. Cargo Check (test-utils feature) - Verify test utilities compile
+echo -e "${YELLOW}Step 5/7: Checking test-utils feature...${NC}"
 run_check "Cargo Check test-utils" "cargo check --features test-utils"
 
-# 5. Cargo Fmt Check - Verify code formatting
-echo -e "${YELLOW}Step 5/6: Checking code format...${NC}"
+# 6. Cargo Fmt Check - Verify code formatting
+echo -e "${YELLOW}Step 6/7: Checking code format...${NC}"
 run_check "Cargo Format Check" "cargo fmt --all -- --check"
 
-# 6. Cargo Clippy - Lint with warnings as errors
-echo -e "${YELLOW}Step 6/6: Running clippy linter...${NC}"
+# 7. Cargo Clippy - Lint with warnings as errors
+echo -e "${YELLOW}Step 7/7: Running clippy linter...${NC}"
 run_check "Cargo Clippy" "cargo clippy --all-targets --all-features -- -D warnings"
 
 # Final Summary
@@ -72,6 +76,7 @@ if [ $FAILED -eq 0 ]; then
     echo "Build:             ✓ No errors or warnings"
     echo "Unit Tests:        ✓ All tests passing"
     echo "Integration Tests: ✓ All tests passing"
+    echo "FUSE Tests:        ✓ All FUSE mount tests passing"
     echo "Test Utils:        ✓ Mocks compile correctly"
     echo "Format:            ✓ Code properly formatted"
     echo "Clippy:            ✓ No linter warnings"
