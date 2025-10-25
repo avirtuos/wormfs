@@ -114,6 +114,7 @@ proptest = "1.4"
 mockall = "0.12"
 criterion = { version = "0.5", features = ["async_tokio"] }
 md5 = "0.7"
+walkdir = "2"
 
 [features]
 default = ["rusqlite", "tokio-rusqlite", "reed-solomon-erasure", "fuser"]

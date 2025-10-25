@@ -1,0 +1,215 @@
+name: Integration Tests
+
+# Run FUSE integration tests
+# These tests mount actual filesystems and require more setup than unit tests
+# Run on-demand or nightly to catch integration issues
+
+on:
+  # Manual trigger for on-demand testing
+  workflow_dispatch:
+    inputs:
+      specific_test:
+        description: 'Specific test to run (leave empty for all)'
+        required: false
+        type: string
+      verbose:
+        description: 'Enable verbose output'
+        required: false
+        type: boolean
+        default: false
+
+  # Scheduled nightly runs at 2 AM UTC
+  schedule:
+    - cron: '0 2 * * *'
+
+  # Optional: Run on push to main branch
+  push:
+    branches:
+      - main
+    # Only run if integration test files changed
+    paths:
+      - 'tests/integration/phase1_complete_test.rs'
+      - 'src/filesystem_service/mount.rs'
+      - 'src/bin/wormfs.rs'
+      - '.github/workflows/integration-tests.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  integration-tests:
+    name: FUSE Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Update apt-get
+        run: sudo apt-get update
+
+      - name: Install FUSE3 and dependencies
+        run: |
+          sudo apt-get install -y \
+            fuse3 \
+            libfuse3-dev \
+            libsqlite3-dev \
+            protobuf-compiler
+
+          # Verify FUSE installation
+          fusermount3 --version || fusermount --version
+
+      - name: Configure FUSE permissions
+        run: |
+          # Allow non-root users to mount FUSE filesystems
+          sudo chmod a+rw /dev/fuse
+
+          # Add user to fuse group if it exists
+          if getent group fuse > /dev/null 2>&1; then
+            sudo usermod -a -G fuse $(whoami)
+          fi
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build WormFS binary
+        run: |
+          echo "Building release binary for integration tests..."
+          cargo build --release --verbose
+
+          # Verify binary was created
+          if [ ! -f target/release/wormfs ]; then
+            echo "Error: Binary not found at target/release/wormfs"
+            exit 1
+          fi
+
+          echo "Binary built successfully"
+          ls -lh target/release/wormfs
+
+      - name: Run integration tests
+        id: tests
+        run: |
+          # Determine test flags based on inputs
+          TEST_FLAGS="--ignored --test-threads=1"
+
+          if [ "${{ github.event.inputs.verbose }}" = "true" ]; then
+            TEST_FLAGS="$TEST_FLAGS --nocapture"
+          else
+            TEST_FLAGS="$TEST_FLAGS --quiet"
+          fi
+
+          # Build test command
+          if [ -n "${{ github.event.inputs.specific_test }}" ]; then
+            echo "Running specific test: ${{ github.event.inputs.specific_test }}"
+            TEST_CMD="cargo test --test integration ${{ github.event.inputs.specific_test }} --exact -- $TEST_FLAGS"
+          else
+            echo "Running all integration tests"
+            TEST_CMD="cargo test --test integration -- $TEST_FLAGS"
+          fi
+
+          echo "Test command: $TEST_CMD"
+          eval "$TEST_CMD"
+
+      - name: Cleanup FUSE mounts on failure
+        if: failure()
+        run: |
+          echo "Cleaning up any lingering FUSE mounts..."
+
+          # List all mounts
+          mount | grep fuse || echo "No FUSE mounts found"
+
+          # Unmount any wormfs mounts in /tmp
+          mount | grep -E "wormfs|/tmp/.*mount" | awk '{print $3}' | while read mount_point; do
+            if [ -n "$mount_point" ]; then
+              echo "Unmounting: $mount_point"
+              fusermount3 -u "$mount_point" 2>/dev/null || fusermount -u "$mount_point" 2>/dev/null || sudo umount "$mount_point" 2>/dev/null || true
+            fi
+          done
+
+          # Kill any orphaned wormfs processes
+          pkill -9 wormfs || true
+
+          echo "Cleanup complete"
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-logs
+          path: |
+            /tmp/wormfs-test-*/
+            target/release/wormfs.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Post summary
+        if: always()
+        run: |
+          echo "## Integration Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.tests.outcome }}" = "success" ]; then
+            echo "✅ All integration tests passed!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Integration tests failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Test Configuration:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Trigger: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+
+          if [ -n "${{ github.event.inputs.specific_test }}" ]; then
+            echo "- Specific test: ${{ github.event.inputs.specific_test }}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ github.event.inputs.verbose }}" = "true" ]; then
+            echo "- Verbose output: enabled" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Optional: Notify on failure for scheduled runs
+  notify-on-failure:
+    name: Notify on Failure
+    needs: integration-tests
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create issue on failure
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly Integration Tests Failed - ${new Date().toISOString().split('T')[0]}`,
+              body: `The nightly integration tests have failed.
+
+              **Workflow Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+
+              Please investigate and fix the failing tests.`,
+              labels: ['test-failure', 'integration-tests', 'automated']
+            });
+            console.log(`Created issue #${issue.data.number}`);

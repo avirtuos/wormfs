@@ -300,8 +300,9 @@ impl Filesystem for FuseAdapter {
                         FileType::Socket => FuseFileType::Socket,
                     };
 
-                    // Calculate the next offset (must account for skipped entries)
-                    let next_offset = offset + i as i64 + 1;
+                    // Calculate the next offset
+                    // Note: i already accounts for skipped entries since enumerate() is called before skip()
+                    let next_offset = i as i64 + 1;
 
                     // buffer_full means the buffer is full, should stop adding more entries
                     if reply.add(entry.ino, next_offset, kind, &entry.name) {
