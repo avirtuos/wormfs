@@ -176,7 +176,6 @@ fn verify_data_pattern(data: &[u8], expected: &[u8], context: &str) {
 }
 
 #[tokio::test]
-#[ignore = "BufferedFileHandle limitation: doesn't handle external truncations via setattr() - file handle should be released before truncation"]
 async fn test_partial_stripe_truncation_middle() {
     // STRIPE_SIZE = 4MB (2MB chunks × 2 data shards)
     const STRIPE_SIZE: usize = 4 * 1024 * 1024;
@@ -299,7 +298,6 @@ async fn test_partial_stripe_truncation_middle() {
 }
 
 #[tokio::test]
-#[ignore = "Phase 1 limitation: partial stripe rewriting requires read-modify-write (deferred to Phase 2)"]
 async fn test_partial_stripe_truncation_with_rewrite() {
     const STRIPE_SIZE: usize = 4 * 1024 * 1024;
     const INITIAL_SIZE: usize = STRIPE_SIZE * 2; // 8MB
@@ -412,7 +410,6 @@ async fn test_partial_stripe_truncation_with_rewrite() {
 }
 
 #[tokio::test]
-#[ignore = "BufferedFileHandle limitation: doesn't handle external truncations via setattr() - file handle should be released before truncation"]
 async fn test_stripe_boundary_truncation() {
     const STRIPE_SIZE: usize = 4 * 1024 * 1024;
     const INITIAL_SIZE: usize = STRIPE_SIZE * 3; // 12MB (3 full stripes)
@@ -509,7 +506,6 @@ async fn test_stripe_boundary_truncation() {
 }
 
 #[tokio::test]
-#[ignore = "BufferedFileHandle limitation: doesn't handle external truncations via setattr() - file handle should be released before truncation"]
 async fn test_multiple_truncations() {
     const STRIPE_SIZE: usize = 4 * 1024 * 1024;
     const INITIAL_SIZE: usize = STRIPE_SIZE * 3; // 12MB
