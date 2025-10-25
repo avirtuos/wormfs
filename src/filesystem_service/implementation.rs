@@ -2978,23 +2978,35 @@ impl FileSystemService for FileSystemServiceImpl {
 
         // Step 3: Handle truncation if size is changing (DATA PLANE)
         if let Some(new_size) = size {
-            // CRITICAL: Inform BufferedFileHandle about truncation so it can flush pending writes
-            // Otherwise buffered writes will be lost when we delete stripe metadata
-            let buffered_handle = if let Some(fh) = file_handle {
-                // Look up by file handle
+            // CRITICAL: Inform ALL BufferedFileHandles for this inode about truncation
+            // This ensures pending writes are flushed BEFORE we delete stripe metadata
+            // and that all handles update their cached file size
+            let buffered_handles: Vec<std::sync::Arc<BufferedFileHandle>> = {
                 let open_files = self
                     .open_files
                     .read()
                     .expect("open_files lock poisoned - indicates panic in file operation");
-                open_files
-                    .get(&fh)
-                    .and_then(|of| of.buffered_handle.clone())
-            } else {
-                // Look up by inode
-                self.get_buffered_handle_by_inode(inode)
+
+                if let Some(fh) = file_handle {
+                    // Specific file handle provided - inform just that one
+                    open_files
+                        .get(&fh)
+                        .and_then(|of| of.buffered_handle.clone())
+                        .into_iter()
+                        .collect()
+                } else {
+                    // No file handle provided - find ALL handles for this inode
+                    // This handles external truncation (e.g., via truncate() syscall)
+                    open_files
+                        .values()
+                        .filter(|of| of.inode == inode)
+                        .filter_map(|of| of.buffered_handle.clone())
+                        .collect()
+                }
             };
 
-            if let Some(ref handle) = buffered_handle {
+            // Inform all matching handles about truncation
+            for handle in &buffered_handles {
                 handle
                     .inform(
                         crate::filesystem_service::buffered_file_handle::OperationType::Truncate,
@@ -3006,11 +3018,10 @@ impl FileSystemService for FileSystemServiceImpl {
             }
 
             // Get the current effective size (BufferedFileHandle knows about unflushed writes)
-            let current_size = if let Some(ref handle) = buffered_handle {
-                handle.attributes().size
-            } else {
-                record.size
-            };
+            let current_size = buffered_handles
+                .first()
+                .map(|handle| handle.attributes().size)
+                .unwrap_or(record.size);
 
             if new_size < current_size {
                 // Shrinking - need to delete/truncate stripes
