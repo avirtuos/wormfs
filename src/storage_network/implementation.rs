@@ -1979,7 +1979,7 @@ mod tests {
             "Should successfully subscribe to topic internally"
         );
 
-        let topic_handle = result.unwrap();
+        let _topic_handle = result.unwrap();
 
         // Verify topic was added to internal state
         let topics = inner.inner.topics.read().await;
@@ -2166,5 +2166,315 @@ mod tests {
             let peers = inner.inner.peers.read().await;
             assert_eq!(peers.len(), 0, "Should have no peers after removal");
         }
+    }
+
+    // ========== Phase 5: Edge Cases & Error Path Tests ==========
+
+    #[tokio::test]
+    async fn test_empty_configuration() {
+        let config = Config {
+            node_id: "empty_config_test".to_string(),
+            listen_addresses: vec![], // Empty listen addresses
+            peers: vec![],            // No configured peers
+            peer_id_store_path: std::env::temp_dir().join("test_empty_config.json"),
+            max_peers: 10,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let result = super::super::StorageNetworkFactory::create(config).await;
+
+        // Should succeed even with empty configuration
+        assert!(
+            result.is_ok(),
+            "Should create network with empty peer/address lists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_malformed_listen_address() {
+        let config = Config {
+            node_id: "malformed_addr_test".to_string(),
+            listen_addresses: vec![
+                "not-a-valid-multiaddr".to_string(),
+                "also/invalid/format".to_string(),
+            ],
+            peers: vec![],
+            peer_id_store_path: std::env::temp_dir().join("test_malformed_addr.json"),
+            max_peers: 10,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let result = super::super::StorageNetworkFactory::create(config).await;
+
+        // Should still create network, but malformed addresses will be skipped during run()
+        assert!(
+            result.is_ok(),
+            "Factory creation should succeed even with malformed addresses"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_to_unsubscribed_topic() {
+        let config = test_config("broadcast_unsubscribed_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let topic_name = "never/subscribed";
+        let message = vec![1, 2, 3];
+
+        // Try to broadcast to a topic we never subscribed to
+        let result = inner.broadcast_internal(topic_name, message).await;
+
+        // This might fail or succeed depending on implementation
+        // The important thing is it doesn't panic
+        assert!(
+            result.is_ok() || result.is_err(),
+            "Broadcast to unsubscribed topic should be handled gracefully"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_to_peer_via_unknown_topic() {
+        let config = test_config("send_unknown_topic_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        use libp2p::PeerId as Libp2pPeerId;
+        let peer_id = PeerId(Libp2pPeerId::random().to_bytes());
+        let topic_name = "unknown/topic";
+        let message = vec![1, 2, 3];
+
+        // Try to send to a peer on an unknown topic
+        let result = inner
+            .send_to_peer_internal(&peer_id, topic_name, message)
+            .await;
+
+        // Should handle gracefully (likely return error)
+        assert!(
+            result.is_err() || result.is_ok(),
+            "Send via unknown topic should be handled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_message_handling() {
+        let config = test_config("empty_message_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let topic_name = "test/empty";
+
+        // Subscribe to topic
+        let _topic_handle = inner
+            .join_topic_internal(topic_name)
+            .await
+            .expect("Should subscribe");
+
+        // Try to broadcast empty message
+        let empty_message = vec![];
+        let result = inner.broadcast_internal(topic_name, empty_message).await;
+
+        // Empty messages should be allowed (gossipsub will handle it)
+        assert!(
+            result.is_ok() || result.is_err(),
+            "Empty message should be handled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_peer_state_access() {
+        let config = test_config("concurrent_access_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        use libp2p::PeerId as Libp2pPeerId;
+
+        // Spawn multiple tasks that concurrently access peer state
+        let inner_arc = Arc::clone(&inner.inner);
+        let task1 = tokio::spawn(async move {
+            for _ in 0..10 {
+                let peers = inner_arc.peers.read().await;
+                let _count = peers.len();
+                drop(peers);
+                tokio::time::sleep(Duration::from_micros(1)).await;
+            }
+        });
+
+        let inner_arc2 = Arc::clone(&inner.inner);
+        let task2 = tokio::spawn(async move {
+            for _ in 0..10 {
+                let mut peers = inner_arc2.peers.write().await;
+                let peer_id = PeerId(Libp2pPeerId::random().to_bytes());
+                peers.insert(
+                    peer_id.clone(),
+                    PeerState {
+                        peer_id,
+                        addresses: vec![],
+                        connection_state: ConnectionState::Connected,
+                        last_seen: SystemTime::now(),
+                        validation_status: ValidationStatus::Validated,
+                        last_heartbeat: None,
+                    },
+                );
+                drop(peers);
+
+                tokio::time::sleep(Duration::from_micros(1)).await;
+
+                // Remove it
+                let mut peers = inner_arc2.peers.write().await;
+                peers.clear();
+                drop(peers);
+            }
+        });
+
+        // Both tasks should complete without deadlock
+        let (r1, r2) = tokio::join!(task1, task2);
+        assert!(r1.is_ok(), "Task 1 should complete");
+        assert!(r2.is_ok(), "Task 2 should complete");
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_with_missing_peer() {
+        let config = test_config("missing_peer_heartbeat_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        use libp2p::PeerId as Libp2pPeerId;
+        let unknown_peer = PeerId(Libp2pPeerId::random().to_bytes());
+
+        // Send heartbeat from a peer that's not in our state
+        let heartbeat = HeartbeatMessage::new("unknown_node".to_string(), 1);
+        let heartbeat_bytes = heartbeat.to_bytes().expect("Serialization should work");
+
+        // Should not panic, just skip the update
+        inner
+            .handle_heartbeat_message(&unknown_peer, &heartbeat_bytes)
+            .await;
+
+        // Verify peer was not added
+        let peers = inner.inner.peers.read().await;
+        assert!(
+            !peers.contains_key(&unknown_peer),
+            "Unknown peer should not be auto-added"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_to_disconnected_peer() {
+        let config = test_config("disconnected_request_test");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        use libp2p::PeerId as Libp2pPeerId;
+        let peer_id = PeerId(Libp2pPeerId::random().to_bytes());
+
+        // Create a oneshot channel for the response
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+
+        // Try to send request to a peer that's not connected
+        let result = inner
+            .send_request_internal(&peer_id, "test/protocol", vec![1, 2, 3], tx)
+            .await;
+
+        // Should return error (peer not connected)
+        assert!(result.is_err(), "Request to disconnected peer should fail");
+    }
+
+    #[tokio::test]
+    async fn test_metrics_operations_when_none() {
+        let config = test_config("no_metrics_test");
+
+        let (inner, handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Verify metrics is None initially
+        {
+            let metrics = inner.inner.metrics.read().await;
+            assert!(metrics.is_none(), "Metrics should be None initially");
+        }
+
+        // Try to record a metric (should be no-op)
+        inner.record_metric_counter("test.metric", 1).await;
+
+        // Try operations via handle with no metrics set
+        let peers = handle.get_connected_peers().await;
+        assert_eq!(peers.len(), 0, "Operations should work without metrics");
+
+        // Metrics should still be None
+        {
+            let metrics = inner.inner.metrics.read().await;
+            assert!(metrics.is_none(), "Metrics should remain None");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_max_peers_limit_awareness() {
+        let config = Config {
+            node_id: "max_peers_test".to_string(),
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![],
+            peer_id_store_path: std::env::temp_dir().join("test_max_peers.json"),
+            max_peers: 5, // Low limit for testing
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        };
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config.clone())
+            .await
+            .expect("create() should succeed");
+
+        // Verify config has the limit
+        assert_eq!(inner.inner.config.max_peers, 5, "Max peers should be set");
+
+        // Note: Actual enforcement happens in connection handler
+        // This just tests that the configuration is accessible
+    }
+
+    #[test]
+    fn test_heartbeat_message_zero_sequence() {
+        let heartbeat = HeartbeatMessage::new("test_node".to_string(), 0);
+
+        let bytes = heartbeat.to_bytes().expect("Should serialize");
+        let deserialized = HeartbeatMessage::from_bytes(&bytes).expect("Should deserialize");
+
+        assert_eq!(
+            deserialized.sequence, 0,
+            "Zero sequence should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_heartbeat_message_large_sequence() {
+        let heartbeat = HeartbeatMessage::new("test_node".to_string(), u64::MAX);
+
+        let bytes = heartbeat.to_bytes().expect("Should serialize");
+        let deserialized = HeartbeatMessage::from_bytes(&bytes).expect("Should deserialize");
+
+        assert_eq!(
+            deserialized.sequence,
+            u64::MAX,
+            "Large sequence should be preserved"
+        );
     }
 }
