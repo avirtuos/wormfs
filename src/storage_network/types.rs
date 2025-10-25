@@ -181,6 +181,12 @@ pub enum NetworkCommand {
         /// Channel to send response back
         response: tokio::sync::oneshot::Sender<Result<(), Error>>,
     },
+
+    /// Shutdown the network event loop gracefully
+    Shutdown {
+        /// Channel to send response back when shutdown is complete
+        response: tokio::sync::oneshot::Sender<Result<(), Error>>,
+    },
 }
 
 /// Errors that can occur during network operations.

@@ -335,6 +335,36 @@ impl StorageNetworkHandle {
         // Access the inner's validate_peer_id method
         self.inner.validate_peer_id(ip, peer_id).await
     }
+
+    /// Gracefully shutdown the network event loop.
+    ///
+    /// This method initiates a graceful shutdown of the network by:
+    /// - Disconnecting from all active peers
+    /// - Unsubscribing from all topics
+    /// - Canceling pending requests
+    /// - Stopping the event loop
+    ///
+    /// The method blocks until the shutdown is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The event loop is not running
+    /// - The shutdown command cannot be delivered
+    /// - The event loop fails during shutdown
+    pub async fn shutdown(&self) -> Result<(), Error> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        self.event_tx
+            .send(NetworkCommand::Shutdown {
+                response: response_tx,
+            })
+            .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+
+        response_rx
+            .await
+            .map_err(|_| Error::EventLoopFailed("Event loop dropped response".to_string()))?
+    }
 }
 
 /// Implementation of the StorageNetwork trait for StorageNetworkHandle.
