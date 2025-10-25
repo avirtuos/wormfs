@@ -388,6 +388,22 @@ impl super::StorageNetworkInner {
                         last_heartbeat: None,
                     },
                 );
+
+                // Record peer connection metrics
+                let connected_count = peers
+                    .values()
+                    .filter(|p| p.connection_state == ConnectionState::Connected)
+                    .count();
+                drop(peers);
+
+                self.record_metric_counter("storage_network.peer.connected", 1)
+                    .await;
+                self.record_metric_gauge(
+                    "storage_network.peer.count",
+                    connected_count as f64,
+                    crate::metric_service::UnitType::Count,
+                )
+                .await;
             }
 
             SwarmEvent::ConnectionClosed {
@@ -408,6 +424,22 @@ impl super::StorageNetworkInner {
                     if let Some(peer_state) = peers.get_mut(&internal_peer_id) {
                         peer_state.connection_state = ConnectionState::Disconnected;
                     }
+
+                    // Record peer disconnection metrics
+                    let connected_count = peers
+                        .values()
+                        .filter(|p| p.connection_state == ConnectionState::Connected)
+                        .count();
+                    drop(peers);
+
+                    self.record_metric_counter("storage_network.peer.disconnected", 1)
+                        .await;
+                    self.record_metric_gauge(
+                        "storage_network.peer.count",
+                        connected_count as f64,
+                        crate::metric_service::UnitType::Count,
+                    )
+                    .await;
                 }
             }
 
@@ -440,6 +472,10 @@ impl super::StorageNetworkInner {
                 } else {
                     warn!("Outgoing connection error: {}", error);
                 }
+
+                // Record connection error metric
+                self.record_metric_counter("storage_network.peer.connection_errors", 1)
+                    .await;
             }
 
             SwarmEvent::IncomingConnectionError {
@@ -492,11 +528,21 @@ impl super::StorageNetworkInner {
             } => {
                 let source = libp2p_peer_id_to_internal(&propagation_source);
                 let topic = message.topic.as_str();
+                let message_size = message.data.len() as u64;
 
                 debug!(
                     "Received gossipsub message from {:?} on topic {} (id: {})",
                     source, topic, message_id
                 );
+
+                // Record gossipsub message received metrics
+                self.record_metric_counter("storage_network.gossipsub.messages_received", 1)
+                    .await;
+                self.record_metric_counter(
+                    "storage_network.gossipsub.bytes_received",
+                    message_size,
+                )
+                .await;
 
                 // Handle heartbeat messages specially
                 if topic == HEARTBEAT_TOPIC {
@@ -527,6 +573,10 @@ impl super::StorageNetworkInner {
             gossipsub::Event::Subscribed { peer_id, topic } => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&peer_id);
                 debug!("Peer {:?} subscribed to topic {}", internal_peer_id, topic);
+
+                // Record topic subscription metric
+                self.record_metric_counter("storage_network.gossipsub.subscriptions", 1)
+                    .await;
             }
 
             gossipsub::Event::Unsubscribed { peer_id, topic } => {
@@ -535,6 +585,10 @@ impl super::StorageNetworkInner {
                     "Peer {:?} unsubscribed from topic {}",
                     internal_peer_id, topic
                 );
+
+                // Record topic unsubscription metric
+                self.record_metric_counter("storage_network.gossipsub.unsubscriptions", 1)
+                    .await;
             }
 
             gossipsub::Event::GossipsubNotSupported { peer_id } => {
@@ -585,7 +639,16 @@ impl super::StorageNetworkInner {
         match event.result {
             Ok(rtt) => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&event.peer);
-                debug!("Ping to peer {:?}: {}ms", internal_peer_id, rtt.as_millis());
+                let rtt_ms = rtt.as_millis() as f64;
+                debug!("Ping to peer {:?}: {}ms", internal_peer_id, rtt_ms);
+
+                // Record ping RTT metric
+                self.record_metric_histogram(
+                    "storage_network.ping.rtt_ms",
+                    rtt_ms,
+                    crate::metric_service::UnitType::Milliseconds,
+                )
+                .await;
 
                 // Update last_seen timestamp
                 let mut peers = self.inner.peers.write().await;
@@ -596,6 +659,10 @@ impl super::StorageNetworkInner {
             Err(failure) => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&event.peer);
                 warn!("Ping failed to peer {:?}: {:?}", internal_peer_id, failure);
+
+                // Record ping failure metric
+                self.record_metric_counter("storage_network.ping.failures", 1)
+                    .await;
             }
         }
     }
@@ -648,6 +715,11 @@ impl super::StorageNetworkInner {
                     warn!("Failed to broadcast heartbeat: {}", e);
                 } else {
                     debug!("Broadcasted heartbeat (seq: {})", sequence);
+                    drop(swarm);
+
+                    // Record heartbeat sent metric
+                    self.record_metric_counter("storage_network.heartbeat.sent", 1)
+                        .await;
                 }
             }
             Err(e) => {
@@ -883,10 +955,10 @@ impl super::StorageNetworkInner {
 
     /// Internal implementation of broadcasting a message.
     async fn broadcast_internal(&self, topic_name: &str, message: Vec<u8>) -> Result<(), Error> {
+        let message_size = message.len();
         debug!(
             "Broadcasting {} bytes on topic '{}'",
-            message.len(),
-            topic_name
+            message_size, topic_name
         );
 
         let topic = gossipsub::IdentTopic::new(topic_name);
@@ -900,6 +972,15 @@ impl super::StorageNetworkInner {
                 topic: topic_name.to_string(),
                 reason: e.to_string(),
             })?;
+
+        // Drop the swarm lock before async metrics calls
+        drop(swarm);
+
+        // Record gossipsub message sent metrics
+        self.record_metric_counter("storage_network.gossipsub.messages_sent", 1)
+            .await;
+        self.record_metric_counter("storage_network.gossipsub.bytes_sent", message_size as u64)
+            .await;
 
         Ok(())
     }
@@ -1025,6 +1106,32 @@ impl super::StorageNetworkInner {
         if let Some(metrics) = self.inner.metrics.read().await.as_ref() {
             use crate::metric_service::{MetricService, UnitType};
             let _ = metrics.publish_counter(name, value, UnitType::Operations);
+        }
+    }
+
+    /// Helper method to record a gauge metric if metrics service is available.
+    async fn record_metric_gauge(
+        &self,
+        name: &str,
+        value: f64,
+        unit: crate::metric_service::UnitType,
+    ) {
+        if let Some(metrics) = self.inner.metrics.read().await.as_ref() {
+            use crate::metric_service::MetricService;
+            let _ = metrics.publish_gauge(name, value, unit);
+        }
+    }
+
+    /// Helper method to record a histogram metric if metrics service is available.
+    async fn record_metric_histogram(
+        &self,
+        name: &str,
+        value: f64,
+        unit: crate::metric_service::UnitType,
+    ) {
+        if let Some(metrics) = self.inner.metrics.read().await.as_ref() {
+            use crate::metric_service::MetricService;
+            let _ = metrics.publish_histogram(name, value, unit);
         }
     }
 
