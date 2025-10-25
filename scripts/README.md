@@ -77,6 +77,71 @@ Runs comprehensive quality checks including build, tests, formatting, and lintin
 
 ---
 
+### 🧪 `run_integration_tests.sh` - FUSE Integration Tests
+
+Runs complete end-to-end FUSE integration tests that mount actual filesystems and verify all Phase 1 functionality.
+
+**Usage:**
+```bash
+./scripts/run_integration_tests.sh [OPTIONS]
+```
+
+**Options:**
+- `-v, --verbose` - Enable verbose test output
+- `-b, --build-only` - Build binary but don't run tests
+- `-t, --test NAME` - Run only the specified test (e.g., `test_basic_operations`)
+- `--keep-artifacts` - Don't clean up temp directories (useful for debugging)
+- `-h, --help` - Show help message
+
+**What it tests:**
+1. ✅ Basic file operations (create, read, write, delete)
+2. ✅ Nested directory structures
+3. ✅ File size variants (empty, KB, MB ranges)
+4. ✅ Erasure coding verification
+5. ✅ Performance with large files (100MB)
+6. ✅ Stress testing (1000 files)
+7. ✅ Data integrity with MD5 checksums
+
+**Example:**
+```bash
+# Run all integration tests
+./scripts/run_integration_tests.sh
+
+# Run with verbose output
+./scripts/run_integration_tests.sh --verbose
+
+# Run specific test
+./scripts/run_integration_tests.sh -t test_basic_operations
+
+# Build only (no tests)
+./scripts/run_integration_tests.sh --build-only
+
+# Keep artifacts for debugging
+./scripts/run_integration_tests.sh --keep-artifacts
+```
+
+**Features:**
+- 🧹 Comprehensive cleanup of mounts and processes
+- 🔒 Sequential test execution (no mount conflicts)
+- 📊 Performance timing and reporting
+- 🛡️ Robust error handling with automatic cleanup
+- 🔍 Detects and cleans orphaned FUSE mounts
+
+**Requirements:**
+- FUSE3 (Linux) or macFUSE (macOS)
+- Permission to mount filesystems
+- No other wormfs processes running
+
+**When to run:**
+- Before major releases
+- After FUSE layer changes
+- When debugging user-reported FUSE issues
+- As part of pre-release QA
+
+**Note:** These tests take 20-30 seconds and require actual FUSE mounts. Unit tests in `cargo test` are faster for regular development.
+
+---
+
 ## Installation & Setup
 
 ### Linux (Ubuntu/Debian)
@@ -115,6 +180,15 @@ brew install macfuse
 ```bash
 # Run validation to ensure code quality
 ./scripts/validate.sh
+```
+
+### Integration Testing
+```bash
+# Run FUSE integration tests (pre-release QA)
+./scripts/run_integration_tests.sh
+
+# Run specific integration test
+./scripts/run_integration_tests.sh -t test_basic_operations
 ```
 
 ### Manual Testing

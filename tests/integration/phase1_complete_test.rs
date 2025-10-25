@@ -10,6 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
+use walkdir::WalkDir;
 
 /// Helper struct to manage a mounted WormFS instance for testing
 struct WormFSTestMount {
@@ -263,11 +264,13 @@ fn test_erasure_coding_verification() {
     // Wait a bit to ensure all chunks are flushed
     thread::sleep(Duration::from_secs(1));
 
-    // Count the number of chunk files created
-    let chunk_count = fs::read_dir(&chunks_dir)
-        .expect("Failed to read chunks directory")
+    // Count the number of chunk files created (recursively, since chunks are in nested directories)
+    let chunk_count = WalkDir::new(&chunks_dir)
+        .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().ok().map(|t| t.is_file()).unwrap_or(false))
+        .filter(|e| {
+            e.file_type().is_file() && e.path().extension().and_then(|s| s.to_str()) == Some("dat")
+        })
         .count();
 
     // With 2MB of data and erasure coding (2 data + 1 parity), we should have
@@ -282,24 +285,26 @@ fn test_erasure_coding_verification() {
 
     // Now corrupt one chunk by truncating it
     let mut corrupted = false;
-    for entry in fs::read_dir(&chunks_dir).expect("Failed to read chunks dir") {
-        if let Ok(entry) = entry {
-            if entry.file_type().ok().map(|t| t.is_file()).unwrap_or(false) {
-                let chunk_path = entry.path();
+    for entry in WalkDir::new(&chunks_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file() && e.path().extension().and_then(|s| s.to_str()) == Some("dat")
+        })
+    {
+        let chunk_path = entry.path();
 
-                // Truncate the first chunk we find
-                if let Ok(mut file) = fs::OpenOptions::new()
-                    .write(true)
-                    .truncate(true)
-                    .open(&chunk_path)
-                {
-                    // Write garbage
-                    let _ = file.write_all(b"CORRUPTED");
-                    corrupted = true;
-                    println!("✓ Corrupted chunk: {:?}", chunk_path.file_name());
-                    break;
-                }
-            }
+        // Truncate the first chunk we find
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&chunk_path)
+        {
+            // Write garbage
+            let _ = file.write_all(b"CORRUPTED");
+            corrupted = true;
+            println!("✓ Corrupted chunk: {:?}", chunk_path.file_name());
+            break;
         }
     }
 
