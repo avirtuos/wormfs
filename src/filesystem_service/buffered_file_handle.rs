@@ -810,14 +810,20 @@ impl BufferedFileHandle {
     /// Data read from file (may be less than requested if EOF reached).
     pub async fn read(&self, offset: u64, size: u32) -> Result<Vec<u8>, Error> {
         let mut result = Vec::with_capacity(size as usize);
-        let config = {
+        let (config, file_size) = {
             let inner = self.inner.lock().expect(
                 "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
             );
-            inner.config.clone()
+            (inner.config.clone(), inner.attributes.size)
         };
 
-        let end_offset = offset.saturating_add(size as u64);
+        // Return empty if reading past EOF
+        if offset >= file_size {
+            return Ok(Vec::new());
+        }
+
+        // Cap read to not exceed file size (POSIX semantics: read() returns available bytes, not padding beyond EOF)
+        let end_offset = offset.saturating_add(size as u64).min(file_size);
 
         // Calculate stripe range
         let start_stripe = (offset / config.max_stripe_size as u64) as u32;
