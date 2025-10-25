@@ -123,10 +123,10 @@ jobs:
           # Build test command
           if [ -n "${{ github.event.inputs.specific_test }}" ]; then
             echo "Running specific test: ${{ github.event.inputs.specific_test }}"
-            TEST_CMD="cargo test --test integration ${{ github.event.inputs.specific_test }} --exact -- $TEST_FLAGS"
+            TEST_CMD="cargo test --test fuse_integration_test ${{ github.event.inputs.specific_test }} --exact -- $TEST_FLAGS"
           else
-            echo "Running all integration tests"
-            TEST_CMD="cargo test --test integration -- $TEST_FLAGS"
+            echo "Running all FUSE integration tests"
+            TEST_CMD="cargo test --test fuse_integration_test -- $TEST_FLAGS"
           fi
 
           echo "Test command: $TEST_CMD"
