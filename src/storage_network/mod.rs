@@ -597,3 +597,143 @@ pub trait StorageNetwork: Send + Sync + Clone {
         peer_id: PeerId,
     ) -> Result<ValidationResult, Error>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metric_service::MetricService;
+    use std::time::Duration;
+
+    /// Helper to create a test config
+    fn test_config(node_id: &str) -> Config {
+        Config {
+            node_id: node_id.to_string(),
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            peers: vec![],
+            peer_id_store_path: std::env::temp_dir().join(format!("test_{}.json", node_id)),
+            max_peers: 10,
+            max_connections_per_peer: 3,
+            connection_timeout: Duration::from_secs(30),
+            idle_connection_timeout: Duration::from_secs(600),
+            keep_alive_interval: Duration::from_secs(30),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_to_peer_command_queuing() {
+        let config = test_config("send_to_peer_test");
+        let (_inner, handle) = crate::storage_network::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        let peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
+        let result = handle
+            .send_to_peer(&peer_id, "test-topic", b"hello".to_vec())
+            .await;
+
+        // Should succeed at queuing the command even though event loop isn't running
+        assert!(
+            result.is_ok(),
+            "Should be able to queue send_to_peer command"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_join_topic_returns_channels() {
+        let config = test_config("join_topic_test");
+        let (_inner, handle) = crate::storage_network::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        // Join topic should timeout since event loop isn't running, but we can test the API
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), handle.join_topic("test-topic")).await;
+
+        // Should timeout waiting for event loop response
+        assert!(result.is_err(), "Should timeout without running event loop");
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_peer_command_queuing() {
+        let config = test_config("disconnect_test");
+        let (_inner, handle) = crate::storage_network::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        let peer_id = PeerId::new(vec![1, 2, 3]);
+
+        // Should timeout since event loop not running
+        let result =
+            tokio::time::timeout(Duration::from_millis(50), handle.disconnect_peer(&peer_id)).await;
+
+        assert!(result.is_err(), "Should timeout waiting for event loop");
+    }
+
+    #[tokio::test]
+    async fn test_open_stream_not_implemented() {
+        let config = test_config("open_stream_test");
+        let (_inner, handle) = crate::storage_network::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        let peer_id = PeerId::new(vec![4, 5, 6]);
+
+        // open_stream should return error indicating it's not implemented
+        let result = handle.open_stream(&peer_id, "/test/protocol").await;
+
+        assert!(result.is_err(), "open_stream should return error");
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("not yet implemented")
+                    || e.to_string().contains("not implemented"),
+                "Error should indicate not implemented: {}",
+                e
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_metrics_updates_state() {
+        let config = test_config("set_metrics_test");
+        let (_inner, handle) = crate::storage_network::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        // Create a dummy metrics service
+        let metrics = std::sync::Arc::new(
+            crate::metric_service::MetricServiceImpl::new(crate::metric_service::Config::default())
+                .expect("Should create metrics service"),
+        );
+
+        // Set metrics
+        handle.set_metrics(metrics.clone()).await;
+
+        // Verify metrics was stored (by checking internal state)
+        let stored_metrics = handle.inner.metrics.read().await;
+        assert!(stored_metrics.is_some(), "Metrics should be stored");
+    }
+
+    #[tokio::test]
+    async fn test_get_connected_peers_empty_initially() {
+        let config = test_config("get_peers_test");
+        let (_inner, handle) = crate::storage_network::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        let peers = handle.get_connected_peers().await;
+        assert_eq!(peers.len(), 0, "Should start with no peers");
+    }
+
+    #[tokio::test]
+    async fn test_get_peer_info_nonexistent_peer() {
+        let config = test_config("get_peer_info_test");
+        let (_inner, handle) = crate::storage_network::StorageNetworkFactory::create(config)
+            .await
+            .expect("Factory should create network");
+
+        let peer_id = PeerId::new(vec![9, 9, 9]);
+        let info = handle.get_peer_info(&peer_id).await;
+
+        assert!(info.is_none(), "Nonexistent peer should return None");
+    }
+}

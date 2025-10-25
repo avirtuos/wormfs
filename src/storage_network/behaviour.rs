@@ -217,3 +217,195 @@ impl Default for BehaviourConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::io::Cursor;
+    use request_response::Codec;
+
+    #[test]
+    fn test_codec_default_max_size() {
+        let codec = WormFsCodec::default();
+        assert_eq!(
+            codec.max_message_size(),
+            10 * 1024 * 1024,
+            "Default max message size should be 10MB"
+        );
+    }
+
+    #[test]
+    fn test_codec_custom_max_size() {
+        let custom_size = 5 * 1024 * 1024; // 5MB
+        let codec = WormFsCodec::new(custom_size);
+        assert_eq!(
+            codec.max_message_size(),
+            custom_size,
+            "Custom max message size should be respected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_codec_read_write_roundtrip() {
+        let mut codec = WormFsCodec::default();
+        let test_data = vec![1, 2, 3, 4, 5, 42, 255, 0];
+
+        // Write request
+        let mut write_buf = Vec::new();
+        codec
+            .write_request(
+                &StreamProtocol::new("/test"),
+                &mut write_buf,
+                test_data.clone(),
+            )
+            .await
+            .expect("Write should succeed");
+
+        // Verify format: 4 bytes length + data
+        assert_eq!(write_buf.len(), 4 + test_data.len());
+        assert_eq!(
+            u32::from_be_bytes([write_buf[0], write_buf[1], write_buf[2], write_buf[3]]),
+            test_data.len() as u32
+        );
+
+        // Read request back
+        let mut read_cursor = Cursor::new(write_buf);
+        let read_data = codec
+            .read_request(&StreamProtocol::new("/test"), &mut read_cursor)
+            .await
+            .expect("Read should succeed");
+
+        assert_eq!(read_data, test_data, "Roundtrip should preserve data");
+    }
+
+    #[tokio::test]
+    async fn test_codec_size_limit_enforcement_write() {
+        let mut codec = WormFsCodec::new(100); // 100 bytes max
+        let oversized_data = vec![0u8; 101]; // 101 bytes
+
+        let mut write_buf = Vec::new();
+        let result = codec
+            .write_request(
+                &StreamProtocol::new("/test"),
+                &mut write_buf,
+                oversized_data,
+            )
+            .await;
+
+        assert!(result.is_err(), "Should reject oversized write");
+        assert!(
+            result.unwrap_err().to_string().contains("exceeds limit"),
+            "Error should mention size limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_codec_size_limit_enforcement_read() {
+        let mut codec = WormFsCodec::new(100); // 100 bytes max
+
+        // Manually create a message that claims to be 101 bytes
+        let mut malicious_data = Vec::new();
+        malicious_data.extend_from_slice(&(101u32).to_be_bytes()); // Claim 101 bytes
+        malicious_data.extend_from_slice(&vec![0u8; 101]); // Actual data
+
+        let mut read_cursor = Cursor::new(malicious_data);
+        let result = codec
+            .read_request(&StreamProtocol::new("/test"), &mut read_cursor)
+            .await;
+
+        assert!(result.is_err(), "Should reject oversized read");
+        assert!(
+            result.unwrap_err().to_string().contains("exceeds limit"),
+            "Error should mention size limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_codec_empty_message() {
+        let mut codec = WormFsCodec::default();
+        let empty_data = vec![];
+
+        // Write empty message
+        let mut write_buf = Vec::new();
+        codec
+            .write_request(
+                &StreamProtocol::new("/test"),
+                &mut write_buf,
+                empty_data.clone(),
+            )
+            .await
+            .expect("Empty message write should succeed");
+
+        // Read it back
+        let mut read_cursor = Cursor::new(write_buf);
+        let read_data = codec
+            .read_request(&StreamProtocol::new("/test"), &mut read_cursor)
+            .await
+            .expect("Empty message read should succeed");
+
+        assert_eq!(read_data, empty_data, "Empty message should roundtrip");
+    }
+
+    #[tokio::test]
+    async fn test_codec_max_size_boundary() {
+        let max_size = 1000;
+        let mut codec = WormFsCodec::new(max_size);
+        let boundary_data = vec![0u8; max_size]; // Exactly at limit
+
+        // Write at boundary
+        let mut write_buf = Vec::new();
+        codec
+            .write_request(
+                &StreamProtocol::new("/test"),
+                &mut write_buf,
+                boundary_data.clone(),
+            )
+            .await
+            .expect("Write at exact limit should succeed");
+
+        // Read at boundary
+        let mut read_cursor = Cursor::new(write_buf);
+        let read_data = codec
+            .read_request(&StreamProtocol::new("/test"), &mut read_cursor)
+            .await
+            .expect("Read at exact limit should succeed");
+
+        assert_eq!(
+            read_data.len(),
+            max_size,
+            "Should handle messages at exact size limit"
+        );
+    }
+
+    #[test]
+    fn test_behaviour_config_default() {
+        let config = BehaviourConfig::default();
+
+        // Verify request-response timeout
+        assert_eq!(
+            config.request_timeout,
+            Duration::from_secs(5),
+            "Default request timeout should be 5 seconds"
+        );
+
+        // Verify max message size
+        assert_eq!(
+            config.max_message_size,
+            10 * 1024 * 1024,
+            "Default max message size should be 10MB"
+        );
+    }
+
+    #[test]
+    fn test_behaviour_config_gossipsub_params() {
+        let config = BehaviourConfig::default();
+
+        // Verify gossipsub config was built successfully
+        // Note: We can't easily inspect the gossipsub config directly,
+        // but we can verify it was created without panicking
+        assert!(
+            config.gossipsub.heartbeat_interval() == Duration::from_secs(1),
+            "Gossipsub heartbeat should be 1 second"
+        );
+    }
+}
