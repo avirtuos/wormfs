@@ -189,6 +189,7 @@ impl StorageNetworkHandle {
                 connected_since: Some(state.last_seen),
                 protocols: vec![], // Day 3: Track protocols
                 rtt: None,         // Day 3: Track RTT
+                last_heartbeat: state.last_heartbeat,
             })
             .collect()
     }
@@ -212,6 +213,7 @@ impl StorageNetworkHandle {
             connected_since: Some(state.last_seen),
             protocols: vec![],
             rtt: None,
+            last_heartbeat: state.last_heartbeat,
         })
     }
 

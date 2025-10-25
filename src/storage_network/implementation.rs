@@ -23,6 +23,12 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+/// Topic name for heartbeat messages
+const HEARTBEAT_TOPIC: &str = "wormfs/heartbeat/1.0.0";
+
+/// Interval between heartbeat broadcasts (seconds)
+const HEARTBEAT_INTERVAL_SECS: u64 = 5;
+
 /// Factory for creating StorageNetwork instances.
 #[cfg(feature = "libp2p")]
 impl super::StorageNetworkFactory {
@@ -140,11 +146,13 @@ impl super::StorageNetworkFactory {
             swarm: swarm_lock,
             peers,
             topics,
+            node_id: config.node_id.clone(),
             config: config.clone(),
             event_rx: RwLock::new(event_rx),
             pending_requests: RwLock::new(HashMap::new()),
             metrics: RwLock::new(None),
             peer_id_store,
+            heartbeat_sequence: RwLock::new(0),
         });
 
         // Create cloneable handle
@@ -196,6 +204,12 @@ pub struct InnerState {
 
     /// Persistent store for learned peer IDs (AutoId mode)
     pub(crate) peer_id_store: Arc<super::peer_id_store::PeerIdStore>,
+
+    /// Node ID for this node (used in heartbeat messages)
+    pub(crate) node_id: String,
+
+    /// Heartbeat sequence counter
+    pub(crate) heartbeat_sequence: RwLock<u64>,
 }
 
 /// StorageNetworkInner implementation
@@ -226,7 +240,26 @@ impl super::StorageNetworkInner {
             }
         }
 
+        // Subscribe to heartbeat topic
+        {
+            let mut swarm = self
+                .inner
+                .swarm
+                .write()
+                .expect("Failed to acquire swarm lock");
+            let topic = gossipsub::IdentTopic::new(HEARTBEAT_TOPIC);
+            if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+                warn!("Failed to subscribe to heartbeat topic: {}", e);
+            } else {
+                info!("Subscribed to heartbeat topic");
+            }
+        }
+
         info!("Event loop initialized, processing events");
+
+        // Create heartbeat interval
+        let mut heartbeat_interval =
+            tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
 
         // Main event loop
         loop {
@@ -251,6 +284,11 @@ impl super::StorageNetworkInner {
                             break;
                         }
                     }
+                }
+
+                // Broadcast heartbeat periodically
+                _ = heartbeat_interval.tick() => {
+                    self.broadcast_heartbeat().await;
                 }
             }
         }
@@ -347,6 +385,7 @@ impl super::StorageNetworkInner {
                         connection_state: ConnectionState::Connected,
                         last_seen: SystemTime::now(),
                         validation_status,
+                        last_heartbeat: None,
                     },
                 );
             }
@@ -463,6 +502,11 @@ impl super::StorageNetworkInner {
                     source, topic, message_id
                 );
 
+                // Handle heartbeat messages specially
+                if topic == HEARTBEAT_TOPIC {
+                    self.handle_heartbeat_message(&source, &message.data).await;
+                }
+
                 // Route message to topic subscribers
                 let topics = self
                     .inner
@@ -568,6 +612,74 @@ impl super::StorageNetworkInner {
             Err(failure) => {
                 let internal_peer_id = libp2p_peer_id_to_internal(&event.peer);
                 warn!("Ping failed to peer {:?}: {:?}", internal_peer_id, failure);
+            }
+        }
+    }
+
+    /// Handle a received heartbeat message.
+    async fn handle_heartbeat_message(&self, source: &PeerId, data: &[u8]) {
+        match HeartbeatMessage::from_bytes(data) {
+            Ok(heartbeat) => {
+                debug!(
+                    "Received heartbeat from node '{}' via peer {:?} (seq: {})",
+                    heartbeat.node_id, source, heartbeat.sequence
+                );
+
+                // Update peer's last_heartbeat time
+                let mut peers = self
+                    .inner
+                    .peers
+                    .write()
+                    .expect("Failed to acquire peers lock");
+
+                if let Some(peer_state) = peers.get_mut(source) {
+                    peer_state.last_heartbeat = Some(SystemTime::now());
+                    peer_state.last_seen = SystemTime::now();
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to deserialize heartbeat from peer {:?}: {}",
+                    source, e
+                );
+            }
+        }
+    }
+
+    /// Broadcast a heartbeat message to all connected peers.
+    async fn broadcast_heartbeat(&self) {
+        // Increment sequence number
+        let sequence = {
+            let mut seq = self
+                .inner
+                .heartbeat_sequence
+                .write()
+                .expect("Failed to acquire sequence lock");
+            *seq += 1;
+            *seq
+        };
+
+        // Create heartbeat message
+        let heartbeat = HeartbeatMessage::new(self.inner.node_id.clone(), sequence);
+
+        match heartbeat.to_bytes() {
+            Ok(bytes) => {
+                // Publish to gossipsub
+                let mut swarm = self
+                    .inner
+                    .swarm
+                    .write()
+                    .expect("Failed to acquire swarm lock");
+
+                let topic = gossipsub::IdentTopic::new(HEARTBEAT_TOPIC);
+                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, bytes) {
+                    warn!("Failed to broadcast heartbeat: {}", e);
+                } else {
+                    debug!("Broadcasted heartbeat (seq: {})", sequence);
+                }
+            }
+            Err(e) => {
+                error!("Failed to serialize heartbeat: {}", e);
             }
         }
     }
@@ -1085,18 +1197,24 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[tokio::test]
-    async fn test_factory_creates_network() {
-        let config = Config {
+    /// Helper to create a test Config with the given store path suffix
+    fn test_config(store_suffix: &str) -> Config {
+        Config {
+            node_id: format!("test-node-{}", store_suffix),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![],
-            peer_id_store_path: std::env::temp_dir().join("test_peer_ids.json"),
+            peer_id_store_path: std::env::temp_dir().join(format!("test_{}.json", store_suffix)),
             max_peers: 100,
             max_connections_per_peer: 3,
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn test_factory_creates_network() {
+        let config = test_config("factory");
 
         let result = super::super::StorageNetworkFactory::create(config).await;
         assert!(result.is_ok(), "Factory should create network successfully");
@@ -1118,6 +1236,7 @@ mod tests {
         // This test verifies that join_topic sends the correct command
         // Full end-to-end testing with event loop will be in Day 4 integration tests
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![],
             peer_id_store_path: std::env::temp_dir().join("test_peer_ids_cmd.json"),
@@ -1155,6 +1274,7 @@ mod tests {
     #[tokio::test]
     async fn test_peer_state_tracking() {
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![],
             peer_id_store_path: std::env::temp_dir().join("test_peer_ids_state.json"),
@@ -1184,6 +1304,7 @@ mod tests {
         // Test that send_request properly queues request command
         // even when peer is not connected (error will be returned)
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![],
             peer_id_store_path: std::env::temp_dir().join("test_request_no_peer.json"),
@@ -1221,6 +1342,7 @@ mod tests {
     async fn test_request_response_command_queuing() {
         // Test that send_request command can be queued
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![],
             peer_id_store_path: std::env::temp_dir().join("test_request_queue.json"),
@@ -1257,6 +1379,7 @@ mod tests {
     async fn test_metrics_are_optional() {
         // Test that metrics can be None and operations still work
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![],
             peer_id_store_path: std::env::temp_dir().join("test_metrics_optional.json"),
@@ -1304,6 +1427,7 @@ mod tests {
         let peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
 
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![super::super::types::PeerConfig {
                 ip_address: ip,
@@ -1343,6 +1467,7 @@ mod tests {
         let actual_peer_id = PeerId::new(vec![6, 7, 8, 9, 10]);
 
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![super::super::types::PeerConfig {
                 ip_address: ip,
@@ -1386,6 +1511,7 @@ mod tests {
         let _ = std::fs::remove_file(&temp_store); // Clean up from previous test
 
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![super::super::types::PeerConfig {
                 ip_address: ip,
@@ -1432,6 +1558,7 @@ mod tests {
         let _ = std::fs::remove_file(&temp_store);
 
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![super::super::types::PeerConfig {
                 ip_address: ip,
@@ -1481,6 +1608,7 @@ mod tests {
         let _ = std::fs::remove_file(&temp_store);
 
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![super::super::types::PeerConfig {
                 ip_address: ip,
@@ -1529,6 +1657,7 @@ mod tests {
         let peer_id = PeerId::new(vec![1, 2, 3, 4, 5]);
 
         let config = Config {
+            node_id: "test-node".to_string(),
             listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             peers: vec![super::super::types::PeerConfig {
                 ip_address: configured_ip,
