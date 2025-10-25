@@ -1,5 +1,6 @@
 //! Common types for the StorageNetwork component.
 
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -46,6 +47,9 @@ pub enum PeerIdConfig {
 /// Network configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Node ID for this node (used in heartbeat messages and identification)
+    pub node_id: String,
+
     /// Listen addresses for libp2p
     pub listen_addresses: Vec<String>,
 
@@ -88,6 +92,9 @@ pub struct PeerState {
 
     /// Validation status for this peer
     pub validation_status: ValidationStatus,
+
+    /// Last time we received a heartbeat from this peer
+    pub last_heartbeat: Option<SystemTime>,
 }
 
 /// Peer validation status.
@@ -252,6 +259,9 @@ pub struct PeerInfo {
 
     /// Round-trip time to peer (if measured)
     pub rtt: Option<Duration>,
+
+    /// Last time we received a heartbeat from this peer
+    pub last_heartbeat: Option<SystemTime>,
 }
 
 /// Peer connection state.
@@ -305,4 +315,48 @@ pub struct TopicMessage {
 
     /// Timestamp when message was received
     pub timestamp: SystemTime,
+}
+
+/// Heartbeat message exchanged between peers.
+///
+/// Heartbeats are broadcast periodically on the heartbeat topic to indicate
+/// peer liveness and allow other nodes to track connection health.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatMessage {
+    /// Node ID of the sender
+    pub node_id: String,
+
+    /// Timestamp when the heartbeat was sent (milliseconds since Unix epoch)
+    pub timestamp_ms: u64,
+
+    /// Sequence number for this heartbeat (incremented on each send)
+    pub sequence: u64,
+}
+
+impl HeartbeatMessage {
+    /// Create a new heartbeat message.
+    pub fn new(node_id: String, sequence: u64) -> Self {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        Self {
+            node_id,
+            timestamp_ms,
+            sequence,
+        }
+    }
+
+    /// Serialize the heartbeat message to bytes for transmission.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        bincode::serialize(self)
+            .map_err(|e| Error::SendFailed(format!("Failed to serialize heartbeat: {}", e)))
+    }
+
+    /// Deserialize a heartbeat message from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        bincode::deserialize(bytes)
+            .map_err(|e| Error::SendFailed(format!("Failed to deserialize heartbeat: {}", e)))
+    }
 }
