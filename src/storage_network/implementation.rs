@@ -290,7 +290,13 @@ impl super::StorageNetworkInner {
                     rx.recv().await
                 } => {
                     match command {
-                        Some(cmd) => self.handle_network_command(cmd).await,
+                        Some(cmd) => {
+                            let should_continue = self.handle_network_command(cmd).await;
+                            if !should_continue {
+                                info!("Shutdown command received, exiting event loop");
+                                break;
+                            }
+                        }
                         None => {
                             info!("Command channel closed, shutting down event loop");
                             break;
@@ -875,19 +881,23 @@ impl super::StorageNetworkInner {
     }
 
     /// Handle a network command from the command channel.
-    async fn handle_network_command(&self, command: NetworkCommand) {
+    ///
+    /// Returns `true` if the event loop should continue, `false` if shutdown was requested.
+    async fn handle_network_command(&self, command: NetworkCommand) -> bool {
         match command {
             NetworkCommand::JoinTopic { name, response } => {
                 let result = self.join_topic_internal(&name).await;
                 if response.send(result).is_err() {
                     error!("Failed to send JoinTopic response");
                 }
+                true // Continue event loop
             }
 
             NetworkCommand::Broadcast { topic, message } => {
                 if let Err(e) = self.broadcast_internal(&topic, message).await {
                     error!("Broadcast failed on topic '{}': {}", topic, e);
                 }
+                true // Continue event loop
             }
 
             NetworkCommand::SendToPeer {
@@ -901,6 +911,7 @@ impl super::StorageNetworkInner {
                         peer_id, topic, e
                     );
                 }
+                true // Continue event loop
             }
 
             NetworkCommand::OpenStream {
@@ -915,6 +926,7 @@ impl super::StorageNetworkInner {
                 if response.send(result).is_err() {
                     error!("Failed to send OpenStream response");
                 }
+                true // Continue event loop
             }
 
             NetworkCommand::SendRequest {
@@ -929,6 +941,7 @@ impl super::StorageNetworkInner {
                 {
                     error!("SendRequest failed to {:?}: {}", peer_id, e);
                 }
+                true // Continue event loop
             }
 
             NetworkCommand::DisconnectPeer { peer_id, response } => {
@@ -936,6 +949,16 @@ impl super::StorageNetworkInner {
                 if response.send(result).is_err() {
                     error!("Failed to send DisconnectPeer response");
                 }
+                true // Continue event loop
+            }
+
+            NetworkCommand::Shutdown { response } => {
+                info!("Received shutdown command, initiating graceful shutdown");
+                let result = self.shutdown_internal().await;
+                if response.send(result).is_err() {
+                    error!("Failed to send Shutdown response");
+                }
+                false // Exit event loop
             }
         }
     }
@@ -1121,6 +1144,81 @@ impl super::StorageNetworkInner {
         }
 
         info!("Successfully disconnected from peer {:?}", peer_id);
+        Ok(())
+    }
+
+    /// Internal implementation of graceful shutdown.
+    ///
+    /// This performs cleanup operations before the event loop exits:
+    /// - Disconnects from all active peers
+    /// - Unsubscribes from all topics
+    /// - Cancels all pending requests
+    async fn shutdown_internal(&self) -> Result<(), Error> {
+        info!("Starting graceful shutdown");
+
+        // 1. Disconnect from all peers
+        {
+            let peer_ids: Vec<PeerId> = {
+                let peers = self.inner.peers.read().await;
+                peers.keys().cloned().collect()
+            };
+
+            info!("Disconnecting from {} peer(s)", peer_ids.len());
+            for peer_id in peer_ids {
+                if let Err(e) = self.disconnect_peer_internal(&peer_id).await {
+                    warn!(
+                        "Failed to disconnect from peer {:?} during shutdown: {}",
+                        peer_id, e
+                    );
+                }
+            }
+        }
+
+        // 2. Unsubscribe from all topics
+        {
+            let topics: Vec<String> = {
+                let topics_map = self.inner.topics.read().await;
+                topics_map.keys().cloned().collect()
+            };
+
+            info!("Unsubscribing from {} topic(s)", topics.len());
+            let mut swarm = self.inner.swarm.write().await;
+            for topic_name in topics {
+                let topic = gossipsub::IdentTopic::new(&topic_name);
+                if let Err(e) = swarm.behaviour_mut().gossipsub.unsubscribe(&topic) {
+                    warn!(
+                        "Failed to unsubscribe from topic '{}' during shutdown: {}",
+                        topic_name, e
+                    );
+                } else {
+                    debug!("Unsubscribed from topic '{}'", topic_name);
+                }
+            }
+            drop(swarm);
+
+            // Clear topics map
+            let mut topics_map = self.inner.topics.write().await;
+            topics_map.clear();
+        }
+
+        // 3. Cancel all pending requests
+        {
+            let pending_count = {
+                let mut pending = self.inner.pending_requests.write().await;
+                let count = pending.len();
+                pending.clear();
+                count
+            };
+
+            if pending_count > 0 {
+                warn!(
+                    "Cancelled {} pending request(s) during shutdown",
+                    pending_count
+                );
+            }
+        }
+
+        info!("Graceful shutdown complete");
         Ok(())
     }
 
@@ -2881,5 +2979,87 @@ mod tests {
         // Verify prefix and data
         assert_eq!(&response[0..6], b"ECHO: ", "Should have prefix");
         assert_eq!(&response[6..], &request[..], "Should preserve binary data");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_command() {
+        // Test that shutdown command can be sent
+        let config = test_config("shutdown_cmd");
+
+        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Send shutdown command (will succeed but won't actually shutdown event loop since it's not running)
+        // In production, this would initiate graceful shutdown
+        let result = tokio::time::timeout(Duration::from_millis(100), handle.shutdown()).await;
+
+        // Should succeed in sending the command, but timeout since no event loop is processing it
+        assert!(
+            result.is_err(),
+            "Shutdown command should timeout when event loop is not running"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_internal_with_no_peers() {
+        // Test shutdown with no active peers
+        let config = test_config("shutdown_empty");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Call shutdown_internal directly
+        let result = inner.shutdown_internal().await;
+
+        assert!(result.is_ok(), "Shutdown should succeed with no peers");
+    }
+
+    #[tokio::test]
+    async fn test_handle_network_command_returns_false_on_shutdown() {
+        // Test that Shutdown command causes handle_network_command to return false
+        let config = test_config("shutdown_return");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        // Create Shutdown command
+        let shutdown_cmd = NetworkCommand::Shutdown {
+            response: response_tx,
+        };
+
+        // Handle command - should return false
+        let should_continue = inner.handle_network_command(shutdown_cmd).await;
+
+        assert!(!should_continue, "Shutdown command should return false");
+
+        // Response should be sent back
+        let shutdown_result = response_rx.await.expect("Should receive response");
+        assert!(shutdown_result.is_ok(), "Shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_handle_network_command_returns_true_on_other_commands() {
+        // Test that non-Shutdown commands return true
+        let config = test_config("non_shutdown_return");
+
+        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+            .await
+            .expect("create() should succeed");
+
+        // Create Broadcast command (non-shutdown)
+        let broadcast_cmd = NetworkCommand::Broadcast {
+            topic: "test".to_string(),
+            message: vec![1, 2, 3],
+        };
+
+        // Handle command - should return true
+        let should_continue = inner.handle_network_command(broadcast_cmd).await;
+
+        assert!(should_continue, "Non-shutdown commands should return true");
     }
 }
