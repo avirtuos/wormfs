@@ -3,9 +3,7 @@
 //! This module defines the combined network behavior that integrates multiple
 //! libp2p protocols for peer-to-peer communication in WormFS.
 
-#[cfg(feature = "libp2p")]
 use libp2p::swarm::NetworkBehaviour;
-#[cfg(feature = "libp2p")]
 use libp2p::{gossipsub, identify, ping, request_response, StreamProtocol};
 use std::time::Duration;
 
@@ -19,7 +17,6 @@ use std::time::Duration;
 ///
 /// Note: mDNS is explicitly excluded per design decision to rely on
 /// configured peer lists and gossip for peer discovery.
-#[cfg(feature = "libp2p")]
 #[derive(NetworkBehaviour)]
 pub struct WormFsBehaviour {
     /// Gossipsub for topic-based pub/sub messaging.
@@ -50,14 +47,12 @@ pub struct WormFsBehaviour {
 ///
 /// Handles serialization and deserialization of messages using bincode.
 /// Implements size limits to prevent memory exhaustion from malicious peers.
-#[cfg(feature = "libp2p")]
 #[derive(Clone, Debug)]
 pub struct WormFsCodec {
     /// Maximum message size (10MB default per design doc)
     max_message_size: usize,
 }
 
-#[cfg(feature = "libp2p")]
 impl Default for WormFsCodec {
     fn default() -> Self {
         Self {
@@ -67,7 +62,6 @@ impl Default for WormFsCodec {
     }
 }
 
-#[cfg(feature = "libp2p")]
 impl WormFsCodec {
     /// Create a new codec with the specified maximum message size.
     ///
@@ -86,7 +80,6 @@ impl WormFsCodec {
 
 // Placeholder for request-response codec implementation
 // This will be fully implemented in Day 3
-#[cfg(feature = "libp2p")]
 #[async_trait::async_trait]
 impl request_response::Codec for WormFsCodec {
     type Protocol = StreamProtocol;
@@ -185,7 +178,6 @@ impl request_response::Codec for WormFsCodec {
 }
 
 /// Configuration for WormFS network behavior.
-#[cfg(feature = "libp2p")]
 pub struct BehaviourConfig {
     /// Gossipsub configuration
     pub gossipsub: gossipsub::Config,
@@ -197,7 +189,6 @@ pub struct BehaviourConfig {
     pub max_message_size: usize,
 }
 
-#[cfg(feature = "libp2p")]
 impl Default for BehaviourConfig {
     fn default() -> Self {
         use std::hash::{Hash, Hasher};

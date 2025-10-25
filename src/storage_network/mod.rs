@@ -84,7 +84,6 @@ pub use types::{
 ///
 /// This is a lightweight cloneable handle that wraps the inner network state
 /// and provides a command channel for non-blocking operations.
-#[cfg(feature = "libp2p")]
 #[derive(Clone)]
 #[allow(dead_code)] // TODO: Remove when implementation is complete
 pub struct StorageNetworkHandle {
@@ -99,13 +98,10 @@ pub struct StorageNetworkHandle {
 // - Arc<InnerState> is Send + Sync (shared ownership)
 // - UnboundedSender is Send + Sync
 // - The Swarm inside InnerState is protected by RwLock which provides interior mutability
-#[cfg(feature = "libp2p")]
 unsafe impl Send for StorageNetworkHandle {}
 
-#[cfg(feature = "libp2p")]
 unsafe impl Sync for StorageNetworkHandle {}
 
-#[cfg(feature = "libp2p")]
 impl StorageNetworkHandle {
     /// Join a topic and get channels for pub/sub communication.
     ///
@@ -351,7 +347,6 @@ impl StorageNetworkHandle {
 }
 
 /// Implementation of the StorageNetwork trait for StorageNetworkHandle.
-#[cfg(feature = "libp2p")]
 #[async_trait]
 impl StorageNetwork for StorageNetworkHandle {
     /// Stream type for direct data transfer.
@@ -432,7 +427,6 @@ impl StorageNetwork for StorageNetworkHandle {
 ///
 /// This factory is responsible for initializing the libp2p swarm and
 /// creating the inner network state before returning a cloneable handle.
-#[cfg(feature = "libp2p")]
 pub struct StorageNetworkFactory;
 
 // StorageNetworkFactory implementation is in implementation.rs
@@ -441,7 +435,6 @@ pub struct StorageNetworkFactory;
 ///
 /// This struct holds all the mutable network state and is wrapped in Arc
 /// to enable safe concurrent access from multiple components.
-#[cfg(feature = "libp2p")]
 #[allow(dead_code)] // TODO: Remove when implementation is complete
 pub struct StorageNetworkInner {
     /// Reference to the inner state containing swarm and peer tracking.
