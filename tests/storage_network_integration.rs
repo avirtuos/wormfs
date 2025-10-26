@@ -319,9 +319,9 @@ async fn test_two_node_cluster_formation() {
 
 #[tokio::test]
 async fn test_three_node_full_mesh() {
-    // Initialize logging to see what's happening
+    // Initialize logging at INFO level
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         .try_init();
 
     let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
