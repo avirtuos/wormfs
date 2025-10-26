@@ -259,6 +259,7 @@ impl Default for BehaviourConfig {
                 .mesh_n(GOSSIPSUB_MESH_N)
                 .mesh_n_low(GOSSIPSUB_MESH_N_LOW)
                 .mesh_n_high(GOSSIPSUB_MESH_N_HIGH)
+                .max_transmit_size(DEFAULT_MAX_MESSAGE_SIZE) // Allow large messages up to 10MB
                 .message_id_fn(message_id_fn)
                 .build()
                 .expect("Valid gossipsub config"),
