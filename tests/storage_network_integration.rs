@@ -8,12 +8,23 @@
 //! - Network recovery and reconnection
 //! - Concurrent operations
 //!
+//! ## Running Tests
+//!
+//! Tests can be run in parallel (default behavior):
+//!
+//! ```bash
+//! cargo test --test storage_network_integration
+//! ```
+//!
+//! Each test automatically allocates a unique port range to avoid conflicts.
+//!
 //! ## Test Infrastructure
 //!
 //! Tests use a `TestCluster` helper that manages multiple StorageNetwork nodes
 //! with isolated configurations and automatic cleanup.
 
 use libp2p::identity;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -21,6 +32,17 @@ use tracing;
 use tracing_subscriber;
 use wormfs::storage_network::types::{Config, ConnectionState, PeerConfig, PeerId, PeerIdConfig};
 use wormfs::storage_network::{StorageNetworkFactory, StorageNetworkHandle};
+
+/// Global atomic counter for allocating unique port ranges for parallel test execution.
+/// Each test gets a unique base port to avoid conflicts when running in parallel.
+static PORT_ALLOCATOR: AtomicU16 = AtomicU16::new(45000);
+
+/// Allocate a unique base port for a test.
+/// Returns a base port that is guaranteed to be unique across concurrent tests.
+fn allocate_test_port_range() -> u16 {
+    // Allocate 100 ports per test (enough for large clusters)
+    PORT_ALLOCATOR.fetch_add(100, Ordering::SeqCst)
+}
 
 /// Test cluster managing multiple StorageNetwork nodes
 struct TestCluster {
@@ -65,10 +87,10 @@ impl TestCluster {
             peer_ids.push(peer_id);
         }
 
-        // Second pass: create all nodes with fixed test ports to avoid conflicts
-        // Using base port 45000 + index
+        // Second pass: create all nodes with unique port range to avoid conflicts
+        // Allocate a unique port range for this test to enable parallel execution
         let mut node_configs = Vec::new();
-        let base_port = 45000_u16;
+        let base_port = allocate_test_port_range();
 
         for i in 0..num_nodes {
             let temp_dir = TempDir::new()?;
@@ -374,7 +396,7 @@ async fn test_peer_discovery_via_configuration() {
         peer_ids.push(peer_id);
     }
 
-    let base_port = 45100_u16;
+    let base_port = allocate_test_port_range();
     let temp_dirs: Vec<TempDir> = (0..3).map(|_| TempDir::new().unwrap()).collect();
 
     // Node 0: Only has node 1 configured
@@ -634,7 +656,7 @@ async fn test_autoid_mode_first_connection() {
         identity::Keypair::ed25519_from_bytes(seed2).expect("Failed to create keypair 2");
     let peer_id2 = PeerId::new(libp2p::PeerId::from(keypair2.public()).to_bytes());
 
-    let base_port = 45200_u16;
+    let base_port = allocate_test_port_range();
     let temp_dir1 = TempDir::new().expect("Failed to create temp dir");
     let temp_dir2 = TempDir::new().expect("Failed to create temp dir");
     let peer_id_store_path1 = temp_dir1.path().join("peer_ids.json");
@@ -840,15 +862,666 @@ async fn test_large_cluster_formation() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "Not yet implemented"]
 async fn test_basic_broadcast_propagation() {
-    // TODO: Implement
+    // Test that broadcast messages propagate to all subscribers on a topic.
+
+    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+
+    // Wait for full mesh connectivity
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // All nodes subscribe to the same topic
+    let (_tx0, mut rx0) = cluster
+        .node(0)
+        .handle
+        .join_topic("test-broadcast")
+        .await
+        .expect("Node 0 failed to join topic");
+
+    let (_tx1, mut rx1) = cluster
+        .node(1)
+        .handle
+        .join_topic("test-broadcast")
+        .await
+        .expect("Node 1 failed to join topic");
+
+    let (_tx2, mut rx2) = cluster
+        .node(2)
+        .handle
+        .join_topic("test-broadcast")
+        .await
+        .expect("Node 2 failed to join topic");
+
+    // Give gossipsub time to establish mesh on this topic
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Node 0 broadcasts a message
+    let test_message = b"Hello from node 0!".to_vec();
+    cluster
+        .node(0)
+        .handle
+        .broadcast("test-broadcast", test_message.clone())
+        .await
+        .expect("Node 0 failed to broadcast");
+
+    // Collect messages from node 1 and node 2 (node 0 doesn't receive its own broadcast)
+    let messages_node1 = collect_all_messages(&mut rx1, Duration::from_secs(3)).await;
+    let messages_node2 = collect_all_messages(&mut rx2, Duration::from_secs(3)).await;
+
+    // Verify node 1 received the message
+    assert_eq!(
+        messages_node1.len(),
+        1,
+        "Node 1 should receive 1 broadcast message"
+    );
+    assert_eq!(
+        messages_node1[0].data, test_message,
+        "Node 1 should receive correct message content"
+    );
+
+    // Verify node 2 received the message
+    assert_eq!(
+        messages_node2.len(),
+        1,
+        "Node 2 should receive 1 broadcast message"
+    );
+    assert_eq!(
+        messages_node2[0].data, test_message,
+        "Node 2 should receive correct message content"
+    );
+
+    // Verify the message source is node 0 (both should see same source peer ID)
+    assert_eq!(
+        messages_node1[0].source, messages_node2[0].source,
+        "Both nodes should see the same source peer ID"
+    );
+
+    cluster.stop().await.expect("Failed to stop cluster");
 }
 
 #[tokio::test]
-#[ignore = "Not yet implemented"]
 async fn test_topic_subscription_isolation() {
-    // TODO: Implement
+    // Test that messages on different topics remain isolated - no cross-topic leakage.
+
+    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+
+    // Wait for full mesh connectivity
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // Node 0 subscribes only to "topic-A"
+    let (_tx0_a, mut rx0_a) = cluster
+        .node(0)
+        .handle
+        .join_topic("topic-A")
+        .await
+        .expect("Node 0 failed to join topic-A");
+
+    // Node 1 subscribes only to "topic-B"
+    let (_tx1_b, mut rx1_b) = cluster
+        .node(1)
+        .handle
+        .join_topic("topic-B")
+        .await
+        .expect("Node 1 failed to join topic-B");
+
+    // Node 2 subscribes to both topics
+    let (_tx2_a, mut rx2_a) = cluster
+        .node(2)
+        .handle
+        .join_topic("topic-A")
+        .await
+        .expect("Node 2 failed to join topic-A");
+
+    let (_tx2_b, mut rx2_b) = cluster
+        .node(2)
+        .handle
+        .join_topic("topic-B")
+        .await
+        .expect("Node 2 failed to join topic-B");
+
+    // Give gossipsub time to establish mesh on both topics
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Broadcast message on topic-A
+    let message_a = b"Message on topic A".to_vec();
+    cluster
+        .node(0)
+        .handle
+        .broadcast("topic-A", message_a.clone())
+        .await
+        .expect("Failed to broadcast on topic-A");
+
+    // Broadcast message on topic-B
+    let message_b = b"Message on topic B".to_vec();
+    cluster
+        .node(1)
+        .handle
+        .broadcast("topic-B", message_b.clone())
+        .await
+        .expect("Failed to broadcast on topic-B");
+
+    // Collect messages with timeout
+    let messages_node0_a = collect_all_messages(&mut rx0_a, Duration::from_secs(2)).await;
+    let messages_node1_b = collect_all_messages(&mut rx1_b, Duration::from_secs(2)).await;
+    let messages_node2_a = collect_all_messages(&mut rx2_a, Duration::from_secs(2)).await;
+    let messages_node2_b = collect_all_messages(&mut rx2_b, Duration::from_secs(2)).await;
+
+    // Node 0 (subscribed to topic-A) should receive message from topic-A only
+    // Note: Node 0 broadcast the message, so it won't receive its own message
+    assert_eq!(
+        messages_node0_a.len(),
+        0,
+        "Node 0 should not receive its own broadcast on topic-A"
+    );
+
+    // Node 1 (subscribed to topic-B) should receive message from topic-B only
+    // Note: Node 1 broadcast the message, so it won't receive its own message
+    assert_eq!(
+        messages_node1_b.len(),
+        0,
+        "Node 1 should not receive its own broadcast on topic-B"
+    );
+
+    // Node 2 (subscribed to both) should receive one message from topic-A
+    assert_eq!(
+        messages_node2_a.len(),
+        1,
+        "Node 2 should receive 1 message on topic-A"
+    );
+    assert_eq!(
+        messages_node2_a[0].data, message_a,
+        "Node 2 should receive correct topic-A message"
+    );
+
+    // Node 2 should also receive one message from topic-B
+    assert_eq!(
+        messages_node2_b.len(),
+        1,
+        "Node 2 should receive 1 message on topic-B"
+    );
+    assert_eq!(
+        messages_node2_b[0].data, message_b,
+        "Node 2 should receive correct topic-B message"
+    );
+
+    // Verify topic isolation: messages are different
+    assert_ne!(
+        messages_node2_a[0].data, messages_node2_b[0].data,
+        "Messages on different topics should have different content"
+    );
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_multiple_broadcasts_ordering() {
+    // Test that multiple broadcast messages are delivered in FIFO order.
+
+    let cluster = TestCluster::new(2).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // Both nodes subscribe to the same topic
+    let (_tx0, _rx0) = cluster
+        .node(0)
+        .handle
+        .join_topic("test-ordering")
+        .await
+        .expect("Node 0 failed to join topic");
+
+    let (_tx1, mut rx1) = cluster
+        .node(1)
+        .handle
+        .join_topic("test-ordering")
+        .await
+        .expect("Node 1 failed to join topic");
+
+    // Give gossipsub time to establish mesh
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Node 0 broadcasts multiple messages in sequence
+    let messages = vec![
+        b"Message 1".to_vec(),
+        b"Message 2".to_vec(),
+        b"Message 3".to_vec(),
+        b"Message 4".to_vec(),
+        b"Message 5".to_vec(),
+    ];
+
+    for msg in &messages {
+        cluster
+            .node(0)
+            .handle
+            .broadcast("test-ordering", msg.clone())
+            .await
+            .expect("Failed to broadcast");
+        // Small delay between messages to ensure ordering
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Collect all messages at node 1
+    let received = collect_all_messages(&mut rx1, Duration::from_secs(3)).await;
+
+    // Verify all messages were received
+    assert_eq!(received.len(), 5, "Node 1 should receive all 5 messages");
+
+    // Verify messages are in correct order
+    for (i, msg) in received.iter().enumerate() {
+        assert_eq!(
+            msg.data,
+            messages[i],
+            "Message {} should be in correct order",
+            i + 1
+        );
+    }
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_concurrent_broadcasts() {
+    // Test that concurrent broadcasts from multiple nodes all propagate correctly.
+
+    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // All nodes subscribe to the same topic
+    let (_tx0, mut rx0) = cluster
+        .node(0)
+        .handle
+        .join_topic("test-concurrent")
+        .await
+        .expect("Node 0 failed to join topic");
+
+    let (_tx1, mut rx1) = cluster
+        .node(1)
+        .handle
+        .join_topic("test-concurrent")
+        .await
+        .expect("Node 1 failed to join topic");
+
+    let (_tx2, mut rx2) = cluster
+        .node(2)
+        .handle
+        .join_topic("test-concurrent")
+        .await
+        .expect("Node 2 failed to join topic");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // All three nodes broadcast simultaneously
+    let msg0 = b"Broadcast from node 0".to_vec();
+    let msg1 = b"Broadcast from node 1".to_vec();
+    let msg2 = b"Broadcast from node 2".to_vec();
+
+    let broadcast0 = cluster
+        .node(0)
+        .handle
+        .broadcast("test-concurrent", msg0.clone());
+    let broadcast1 = cluster
+        .node(1)
+        .handle
+        .broadcast("test-concurrent", msg1.clone());
+    let broadcast2 = cluster
+        .node(2)
+        .handle
+        .broadcast("test-concurrent", msg2.clone());
+
+    // Execute all broadcasts concurrently
+    tokio::try_join!(broadcast0, broadcast1, broadcast2).expect("Broadcasts failed");
+
+    // Collect messages from all nodes
+    let received0 = collect_all_messages(&mut rx0, Duration::from_secs(3)).await;
+    let received1 = collect_all_messages(&mut rx1, Duration::from_secs(3)).await;
+    let received2 = collect_all_messages(&mut rx2, Duration::from_secs(3)).await;
+
+    // Each node should receive 2 messages (the other two nodes' broadcasts)
+    assert_eq!(
+        received0.len(),
+        2,
+        "Node 0 should receive 2 messages (from nodes 1 and 2)"
+    );
+    assert_eq!(
+        received1.len(),
+        2,
+        "Node 1 should receive 2 messages (from nodes 0 and 2)"
+    );
+    assert_eq!(
+        received2.len(),
+        2,
+        "Node 2 should receive 2 messages (from nodes 0 and 1)"
+    );
+
+    // Verify node 0 received messages from nodes 1 and 2
+    let received0_data: Vec<_> = received0.iter().map(|m| m.data.clone()).collect();
+    assert!(
+        received0_data.contains(&msg1),
+        "Node 0 should receive message from node 1"
+    );
+    assert!(
+        received0_data.contains(&msg2),
+        "Node 0 should receive message from node 2"
+    );
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_large_message_propagation() {
+    // Test that large messages (1MB) can be broadcast and propagate correctly.
+
+    let cluster = TestCluster::new(2).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    let (_tx0, _rx0) = cluster
+        .node(0)
+        .handle
+        .join_topic("test-large")
+        .await
+        .expect("Node 0 failed to join topic");
+
+    let (_tx1, mut rx1) = cluster
+        .node(1)
+        .handle
+        .join_topic("test-large")
+        .await
+        .expect("Node 1 failed to join topic");
+
+    // Give more time for gossipsub mesh to stabilize before sending large message
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Create a 1MB message
+    let large_message = vec![0x42u8; 1024 * 1024]; // 1MB of 0x42
+
+    cluster
+        .node(0)
+        .handle
+        .broadcast("test-large", large_message.clone())
+        .await
+        .expect("Failed to broadcast large message");
+
+    // Collect with longer timeout for large message (10 seconds for 1MB)
+    let received = collect_all_messages(&mut rx1, Duration::from_secs(10)).await;
+
+    assert_eq!(received.len(), 1, "Node 1 should receive 1 message");
+    assert_eq!(
+        received[0].data.len(),
+        1024 * 1024,
+        "Message should be 1MB in size"
+    );
+    assert_eq!(
+        received[0].data, large_message,
+        "Large message content should match"
+    );
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_message_delivery_with_late_joiner() {
+    // Test that a node joining a topic mid-conversation receives subsequent messages.
+
+    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // Nodes 0 and 1 subscribe early
+    let (_tx0, _rx0) = cluster
+        .node(0)
+        .handle
+        .join_topic("test-late-join")
+        .await
+        .expect("Node 0 failed to join topic");
+
+    let (_tx1, mut rx1) = cluster
+        .node(1)
+        .handle
+        .join_topic("test-late-join")
+        .await
+        .expect("Node 1 failed to join topic");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Node 0 broadcasts first message (before node 2 joins)
+    let early_message = b"Early message before node 2 joined".to_vec();
+    cluster
+        .node(0)
+        .handle
+        .broadcast("test-late-join", early_message.clone())
+        .await
+        .expect("Failed to broadcast early message");
+
+    // Wait for message to propagate
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Now node 2 joins the topic (late joiner)
+    let (_tx2, mut rx2) = cluster
+        .node(2)
+        .handle
+        .join_topic("test-late-join")
+        .await
+        .expect("Node 2 failed to join topic");
+
+    // Give gossipsub time to add node 2 to mesh
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Node 0 broadcasts second message (after node 2 joined)
+    let late_message = b"Late message after node 2 joined".to_vec();
+    cluster
+        .node(0)
+        .handle
+        .broadcast("test-late-join", late_message.clone())
+        .await
+        .expect("Failed to broadcast late message");
+
+    // Collect messages
+    let received1 = collect_all_messages(&mut rx1, Duration::from_secs(2)).await;
+    let received2 = collect_all_messages(&mut rx2, Duration::from_secs(2)).await;
+
+    // Node 1 should receive both messages
+    assert_eq!(received1.len(), 2, "Node 1 should receive both messages");
+
+    // Node 2 (late joiner) should only receive the message sent after it joined
+    assert_eq!(
+        received2.len(),
+        1,
+        "Node 2 should receive only the message sent after joining"
+    );
+    assert_eq!(
+        received2[0].data, late_message,
+        "Node 2 should receive the late message"
+    );
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_broadcast_to_single_subscriber() {
+    // Test edge case: broadcast when there's only one subscriber (the sender itself).
+
+    let cluster = TestCluster::new(2).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // Only node 0 subscribes to this topic
+    let (_tx0, mut rx0) = cluster
+        .node(0)
+        .handle
+        .join_topic("test-single-sub")
+        .await
+        .expect("Node 0 failed to join topic");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Node 0 broadcasts to a topic where it's the only subscriber
+    let message = b"Broadcasting to myself".to_vec();
+    cluster
+        .node(0)
+        .handle
+        .broadcast("test-single-sub", message.clone())
+        .await
+        .expect("Failed to broadcast");
+
+    // Node 0 should not receive its own broadcast
+    let received = collect_all_messages(&mut rx0, Duration::from_secs(2)).await;
+    assert_eq!(
+        received.len(),
+        0,
+        "Node 0 should not receive its own broadcast even as sole subscriber"
+    );
+
+    // Now node 1 joins
+    let (_tx1, mut rx1) = cluster
+        .node(1)
+        .handle
+        .join_topic("test-single-sub")
+        .await
+        .expect("Node 1 failed to join topic");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Node 0 broadcasts again with a second subscriber
+    let message2 = b"Now with a real subscriber".to_vec();
+    cluster
+        .node(0)
+        .handle
+        .broadcast("test-single-sub", message2.clone())
+        .await
+        .expect("Failed to broadcast");
+
+    // Node 1 should receive this message
+    let received1 = collect_all_messages(&mut rx1, Duration::from_secs(2)).await;
+    assert_eq!(received1.len(), 1, "Node 1 should receive the message");
+    assert_eq!(received1[0].data, message2, "Message content should match");
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_unsubscribe_stops_delivery() {
+    // Test that dropping the receiver effectively stops message delivery.
+    // Since there's no explicit unsubscribe API, we test that dropping the
+    // receiver channel stops the node from receiving messages.
+
+    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // All three nodes subscribe
+    let (_tx0, mut rx0) = cluster
+        .node(0)
+        .handle
+        .join_topic("test-unsubscribe")
+        .await
+        .expect("Node 0 failed to join topic");
+
+    let (_tx1, mut rx1) = cluster
+        .node(1)
+        .handle
+        .join_topic("test-unsubscribe")
+        .await
+        .expect("Node 1 failed to join topic");
+
+    let (_tx2, rx2) = cluster
+        .node(2)
+        .handle
+        .join_topic("test-unsubscribe")
+        .await
+        .expect("Node 2 failed to join topic");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // First broadcast: all nodes should be ready to receive
+    let message1 = b"Before unsubscribe".to_vec();
+    cluster
+        .node(0)
+        .handle
+        .broadcast("test-unsubscribe", message1.clone())
+        .await
+        .expect("Failed to broadcast message 1");
+
+    // Nodes 1 and 2 should receive this
+    let received1 = collect_all_messages(&mut rx1, Duration::from_secs(2)).await;
+    assert_eq!(received1.len(), 1, "Node 1 should receive first message");
+    assert_eq!(received1[0].data, message1);
+
+    // Now "unsubscribe" node 2 by dropping its receiver
+    drop(rx2);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Second broadcast: node 2 should no longer receive (channel dropped)
+    let message2 = b"After unsubscribe".to_vec();
+    cluster
+        .node(0)
+        .handle
+        .broadcast("test-unsubscribe", message2.clone())
+        .await
+        .expect("Failed to broadcast message 2");
+
+    // Node 1 should still receive the second message
+    let received1_second = collect_all_messages(&mut rx1, Duration::from_secs(2)).await;
+    assert_eq!(
+        received1_second.len(),
+        1,
+        "Node 1 should receive second message after node 2 unsubscribed"
+    );
+    assert_eq!(received1_second[0].data, message2);
+
+    // Third broadcast: verify node 1 still working
+    let message3 = b"Final verification".to_vec();
+    cluster
+        .node(0)
+        .handle
+        .broadcast("test-unsubscribe", message3.clone())
+        .await
+        .expect("Failed to broadcast message 3");
+
+    let received1_third = collect_all_messages(&mut rx1, Duration::from_secs(2)).await;
+    assert_eq!(
+        received1_third.len(),
+        1,
+        "Node 1 should receive third message"
+    );
+    assert_eq!(received1_third[0].data, message3);
+
+    // Node 0 should also have received messages from itself... wait, no
+    // Based on test_broadcast_to_single_subscriber, nodes don't receive their own broadcasts
+    // So node 0 won't receive anything. Let's just verify it doesn't crash.
+    let received0 = collect_all_messages(&mut rx0, Duration::from_secs(1)).await;
+    // Node 0 sent all messages, so it won't receive any of them
+    assert_eq!(
+        received0.len(),
+        0,
+        "Node 0 should not receive its own broadcasts"
+    );
+
+    cluster.stop().await.expect("Failed to stop cluster");
 }
 
 // ... Additional placeholder tests for remaining phases
