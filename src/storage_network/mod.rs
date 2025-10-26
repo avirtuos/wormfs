@@ -75,6 +75,7 @@ pub mod types;
 use async_trait::async_trait;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 pub use types::{
     Config, ConnectionState, Error, NetworkCommand, PeerId, PeerInfo, PeerState, TopicHandle,
     TopicMessage, TopicReceiver, TopicSender, ValidationResult,
@@ -336,22 +337,33 @@ impl StorageNetworkHandle {
         self.inner.validate_peer_id(ip, peer_id).await
     }
 
-    /// Gracefully shutdown the network event loop.
+    /// Dial all configured peers with random jitter to avoid simultaneous connection attempts.
     ///
-    /// This method initiates a graceful shutdown of the network by:
-    /// - Disconnecting from all active peers
-    /// - Unsubscribing from all topics
-    /// - Canceling pending requests
-    /// - Stopping the event loop
+    /// This method reads the peer list from the configuration and sends dial commands
+    /// with random delays (250-500ms) between each dial to prevent connection conflicts
+    /// when multiple nodes start simultaneously.
     ///
-    /// The method blocks until the shutdown is complete.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The event loop is not running
-    /// - The shutdown command cannot be delivered
-    /// - The event loop fails during shutdown
+    /// This should typically be called after starting the event loop.
+    pub async fn dial_configured_peers(&self) -> Result<(), Error> {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
+        for peer_config in &self.inner.config.peers {
+            // Add random jitter between 250ms and 500ms before each dial
+            let jitter_ms = rng.gen_range(250..=500);
+            tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+
+            // Send dial command to event loop
+            self.event_tx
+                .send(NetworkCommand::DialPeer {
+                    multiaddr: peer_config.multiaddr.clone(),
+                })
+                .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+        }
+
+        Ok(())
+    }
+
     pub async fn shutdown(&self) -> Result<(), Error> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 

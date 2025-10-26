@@ -5341,6 +5341,7 @@ dependencies = [
  "proptest",
  "prost",
  "prost-build",
+ "rand 0.8.5",
  "redb",
  "reed-solomon-erasure",
  "rusqlite",

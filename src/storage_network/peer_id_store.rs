@@ -133,6 +133,78 @@ impl PeerIdStore {
         mappings.get(ip).cloned()
     }
 
+    /// Check if a peer ID has been previously seen/stored.
+    ///
+    /// This method is used for peer-ID-based validation where we only care
+    /// about the peer ID, not the IP address.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - Peer ID to look up
+    ///
+    /// # Returns
+    ///
+    /// The peer ID if it exists in the store, `None` otherwise.
+    pub fn get_by_peer_id(&self, peer_id: &PeerId) -> Option<PeerId> {
+        let mappings = self
+            .mappings
+            .read()
+            .expect("Failed to acquire mappings lock");
+
+        // Check if this peer ID exists in any of the stored mappings
+        for stored_peer_id in mappings.values() {
+            if stored_peer_id == peer_id {
+                return Some(peer_id.clone());
+            }
+        }
+        None
+    }
+
+    /// Store a peer ID for peer-ID-based validation.
+    ///
+    /// Since we're validating by peer ID only (not IP), we use a placeholder
+    /// IP address (0.0.0.0) as the key. This allows reusing the existing
+    /// IP-based storage infrastructure.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - Peer ID to store
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if successful, error otherwise.
+    pub fn store_by_peer_id(&self, peer_id: PeerId) -> Result<(), Error> {
+        let mappings_guard = self
+            .mappings
+            .read()
+            .expect("Failed to acquire mappings lock");
+
+        // Check if this peer ID already exists
+        for stored_peer_id in mappings_guard.values() {
+            if stored_peer_id == &peer_id {
+                // Already stored, nothing to do
+                return Ok(());
+            }
+        }
+        drop(mappings_guard);
+
+        // Use a unique placeholder IP for each peer ID
+        // We hash the peer ID bytes to create a deterministic "IP"
+        let peer_bytes = peer_id.as_bytes();
+        let hash = peer_bytes
+            .iter()
+            .fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
+        let placeholder_ip = IpAddr::V4(std::net::Ipv4Addr::new(
+            ((hash >> 24) & 0xFF) as u8,
+            ((hash >> 16) & 0xFF) as u8,
+            ((hash >> 8) & 0xFF) as u8,
+            (hash & 0xFF) as u8,
+        ));
+
+        // Store using the regular store method
+        self.store(placeholder_ip, peer_id)
+    }
+
     /// Store a new IP -> PeerID mapping.
     ///
     /// This method enforces two invariants:

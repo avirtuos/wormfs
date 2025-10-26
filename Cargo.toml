@@ -39,6 +39,9 @@ anyhow = "1.0"
 # Logging
 tracing = "0.1"
 
+# Random number generation
+rand = "0.8"
+
 # Networking (libp2p)
 libp2p = { version = "0.56", features = [
     "gossipsub",        # Pub/sub messaging

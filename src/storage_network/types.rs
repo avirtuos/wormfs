@@ -27,10 +27,12 @@ impl PeerId {
 /// Configuration for a peer in the network.
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
-    /// IP address of the peer
-    pub ip_address: IpAddr,
+    /// Multiaddr string for the peer (e.g., "/ip4/127.0.0.1/tcp/4242/p2p/...")
+    /// If the peer ID is not included in the multiaddr, AutoId mode is used.
+    pub multiaddr: String,
 
     /// Peer ID configuration (explicit or auto-discover)
+    /// This can be used to validate the peer ID from the multiaddr
     pub peer_id: PeerIdConfig,
 }
 
@@ -172,6 +174,12 @@ pub enum NetworkCommand {
         request: Vec<u8>,
         /// Channel to send response back
         response: tokio::sync::oneshot::Sender<Result<Vec<u8>, Error>>,
+    },
+
+    /// Dial a peer at the given multiaddr
+    DialPeer {
+        /// Multiaddr to dial
+        multiaddr: String,
     },
 
     /// Disconnect from a specific peer
