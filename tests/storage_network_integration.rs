@@ -23,6 +23,7 @@
 //! Tests use a `TestCluster` helper that manages multiple StorageNetwork nodes
 //! with isolated configurations and automatic cleanup.
 
+use futures::future;
 use libp2p::identity;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
@@ -1519,6 +1520,222 @@ async fn test_unsubscribe_stops_delivery() {
         received0.len(),
         0,
         "Node 0 should not receive its own broadcasts"
+    );
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+// ============================================================================
+// Phase 4: Request-Response Protocol Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_request_response_roundtrip() {
+    // Test basic request-response communication using the echo protocol.
+    // Node 0 sends a request to Node 1 and receives the echoed response.
+
+    let cluster = TestCluster::new(2).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // Get the peer ID of node 1 from node 0's perspective
+    let peers = cluster.node(0).handle.get_connected_peers().await;
+
+    assert_eq!(peers.len(), 1, "Node 0 should be connected to 1 peer");
+    let node1_peer_id = peers[0].peer_id.clone();
+
+    // Send echo request from node 0 to node 1
+    let request_data = b"Hello from node 0".to_vec();
+    let response = cluster
+        .node(0)
+        .handle
+        .send_request(&node1_peer_id, "/wormfs/echo", request_data.clone())
+        .await
+        .expect("Request should succeed");
+
+    // Verify response has "ECHO: " prepended
+    let expected_response = {
+        let mut resp = b"ECHO: ".to_vec();
+        resp.extend_from_slice(&request_data);
+        resp
+    };
+
+    assert_eq!(
+        response, expected_response,
+        "Response should be echoed with ECHO: prefix"
+    );
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_request_timeout() {
+    // Test that requests timeout when peer doesn't respond (peer not connected).
+
+    let cluster = TestCluster::new(2).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // Create a fake peer ID that doesn't exist
+    let nonexistent_peer = PeerId::new(vec![99, 99, 99, 99, 99]);
+
+    // Attempt to send request to non-existent peer
+    let request_data = b"This should timeout".to_vec();
+    let result = cluster
+        .node(0)
+        .handle
+        .send_request(&nonexistent_peer, "/wormfs/echo", request_data)
+        .await;
+
+    // Should fail because peer is not connected
+    assert!(result.is_err(), "Request to non-existent peer should fail");
+
+    match result {
+        Err(e) => {
+            let err_str = e.to_string();
+            assert!(
+                err_str.contains("not connected") || err_str.contains("PeerNotConnected"),
+                "Error should indicate peer not connected, got: {}",
+                err_str
+            );
+        }
+        Ok(_) => panic!("Request should have failed"),
+    }
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_concurrent_requests() {
+    // Test multiple concurrent requests from different nodes.
+    // All 3 nodes send requests to each other simultaneously.
+
+    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // Each node sends requests to all other nodes concurrently
+    let mut request_futures = Vec::new();
+
+    for sender_idx in 0..3 {
+        let sender_peers = cluster.node(sender_idx).handle.get_connected_peers().await;
+        assert_eq!(
+            sender_peers.len(),
+            2,
+            "Each node should be connected to 2 peers"
+        );
+
+        for peer in sender_peers {
+            let handle = cluster.node(sender_idx).handle.clone();
+            let peer_id = peer.peer_id.clone();
+            let request_data = format!("Request from node {}", sender_idx).into_bytes();
+
+            request_futures.push(async move {
+                handle
+                    .send_request(&peer_id, "/wormfs/echo", request_data.clone())
+                    .await
+                    .map(|response| (sender_idx, request_data, response))
+            });
+        }
+    }
+
+    // Execute all requests concurrently
+    let results = future::join_all(request_futures).await;
+
+    // Verify all requests succeeded
+    let mut success_count = 0;
+    for result in results {
+        match result {
+            Ok((sender_idx, request_data, response)) => {
+                let expected_response = {
+                    let mut resp = b"ECHO: ".to_vec();
+                    resp.extend_from_slice(&request_data);
+                    resp
+                };
+                assert_eq!(
+                    response, expected_response,
+                    "Response for request from node {} should be echoed correctly",
+                    sender_idx
+                );
+                success_count += 1;
+            }
+            Err(e) => {
+                panic!("Concurrent request failed: {}", e);
+            }
+        }
+    }
+
+    // We have 3 nodes, each sending to 2 others = 6 total requests
+    assert_eq!(success_count, 6, "All 6 concurrent requests should succeed");
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_request_failure_recovery() {
+    // Test that after a failed request, subsequent requests can still succeed.
+
+    let cluster = TestCluster::new(2).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    let peers = cluster.node(0).handle.get_connected_peers().await;
+    assert_eq!(peers.len(), 1, "Node 0 should be connected to 1 peer");
+    let node1_peer_id = peers[0].peer_id.clone();
+
+    // First, try a request to an unsupported protocol (should fail)
+    let bad_request = b"Bad request".to_vec();
+    let bad_result = cluster
+        .node(0)
+        .handle
+        .send_request(&node1_peer_id, "/wormfs/unsupported", bad_request)
+        .await;
+
+    // This might succeed or fail depending on how the protocol is handled
+    // If it fails, that's expected behavior
+    if let Err(e) = &bad_result {
+        eprintln!("Expected failure for unsupported protocol: {}", e);
+    }
+
+    // Now send a valid request - this should succeed regardless of previous failure
+    tokio::time::sleep(Duration::from_millis(100)).await; // Brief pause for recovery
+
+    let good_request = b"Valid request after failure".to_vec();
+    let good_result = cluster
+        .node(0)
+        .handle
+        .send_request(&node1_peer_id, "/wormfs/echo", good_request.clone())
+        .await;
+
+    // This should succeed
+    assert!(
+        good_result.is_ok(),
+        "Request should succeed after previous failure: {:?}",
+        good_result.err()
+    );
+
+    let response = good_result.unwrap();
+    let expected_response = {
+        let mut resp = b"ECHO: ".to_vec();
+        resp.extend_from_slice(&good_request);
+        resp
+    };
+
+    assert_eq!(
+        response, expected_response,
+        "Response should be correct after recovery"
     );
 
     cluster.stop().await.expect("Failed to stop cluster");
