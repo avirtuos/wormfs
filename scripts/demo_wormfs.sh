@@ -357,6 +357,7 @@ max_connections_per_peer = 3
 connection_timeout = 30
 idle_connection_timeout = 600
 keep_alive_interval = 30
+admin_url = "http://127.0.0.1:9090"
 
 # Peer configuration: connect to Node 2
 [[network.peers]]
@@ -448,6 +449,7 @@ max_connections_per_peer = 3
 connection_timeout = 30
 idle_connection_timeout = 600
 keep_alive_interval = 30
+admin_url = "http://127.0.0.1:9091"
 
 # Peer configuration: connect to Node 1
 [[network.peers]]

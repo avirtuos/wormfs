@@ -153,6 +153,7 @@ impl StorageNodeImpl {
             connection_timeout: config.connection_timeout,
             idle_connection_timeout: config.idle_connection_timeout,
             keep_alive_interval: config.keep_alive_interval,
+            admin_url: None,
         };
 
         let (network_inner, network_handle) = StorageNetworkFactory::create(network_config)

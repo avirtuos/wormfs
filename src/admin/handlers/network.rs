@@ -53,7 +53,8 @@ pub async fn network_status_handler(
                 "last_heartbeat": last_heartbeat,
                 "heartbeat_sequence": peer.heartbeat_sequence.unwrap_or(0),
                 "rtt_ms": peer.rtt.map(|d| d.as_millis()).unwrap_or(0),
-                "connected_since": connected_since
+                "connected_since": connected_since,
+                "admin_url": peer.admin_url.clone()
             })
         })
         .collect();
@@ -105,7 +106,8 @@ pub async fn peers_handler(State(network): State<Arc<StorageNetworkHandle>>) -> 
                 "connection_state": format!("{:?}", peer.state),
                 "last_heartbeat": last_heartbeat,
                 "heartbeat_sequence": peer.heartbeat_sequence.unwrap_or(0),
-                "rtt_ms": peer.rtt.map(|d| d.as_millis()).unwrap_or(0)
+                "rtt_ms": peer.rtt.map(|d| d.as_millis()).unwrap_or(0),
+                "admin_url": peer.admin_url.clone()
             })
         })
         .collect();

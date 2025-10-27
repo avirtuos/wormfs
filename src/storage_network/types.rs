@@ -93,6 +93,10 @@ pub struct Config {
     /// Keep-alive interval in seconds
     #[serde(default = "default_keep_alive_interval_secs", with = "duration_serde")]
     pub keep_alive_interval: Duration,
+
+    /// Admin UI URL (optional, used in heartbeat messages)
+    #[serde(default)]
+    pub admin_url: Option<String>,
 }
 
 fn default_max_peers() -> usize {
@@ -161,6 +165,9 @@ pub struct PeerState {
 
     /// Last heartbeat sequence number received
     pub heartbeat_sequence: Option<u64>,
+
+    /// Admin UI URL (from heartbeat messages)
+    pub admin_url: Option<String>,
 }
 
 /// Peer validation status.
@@ -434,6 +441,9 @@ pub struct PeerInfo {
 
     /// Last heartbeat sequence number received
     pub heartbeat_sequence: Option<u64>,
+
+    /// Admin UI URL (from heartbeat messages)
+    pub admin_url: Option<String>,
 }
 
 /// Peer connection state.
@@ -503,6 +513,10 @@ pub struct HeartbeatMessage {
 
     /// Sequence number for this heartbeat (incremented on each send)
     pub sequence: u64,
+
+    /// Admin UI URL of the sender (optional)
+    #[serde(default)]
+    pub admin_url: Option<String>,
 }
 
 impl HeartbeatMessage {
@@ -517,6 +531,22 @@ impl HeartbeatMessage {
             node_id,
             timestamp_ms,
             sequence,
+            admin_url: None,
+        }
+    }
+
+    /// Create a new heartbeat message with admin URL.
+    pub fn with_admin_url(node_id: String, sequence: u64, admin_url: Option<String>) -> Self {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        Self {
+            node_id,
+            timestamp_ms,
+            sequence,
+            admin_url,
         }
     }
 

@@ -411,6 +411,7 @@ impl super::StorageNetworkInner {
                         last_heartbeat: None,
                         node_id: None,
                         heartbeat_sequence: None,
+                        admin_url: None,
                     },
                 );
 
@@ -735,6 +736,7 @@ impl super::StorageNetworkInner {
                     peer_state.last_seen = SystemTime::now();
                     peer_state.node_id = Some(heartbeat.node_id);
                     peer_state.heartbeat_sequence = Some(heartbeat.sequence);
+                    peer_state.admin_url = heartbeat.admin_url;
                 }
             }
             Err(e) => {
@@ -756,7 +758,11 @@ impl super::StorageNetworkInner {
         };
 
         // Create heartbeat message
-        let heartbeat = HeartbeatMessage::new(self.state.node_id.clone(), sequence);
+        let heartbeat = HeartbeatMessage::with_admin_url(
+            self.state.node_id.clone(),
+            sequence,
+            self.state.config.admin_url.clone(),
+        );
 
         match heartbeat.to_bytes() {
             Ok(bytes) => {
@@ -1053,6 +1059,7 @@ impl super::StorageNetworkInner {
                         last_heartbeat: state.last_heartbeat,
                         node_id: state.node_id.clone(),
                         heartbeat_sequence: state.heartbeat_sequence,
+                        admin_url: state.admin_url.clone(),
                     })
                     .collect();
                 let _ = response.send(peer_infos);
@@ -1075,6 +1082,7 @@ impl super::StorageNetworkInner {
                     last_heartbeat: state.last_heartbeat,
                     node_id: state.node_id.clone(),
                     heartbeat_sequence: state.heartbeat_sequence,
+                    admin_url: state.admin_url.clone(),
                 });
                 let _ = response.send(peer_info);
                 true
@@ -2378,6 +2386,7 @@ mod tests {
                     last_heartbeat: None,
                     node_id: None,
                     heartbeat_sequence: None,
+                    admin_url: None,
                 },
             );
         }
@@ -2600,6 +2609,7 @@ mod tests {
                     last_heartbeat: None,
                     node_id: None,
                     heartbeat_sequence: None,
+                    admin_url: None,
                 },
             );
         }
@@ -2647,6 +2657,7 @@ mod tests {
                     last_heartbeat: None,
                     node_id: None,
                     heartbeat_sequence: None,
+                    admin_url: None,
                 },
             );
         }
