@@ -47,11 +47,14 @@
 //! # }
 //! ```
 
+pub mod config_provider;
+pub mod config_providers;
 pub mod handlers;
 pub mod server;
 pub mod types;
 pub mod ui;
 pub mod websocket;
 
+pub use config_provider::{ConfigProvider, ConfigRegistry, ConfigWithDescriptions};
 pub use server::AdminServer;
 pub use types::{Config, Error};
