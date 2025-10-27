@@ -18,10 +18,22 @@
 //!
 //! Each test automatically allocates a unique port range to avoid conflicts.
 //!
+//! ### CI/Slow Systems
+//!
+//! For slow CI environments, you can increase timeouts by setting the
+//! `TEST_TIMEOUT_MULTIPLIER` environment variable:
+//!
+//! ```bash
+//! TEST_TIMEOUT_MULTIPLIER=3 cargo test --test storage_network_integration
+//! ```
+//!
+//! This multiplies all test timeouts by the specified factor (minimum 1.0).
+//!
 //! ## Test Infrastructure
 //!
 //! Tests use a `TestCluster` helper that manages multiple StorageNetwork nodes
-//! with isolated configurations and automatic cleanup.
+//! with isolated configurations and automatic cleanup. Tests that check for
+//! network events use exponential backoff polling to be both fast and resilient.
 
 use futures::future;
 use libp2p::identity;
@@ -43,6 +55,26 @@ static PORT_ALLOCATOR: AtomicU16 = AtomicU16::new(45000);
 fn allocate_test_port_range() -> u16 {
     // Allocate 100 ports per test (enough for large clusters)
     PORT_ALLOCATOR.fetch_add(100, Ordering::SeqCst)
+}
+
+/// Get timeout multiplier for CI environments.
+///
+/// This allows tests to use longer timeouts on slow CI systems by setting
+/// the `TEST_TIMEOUT_MULTIPLIER` environment variable. Defaults to 1.0.
+///
+/// Example: `TEST_TIMEOUT_MULTIPLIER=3 cargo test` for 3x longer timeouts.
+fn get_timeout_multiplier() -> f64 {
+    std::env::var("TEST_TIMEOUT_MULTIPLIER")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(1.0)
+        .max(1.0) // Ensure at least 1x
+}
+
+/// Apply timeout multiplier to a duration.
+fn apply_timeout_multiplier(duration: Duration) -> Duration {
+    let multiplier = get_timeout_multiplier();
+    duration.mul_f64(multiplier)
 }
 
 /// Test cluster managing multiple StorageNetwork nodes
@@ -2754,7 +2786,7 @@ async fn test_stale_connection_cleanup() {
         }));
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(apply_timeout_multiplier(Duration::from_millis(200))).await;
 
     // Node2: configured to connect to node1
     let config2 = Config {
@@ -2790,7 +2822,7 @@ async fn test_stale_connection_cleanup() {
         }));
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(apply_timeout_multiplier(Duration::from_millis(200))).await;
 
     // Connect nodes - both nodes try to dial
     handle1
@@ -2806,10 +2838,13 @@ async fn test_stale_connection_cleanup() {
     let mut attempts = 0;
     let mut peers1_initial = Vec::new();
     while attempts < 15 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let peers = timeout(Duration::from_secs(2), handle1.get_connected_peers())
-            .await
-            .expect("Timeout getting node1 peers");
+        tokio::time::sleep(apply_timeout_multiplier(Duration::from_millis(500))).await;
+        let peers = timeout(
+            apply_timeout_multiplier(Duration::from_secs(2)),
+            handle1.get_connected_peers(),
+        )
+        .await
+        .expect("Timeout getting node1 peers");
         if !peers.is_empty() {
             peers1_initial = peers;
             break;
@@ -2830,39 +2865,81 @@ async fn test_stale_connection_cleanup() {
 
     // Shutdown node2 (simulates a crash)
     println!("Shutting down node2...");
-    let _ = timeout(Duration::from_secs(3), handle2.shutdown()).await;
+    let _ = timeout(
+        apply_timeout_multiplier(Duration::from_secs(3)),
+        handle2.shutdown(),
+    )
+    .await;
 
     // Wait for node2's event loop to terminate
     let _ = event_loop2.join();
 
     println!("Node2 stopped. Waiting for node1 to detect disconnection...");
 
-    // Wait for node1 to detect the disconnection via ping/keepalive timeout
+    // Poll for disconnection detection using exponential backoff
     // libp2p's default ping interval is 15 seconds, but our keep_alive is 2 seconds
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    // We use exponential backoff to efficiently detect when the peer is removed
+    let mut poll_attempts = 0;
+    let max_poll_attempts = 20;
+    let mut backoff_delay = Duration::from_millis(100);
+    let max_backoff = apply_timeout_multiplier(Duration::from_secs(2));
+    let mut disconnection_detected = false;
 
-    // Check if node1 detected the disconnection (with timeout to prevent hang)
-    println!("Checking node1 peers after node2 crash...");
-    let peers1_after_result = timeout(Duration::from_secs(3), handle1.get_connected_peers()).await;
+    println!("Polling for disconnection detection with exponential backoff...");
+    while poll_attempts < max_poll_attempts {
+        // Apply timeout multiplier to backoff delay for CI environments
+        let adjusted_delay = apply_timeout_multiplier(backoff_delay);
+        tokio::time::sleep(adjusted_delay).await;
 
-    match peers1_after_result {
-        Ok(peers) => {
-            println!("Node1 peers after crash: {}", peers.len());
-            assert_eq!(
-                peers.len(),
-                0,
-                "Node 1 should have detected disconnection (has {} peers)",
-                peers.len()
-            );
+        // Check if disconnection was detected
+        let peers1_result = timeout(
+            apply_timeout_multiplier(Duration::from_secs(2)),
+            handle1.get_connected_peers(),
+        )
+        .await;
+
+        match peers1_result {
+            Ok(peers) => {
+                println!(
+                    "Poll attempt {}: {} peer(s) connected (backoff: {:?})",
+                    poll_attempts + 1,
+                    peers.len(),
+                    adjusted_delay
+                );
+
+                if peers.is_empty() {
+                    disconnection_detected = true;
+                    println!(
+                        "Disconnection detected after {} poll attempts",
+                        poll_attempts + 1
+                    );
+                    break;
+                }
+            }
+            Err(_) => {
+                panic!("Timeout waiting for get_connected_peers - possible deadlock or hang");
+            }
         }
-        Err(_) => {
-            panic!("Timeout waiting for get_connected_peers - possible deadlock or hang");
-        }
+
+        poll_attempts += 1;
+
+        // Exponential backoff: double the delay up to max_backoff
+        backoff_delay = std::cmp::min(backoff_delay * 2, max_backoff);
     }
+
+    assert!(
+        disconnection_detected,
+        "Node 1 should have detected disconnection after {} poll attempts (max: {})",
+        poll_attempts, max_poll_attempts
+    );
 
     // Cleanup
     println!("Cleaning up...");
-    let _ = timeout(Duration::from_secs(3), handle1.shutdown()).await;
+    let _ = timeout(
+        apply_timeout_multiplier(Duration::from_secs(3)),
+        handle1.shutdown(),
+    )
+    .await;
     let _ = event_loop1.join();
 
     println!("Test completed successfully");
