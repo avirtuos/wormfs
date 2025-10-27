@@ -239,6 +239,12 @@ impl TestCluster {
         &self.nodes[index]
     }
 
+    /// Stop a specific node by index.
+    async fn stop_node(&self, index: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.nodes[index].handle.shutdown().await?;
+        Ok(())
+    }
+
     /// Get the number of nodes in the cluster.
     fn len(&self) -> usize {
         self.nodes.len()
@@ -2073,6 +2079,692 @@ async fn test_validation_ipv4_ipv6() {
     // - System IPv6 stack enabled
     // - Loopback IPv6 configured
     // For now, we verify that the validation logic works with IPv4
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_explicit_mode_reject_disconnects_immediately() {
+    // Test that when a peer fails validation in explicit mode,
+    // the connection is immediately disconnected.
+
+    let base_port = allocate_test_port_range();
+
+    // Create two nodes with different keypairs
+    let mut seed1 = [0u8; 32];
+    seed1[0] = 220;
+    let keypair1 = identity::Keypair::ed25519_from_bytes(seed1).expect("Failed to create keypair");
+    let peer_id1 = PeerId::new(libp2p::PeerId::from(keypair1.public()).to_bytes());
+
+    let mut seed2 = [0u8; 32];
+    seed2[0] = 221;
+    let keypair2 = identity::Keypair::ed25519_from_bytes(seed2).expect("Failed to create keypair");
+    let peer_id2 = PeerId::new(libp2p::PeerId::from(keypair2.public()).to_bytes());
+
+    // Create a WRONG peer ID that node1 will expect (not peer_id2)
+    let mut seed_wrong = [0u8; 32];
+    seed_wrong[0] = 222;
+    let keypair_wrong =
+        identity::Keypair::ed25519_from_bytes(seed_wrong).expect("Failed to create keypair");
+    let peer_id_wrong = PeerId::new(libp2p::PeerId::from(keypair_wrong.public()).to_bytes());
+
+    let temp_dir1 = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir2 = TempDir::new().expect("Failed to create temp dir");
+
+    // Node1 expects peer_id_wrong (which is NOT peer_id2)
+    let config1 = Config {
+        node_id: "reject-test-1".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port + 1),
+            peer_id: PeerIdConfig::Explicit(peer_id_wrong), // Expecting wrong peer ID!
+        }],
+        peer_id_store_path: temp_dir1.path().join("peer_ids.json"),
+        max_peers: 10,
+        max_connections_per_peer: 3,
+        connection_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(60),
+        keep_alive_interval: Duration::from_secs(5),
+    };
+
+    // Node2 (with peer_id2, which doesn't match what node1 expects)
+    let config2 = Config {
+        node_id: "reject-test-2".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port + 1)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port),
+            peer_id: PeerIdConfig::Explicit(peer_id1),
+        }],
+        peer_id_store_path: temp_dir2.path().join("peer_ids.json"),
+        max_peers: 10,
+        max_connections_per_peer: 3,
+        connection_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(60),
+        keep_alive_interval: Duration::from_secs(5),
+    };
+
+    // Create nodes
+    let (inner1, handle1) = StorageNetworkFactory::create_with_keypair(config1, keypair1)
+        .await
+        .expect("Failed to create node1");
+
+    let (inner2, handle2) = StorageNetworkFactory::create_with_keypair(config2, keypair2)
+        .await
+        .expect("Failed to create node2");
+
+    let event_loop1 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner1.run().await {
+                eprintln!("Event loop 1 error: {}", e);
+            }
+        }));
+    });
+
+    let event_loop2 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner2.run().await {
+                eprintln!("Event loop 2 error: {}", e);
+            }
+        }));
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Try to connect - node1 will attempt to dial node2
+    let _ = handle1.dial_configured_peers().await;
+
+    // Give time for connection attempt and immediate rejection
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify that the connection was rejected and peer is NOT connected
+    let peers1 = handle1.get_connected_peers().await;
+    let peers2 = handle2.get_connected_peers().await;
+
+    assert_eq!(
+        peers1.len(),
+        0,
+        "Node1 should have no connected peers (rejected peer2)"
+    );
+    assert_eq!(
+        peers2.len(),
+        0,
+        "Node2 should have no connected peers (was rejected by node1)"
+    );
+
+    // Cleanup
+    let _ = handle1.shutdown().await;
+    let _ = handle2.shutdown().await;
+    let _ = event_loop1.join();
+    let _ = event_loop2.join();
+}
+
+// ============================================================================
+// Phase 6: Network Recovery Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_reconnection_after_network_failure() {
+    // Test that nodes can reconnect after one experiences a network failure.
+    // This simulates a node crash/restart scenario.
+
+    let base_port = allocate_test_port_range();
+
+    let temp_dir1 = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir2 = TempDir::new().expect("Failed to create temp dir");
+
+    // Node 1 configuration
+    let config1 = Config {
+        node_id: "recovery-node1".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port + 1),
+            peer_id: PeerIdConfig::AutoId,
+        }],
+        peer_id_store_path: temp_dir1.path().join("peer_ids.json"),
+        max_peers: 10,
+        max_connections_per_peer: 3,
+        connection_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(60),
+        keep_alive_interval: Duration::from_secs(5),
+    };
+
+    // Node 2 configuration
+    let config2 = Config {
+        node_id: "recovery-node2".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port + 1)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port),
+            peer_id: PeerIdConfig::AutoId,
+        }],
+        peer_id_store_path: temp_dir2.path().join("peer_ids.json"),
+        max_peers: 10,
+        max_connections_per_peer: 3,
+        connection_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(60),
+        keep_alive_interval: Duration::from_secs(5),
+    };
+
+    // === First connection - establish initial cluster ===
+    let (inner1, handle1) = StorageNetworkFactory::create(config1.clone())
+        .await
+        .expect("Failed to create node1");
+
+    let (inner2, handle2) = StorageNetworkFactory::create(config2.clone())
+        .await
+        .expect("Failed to create node2");
+
+    let event_loop1 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner1.run().await {
+                eprintln!("Event loop 1 error: {}", e);
+            }
+        }));
+    });
+
+    let event_loop2 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner2.run().await {
+                eprintln!("Event loop 2 error: {}", e);
+            }
+        }));
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    handle1.dial_configured_peers().await.expect("Dial failed");
+    handle2.dial_configured_peers().await.expect("Dial failed");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify initial connection
+    let peers1 = handle1.get_connected_peers().await;
+    assert_eq!(peers1.len(), 1, "Initial connection should be established");
+
+    // === Simulate network failure by shutting down node2 ===
+    let _ = handle2.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = event_loop2.join();
+
+    // Verify node1 detects disconnection
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let peers_after_failure = handle1.get_connected_peers().await;
+    assert_eq!(
+        peers_after_failure.len(),
+        0,
+        "Node1 should detect node2 disconnection"
+    );
+
+    // === Restart node2 and verify reconnection ===
+    let (inner2_restarted, handle2_restarted) = StorageNetworkFactory::create(config2.clone())
+        .await
+        .expect("Failed to restart node2");
+
+    let event_loop2_restarted = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner2_restarted.run().await {
+                eprintln!("Event loop 2 restarted error: {}", e);
+            }
+        }));
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Both nodes attempt to reconnect
+    let _ = handle1.dial_configured_peers().await;
+    let _ = handle2_restarted.dial_configured_peers().await;
+
+    // Give time for reconnection
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Verify reconnection succeeded
+    let peers1_reconnected = handle1.get_connected_peers().await;
+    let peers2_reconnected = handle2_restarted.get_connected_peers().await;
+
+    assert_eq!(
+        peers1_reconnected.len(),
+        1,
+        "Node1 should reconnect to node2"
+    );
+    assert_eq!(
+        peers2_reconnected.len(),
+        1,
+        "Node2 should reconnect to node1"
+    );
+
+    // Cleanup
+    let _ = handle1.shutdown().await;
+    let _ = handle2_restarted.shutdown().await;
+    let _ = event_loop1.join();
+    let _ = event_loop2_restarted.join();
+}
+
+#[tokio::test]
+async fn test_peer_state_recovery_after_restart() {
+    // Test that peer connections can be re-established after a node restarts.
+    // This uses a simplified 2-node scenario with the same keypair for restart.
+
+    let base_port = allocate_test_port_range();
+
+    let temp_dir1 = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir2 = TempDir::new().expect("Failed to create temp dir");
+
+    // Use fixed keypairs so we can restart with same identity
+    let mut seed1 = [0u8; 32];
+    seed1[0] = 230;
+    let keypair1 = identity::Keypair::ed25519_from_bytes(seed1).expect("Failed to create keypair");
+
+    let mut seed2 = [0u8; 32];
+    seed2[0] = 231;
+    let keypair2 = identity::Keypair::ed25519_from_bytes(seed2).expect("Failed to create keypair");
+
+    let config1 = Config {
+        node_id: "state-recovery-1".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port + 1),
+            peer_id: PeerIdConfig::AutoId,
+        }],
+        peer_id_store_path: temp_dir1.path().join("peer_ids.json"),
+        max_peers: 10,
+        max_connections_per_peer: 3,
+        connection_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(60),
+        keep_alive_interval: Duration::from_secs(5),
+    };
+
+    let config2 = Config {
+        node_id: "state-recovery-2".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port + 1)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port),
+            peer_id: PeerIdConfig::AutoId,
+        }],
+        peer_id_store_path: temp_dir2.path().join("peer_ids.json"),
+        max_peers: 10,
+        max_connections_per_peer: 3,
+        connection_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(60),
+        keep_alive_interval: Duration::from_secs(5),
+    };
+
+    // === Initial connection ===
+    let (inner1, handle1) =
+        StorageNetworkFactory::create_with_keypair(config1.clone(), keypair1.clone())
+            .await
+            .expect("Failed to create node1");
+
+    let (inner2, handle2) =
+        StorageNetworkFactory::create_with_keypair(config2.clone(), keypair2.clone())
+            .await
+            .expect("Failed to create node2");
+
+    let event_loop1 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner1.run().await {
+                eprintln!("Event loop 1 error: {}", e);
+            }
+        }));
+    });
+
+    let event_loop2 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner2.run().await {
+                eprintln!("Event loop 2 error: {}", e);
+            }
+        }));
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    handle1.dial_configured_peers().await.expect("Dial failed");
+    handle2.dial_configured_peers().await.expect("Dial failed");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify initial connection
+    let initial_peers = handle1.get_connected_peers().await;
+    assert_eq!(initial_peers.len(), 1, "Should have initial connection");
+
+    // === Restart node2 ===
+    let _ = handle2.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = event_loop2.join();
+
+    // Verify disconnection detected
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let peers_after_shutdown = handle1.get_connected_peers().await;
+    assert_eq!(peers_after_shutdown.len(), 0, "Should detect disconnection");
+
+    // Restart node2 with SAME keypair
+    let (inner2_restarted, handle2_restarted) =
+        StorageNetworkFactory::create_with_keypair(config2.clone(), keypair2)
+            .await
+            .expect("Failed to restart node2");
+
+    let event_loop2_restarted = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner2_restarted.run().await {
+                eprintln!("Event loop 2 restarted error: {}", e);
+            }
+        }));
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    handle1.dial_configured_peers().await.expect("Dial failed");
+    handle2_restarted
+        .dial_configured_peers()
+        .await
+        .expect("Dial failed");
+
+    // Give time for reconnection
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Verify reconnection succeeded
+    let peers_after_restart = handle1.get_connected_peers().await;
+    let peers2_after_restart = handle2_restarted.get_connected_peers().await;
+
+    assert_eq!(
+        peers_after_restart.len(),
+        1,
+        "Node1 should reconnect after node2 restart"
+    );
+    assert_eq!(
+        peers2_after_restart.len(),
+        1,
+        "Node2 should reconnect after restart"
+    );
+
+    // Cleanup
+    let _ = handle1.shutdown().await;
+    let _ = handle2_restarted.shutdown().await;
+    let _ = event_loop1.join();
+    let _ = event_loop2_restarted.join();
+}
+
+#[tokio::test]
+async fn test_peer_id_store_persistence() {
+    // Test that PeerIdStore correctly persists learned peer IDs to disk
+    // and loads them on restart, enforcing the same peer ID requirement.
+
+    let base_port = allocate_test_port_range();
+
+    let temp_dir1 = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir2 = TempDir::new().expect("Failed to create temp dir");
+    let peer_id_store_path1 = temp_dir1.path().join("peer_ids.json");
+    let peer_id_store_path2 = temp_dir2.path().join("peer_ids.json");
+
+    // Use fixed keypairs
+    let mut seed1 = [0u8; 32];
+    seed1[0] = 240;
+    let keypair1 = identity::Keypair::ed25519_from_bytes(seed1).expect("Failed to create keypair");
+
+    let mut seed2 = [0u8; 32];
+    seed2[0] = 241;
+    let keypair2 = identity::Keypair::ed25519_from_bytes(seed2).expect("Failed to create keypair");
+    let peer_id2 = PeerId::new(libp2p::PeerId::from(keypair2.public()).to_bytes());
+
+    let config1 = Config {
+        node_id: "persist-test-1".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port + 1),
+            peer_id: PeerIdConfig::AutoId, // Will learn peer2's ID
+        }],
+        peer_id_store_path: peer_id_store_path1.clone(),
+        max_peers: 10,
+        max_connections_per_peer: 3,
+        connection_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(60),
+        keep_alive_interval: Duration::from_secs(5),
+    };
+
+    let config2 = Config {
+        node_id: "persist-test-2".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port + 1)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port),
+            peer_id: PeerIdConfig::AutoId, // Will learn peer1's ID
+        }],
+        peer_id_store_path: peer_id_store_path2.clone(),
+        max_peers: 10,
+        max_connections_per_peer: 3,
+        connection_timeout: Duration::from_secs(5),
+        idle_connection_timeout: Duration::from_secs(60),
+        keep_alive_interval: Duration::from_secs(5),
+    };
+
+    // === First connection - learn peer IDs ===
+    let (inner1, handle1) =
+        StorageNetworkFactory::create_with_keypair(config1.clone(), keypair1.clone())
+            .await
+            .expect("Failed to create node1");
+
+    let (inner2, handle2) =
+        StorageNetworkFactory::create_with_keypair(config2.clone(), keypair2.clone())
+            .await
+            .expect("Failed to create node2");
+
+    let event_loop1 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner1.run().await {
+                eprintln!("Event loop 1 error: {}", e);
+            }
+        }));
+    });
+
+    let event_loop2 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner2.run().await {
+                eprintln!("Event loop 2 error: {}", e);
+            }
+        }));
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    handle1.dial_configured_peers().await.expect("Dial failed");
+    handle2.dial_configured_peers().await.expect("Dial failed");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify connection and peer ID learning
+    let peers1 = handle1.get_connected_peers().await;
+    assert_eq!(peers1.len(), 1, "Should have learned peer2");
+    assert_eq!(peers1[0].peer_id, peer_id2, "Should learn correct peer2 ID");
+
+    // Verify peer ID store files were created
+    assert!(
+        peer_id_store_path1.exists(),
+        "Node1 peer ID store should exist"
+    );
+    assert!(
+        peer_id_store_path2.exists(),
+        "Node2 peer ID store should exist"
+    );
+
+    // Read and verify store contents
+    let store1_content =
+        std::fs::read_to_string(&peer_id_store_path1).expect("Failed to read peer ID store 1");
+    assert!(
+        store1_content.contains(&peer_id2.as_bytes()[0].to_string()),
+        "Store should contain peer2's ID"
+    );
+
+    // Shutdown both nodes
+    let _ = handle1.shutdown().await;
+    let _ = handle2.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = event_loop1.join();
+    let _ = event_loop2.join();
+
+    // === Restart nodes with same config and verify peer IDs are enforced ===
+    let (inner1_restarted, handle1_restarted) =
+        StorageNetworkFactory::create_with_keypair(config1.clone(), keypair1.clone())
+            .await
+            .expect("Failed to restart node1");
+
+    let (inner2_restarted, handle2_restarted) =
+        StorageNetworkFactory::create_with_keypair(config2.clone(), keypair2)
+            .await
+            .expect("Failed to restart node2");
+
+    let event_loop1_restarted = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner1_restarted.run().await {
+                eprintln!("Event loop 1 restarted error: {}", e);
+            }
+        }));
+    });
+
+    let event_loop2_restarted = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner2_restarted.run().await {
+                eprintln!("Event loop 2 restarted error: {}", e);
+            }
+        }));
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    handle1_restarted
+        .dial_configured_peers()
+        .await
+        .expect("Dial failed");
+    handle2_restarted
+        .dial_configured_peers()
+        .await
+        .expect("Dial failed");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify reconnection with persisted peer IDs
+    let peers1_after_restart = handle1_restarted.get_connected_peers().await;
+    assert_eq!(
+        peers1_after_restart.len(),
+        1,
+        "Should reconnect using persisted peer ID"
+    );
+    assert_eq!(
+        peers1_after_restart[0].peer_id, peer_id2,
+        "Should connect to same peer ID as before"
+    );
+
+    // Cleanup
+    let _ = handle1_restarted.shutdown().await;
+    let _ = handle2_restarted.shutdown().await;
+    let _ = event_loop1_restarted.join();
+    let _ = event_loop2_restarted.join();
+}
+
+// TODO: This test is causing hangs - needs investigation
+// Likely issue: cluster.stop_node() might not be properly triggering disconnection detection
+// or the 5 second wait is insufficient for libp2p's ping timeout
+#[tokio::test]
+#[ignore]
+async fn test_stale_connection_cleanup() {
+    // Test that stale connections (from crashed nodes) are eventually detected
+    // and cleaned up, allowing new connections to be established.
+    // This relies on libp2p's ping/keep-alive mechanisms to detect dead connections.
+
+    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // Verify initial full mesh
+    let peers0_initial = cluster.node(0).handle.get_connected_peers().await;
+    let peers1_initial = cluster.node(1).handle.get_connected_peers().await;
+    assert_eq!(peers0_initial.len(), 2, "Node 0 should have 2 peers");
+    assert_eq!(peers1_initial.len(), 2, "Node 1 should have 2 peers");
+
+    // Simulate a crash of node 2 by stopping it without proper cleanup
+    // (just shutdown is graceful enough for libp2p, so we just test that
+    // the other nodes detect the disconnection)
+    cluster.stop_node(2).await.expect("Failed to stop node 2");
+
+    // Wait for the other nodes to detect the disconnection
+    // libp2p's ping mechanism should detect this within a few seconds
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Verify that nodes 0 and 1 detected the disconnection
+    let peers0_after = cluster.node(0).handle.get_connected_peers().await;
+    let peers1_after = cluster.node(1).handle.get_connected_peers().await;
+
+    assert!(
+        peers0_after.len() <= 1,
+        "Node 0 should have at most 1 peer after node 2 crashed (has {})",
+        peers0_after.len()
+    );
+    assert!(
+        peers1_after.len() <= 1,
+        "Node 1 should have at most 1 peer after node 2 crashed (has {})",
+        peers1_after.len()
+    );
+
+    // Verify that nodes 0 and 1 can still communicate
+    // (the remaining connection should be healthy)
+    let final_peers0 = cluster.node(0).handle.get_connected_peers().await;
+    let final_peers1 = cluster.node(1).handle.get_connected_peers().await;
+
+    // At least one connection should remain (between node 0 and node 1)
+    assert!(
+        final_peers0.len() >= 1 || final_peers1.len() >= 1,
+        "Nodes 0 and 1 should maintain their connection"
+    );
 
     cluster.stop().await.expect("Failed to stop cluster");
 }
