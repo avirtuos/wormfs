@@ -377,6 +377,83 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             border: 0.375rem solid transparent;
             border-bottom-color: rgba(0, 0, 0, 0.9);
         }
+
+        /* Peer Name Styles */
+        .peer-name-cell {
+            position: relative;
+            display: inline-block;
+        }
+
+        .peer-name-link {
+            color: var(--primary);
+            text-decoration: none;
+            font-weight: 500;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .peer-name-link:hover {
+            color: var(--primary-dark);
+            text-decoration: underline;
+        }
+
+        .peer-name-text {
+            color: var(--text);
+            font-weight: 500;
+        }
+
+        .peer-id-tooltip {
+            position: absolute;
+            left: 0;
+            top: 100%;
+            margin-top: 0.5rem;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.375rem;
+            font-size: 0.75rem;
+            font-family: 'Courier New', monospace;
+            white-space: nowrap;
+            z-index: 1000;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            pointer-events: none;
+        }
+
+        .peer-id-tooltip::before {
+            content: '';
+            position: absolute;
+            bottom: 100%;
+            left: 1rem;
+            border: 0.375rem solid transparent;
+            border-bottom-color: rgba(0, 0, 0, 0.9);
+        }
+
+        .metrics-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .metrics-table th {
+            background: var(--bg);
+            padding: 0.75rem;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text);
+            border-bottom: 2px solid var(--border);
+        }
+
+        .metrics-table td {
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .metrics-table tr:hover {
+            background: var(--bg);
+        }
+
+        .table-container {
+            overflow-x: auto;
+        }
     </style>
 </head>
 <body x-data="adminApp()">
@@ -620,8 +697,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                         <table class="metrics-table">
                             <thead>
                                 <tr>
-                                    <th>Node ID</th>
-                                    <th>Peer ID</th>
+                                    <th>Peer Name</th>
                                     <th>Address</th>
                                     <th>State</th>
                                     <th>Last Heartbeat</th>
@@ -632,8 +708,28 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                             <tbody>
                                 <template x-for="peer in networkStatus.peers" :key="peer.peer_id">
                                     <tr>
-                                        <td x-text="peer.node_id"></td>
-                                        <td><code style="font-size: 0.75rem;" x-text="peer.peer_id"></code></td>
+                                        <td>
+                                            <div class="peer-name-cell"
+                                                 x-data="{ showTooltip: false }"
+                                                 @mouseenter="showTooltip = true"
+                                                 @mouseleave="showTooltip = false">
+                                                <template x-if="peer.admin_url">
+                                                    <a :href="peer.admin_url"
+                                                       target="_blank"
+                                                       class="peer-name-link"
+                                                       x-text="peer.node_id">
+                                                    </a>
+                                                </template>
+                                                <template x-if="!peer.admin_url">
+                                                    <span class="peer-name-text" x-text="peer.node_id"></span>
+                                                </template>
+                                                <div x-show="showTooltip"
+                                                     class="peer-id-tooltip"
+                                                     x-text="peer.peer_id"
+                                                     style="display: none;">
+                                                </div>
+                                            </div>
+                                        </td>
                                         <td x-text="peer.addresses?.[0] || 'N/A'"></td>
                                         <td>
                                             <span class="status-badge" :style="'background: ' + (peer.connection_state === 'Connected' ? 'var(--success)' : 'var(--error)')" x-text="peer.connection_state"></span>
