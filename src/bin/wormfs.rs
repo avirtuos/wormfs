@@ -269,6 +269,10 @@ struct WormFsConfig {
     /// Admin server configuration (optional)
     #[serde(default)]
     admin: Option<wormfs::admin::Config>,
+
+    /// StorageNetwork configuration (optional)
+    #[serde(default)]
+    network: Option<wormfs::storage_network::Config>,
 }
 
 /// Load configuration from TOML file.
@@ -300,6 +304,7 @@ fn load_config_from_file(
         file_store_config: config.file_store,
         metric_config: config.metrics,
         admin_config: config.admin,
+        network_config: config.network,
         mount_point,
         mount_options: MountOptions::default(),
     })
@@ -408,8 +413,9 @@ fn create_default_config(
         filesystem_config,
         metadata_config,
         file_store_config,
-        metric_config: None, // Metrics disabled by default
-        admin_config: None,  // Admin server disabled by default
+        metric_config: None,  // Metrics disabled by default
+        admin_config: None,   // Admin server disabled by default
+        network_config: None, // Network disabled by default
         mount_point,
         mount_options: MountOptions::default(),
     })

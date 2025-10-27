@@ -409,6 +409,8 @@ impl super::StorageNetworkInner {
                         last_seen: SystemTime::now(),
                         validation_status,
                         last_heartbeat: None,
+                        node_id: None,
+                        heartbeat_sequence: None,
                     },
                 );
 
@@ -725,12 +727,14 @@ impl super::StorageNetworkInner {
                     heartbeat.node_id, source, heartbeat.sequence
                 );
 
-                // Update peer's last_heartbeat time
+                // Update peer's last_heartbeat time and metadata
                 let mut peers = self.state.peers.write().await;
 
                 if let Some(peer_state) = peers.get_mut(source) {
                     peer_state.last_heartbeat = Some(SystemTime::now());
                     peer_state.last_seen = SystemTime::now();
+                    peer_state.node_id = Some(heartbeat.node_id);
+                    peer_state.heartbeat_sequence = Some(heartbeat.sequence);
                 }
             }
             Err(e) => {
@@ -1047,6 +1051,8 @@ impl super::StorageNetworkInner {
                         protocols: vec![],
                         rtt: None,
                         last_heartbeat: state.last_heartbeat,
+                        node_id: state.node_id.clone(),
+                        heartbeat_sequence: state.heartbeat_sequence,
                     })
                     .collect();
                 let _ = response.send(peer_infos);
@@ -1067,6 +1073,8 @@ impl super::StorageNetworkInner {
                     protocols: vec![],
                     rtt: None,
                     last_heartbeat: state.last_heartbeat,
+                    node_id: state.node_id.clone(),
+                    heartbeat_sequence: state.heartbeat_sequence,
                 });
                 let _ = response.send(peer_info);
                 true
@@ -2368,6 +2376,8 @@ mod tests {
                     last_seen: SystemTime::now() - Duration::from_secs(100),
                     validation_status: ValidationStatus::Validated,
                     last_heartbeat: None,
+                    node_id: None,
+                    heartbeat_sequence: None,
                 },
             );
         }
@@ -2588,6 +2598,8 @@ mod tests {
                     last_seen: SystemTime::now(),
                     validation_status: ValidationStatus::Validated,
                     last_heartbeat: None,
+                    node_id: None,
+                    heartbeat_sequence: None,
                 },
             );
         }
@@ -2633,6 +2645,8 @@ mod tests {
                     last_seen: SystemTime::now(),
                     validation_status: ValidationStatus::Validated,
                     last_heartbeat: None,
+                    node_id: None,
+                    heartbeat_sequence: None,
                 },
             );
         }

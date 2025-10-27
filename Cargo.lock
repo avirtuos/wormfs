@@ -5322,6 +5322,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.6",
  "bincode",
+ "chrono",
  "clap",
  "crc32fast",
  "criterion",

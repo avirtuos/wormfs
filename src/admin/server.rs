@@ -14,6 +14,7 @@ use super::{
 };
 use crate::filesystem_service::mount::MountConfig;
 use crate::metric_service::MetricServiceImpl;
+use crate::storage_network::StorageNetworkHandle;
 use axum::{
     response::{Html, IntoResponse},
     routing::get,
@@ -27,6 +28,7 @@ pub struct AdminServer {
     config: Config,
     mount_config: Arc<MountConfig>,
     metrics: Arc<MetricServiceImpl>,
+    network: Option<Arc<StorageNetworkHandle>>,
 }
 
 impl AdminServer {
@@ -35,11 +37,13 @@ impl AdminServer {
         config: Config,
         mount_config: Arc<MountConfig>,
         metrics: Arc<MetricServiceImpl>,
+        network: Option<Arc<StorageNetworkHandle>>,
     ) -> Self {
         Self {
             config,
             mount_config,
             metrics,
+            network,
         }
     }
 
@@ -63,9 +67,10 @@ impl AdminServer {
         let config = self.config.clone();
         let mount_config = self.mount_config.clone();
         let metrics = self.metrics.clone();
+        let network = self.network.clone();
 
         let handle = tokio::spawn(async move {
-            if let Err(e) = Self::run_server(config, mount_config, metrics).await {
+            if let Err(e) = Self::run_server(config, mount_config, metrics, network).await {
                 tracing::error!("Admin server error: {}", e);
             }
         });
@@ -78,13 +83,14 @@ impl AdminServer {
         config: Config,
         mount_config: Arc<MountConfig>,
         metrics: Arc<MetricServiceImpl>,
+        network: Option<Arc<StorageNetworkHandle>>,
     ) -> Result<(), Error> {
         // Create WebSocket state and start broadcast task
         let ws_state = WsState::new(metrics.clone());
         ws_state.start_broadcast_task();
 
         // Build the router
-        let app = Self::create_router(mount_config, metrics, ws_state);
+        let app = Self::create_router(mount_config, metrics, ws_state, network);
 
         // Create bind address
         let addr = format!("{}:{}", config.bind_address, config.port);
@@ -111,6 +117,7 @@ impl AdminServer {
         mount_config: Arc<MountConfig>,
         metrics: Arc<MetricServiceImpl>,
         ws_state: WsState,
+        network: Option<Arc<StorageNetworkHandle>>,
     ) -> Router {
         // Create WebSocket router with WsState
         let ws_router = Router::new()
@@ -121,6 +128,16 @@ impl AdminServer {
         let config_router = Router::new()
             .route("/api/config", get(config_handler))
             .with_state(mount_config);
+
+        // Create network router with StorageNetworkHandle state
+        let network_router = if let Some(net) = network {
+            Router::new()
+                .route("/api/network/status", get(network_status_handler))
+                .route("/api/network/peers", get(peers_handler))
+                .with_state(net)
+        } else {
+            Router::new()
+        };
 
         // Create main router with metrics state
         let api_router = Router::new()
@@ -133,14 +150,12 @@ impl AdminServer {
             .route("/api/health", get(health_handler))
             .route("/api/status", get(status_handler))
             .route("/api/logs", get(logs_handler))
-            // Network routes
-            .route("/api/network/status", get(network_status_handler))
-            .route("/api/network/peers", get(peers_handler))
             .with_state(metrics);
 
         // Merge routers and add tracing layer
         api_router
             .merge(config_router)
+            .merge(network_router)
             .merge(ws_router)
             .layer(TraceLayer::new_for_http())
     }
@@ -183,7 +198,7 @@ mod tests {
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });
 
-        let server = AdminServer::new(admin_config.clone(), mount_config, metrics);
+        let server = AdminServer::new(admin_config.clone(), mount_config, metrics, None);
 
         assert_eq!(server.config.port, 9090);
         assert_eq!(server.config.bind_address, "127.0.0.1");
@@ -216,7 +231,7 @@ mod tests {
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });
 
-        let server = AdminServer::new(admin_config, mount_config, metrics);
+        let server = AdminServer::new(admin_config, mount_config, metrics, None);
 
         let result = server.start();
         assert!(result.is_err());

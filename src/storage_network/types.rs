@@ -25,7 +25,7 @@ impl PeerId {
 }
 
 /// Configuration for a peer in the network.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerConfig {
     /// Multiaddr string for the peer (e.g., "/ip4/127.0.0.1/tcp/4242/p2p/...")
     /// If the peer ID is not included in the multiaddr, AutoId mode is used.
@@ -33,13 +33,22 @@ pub struct PeerConfig {
 
     /// Peer ID configuration (explicit or auto-discover)
     /// This can be used to validate the peer ID from the multiaddr
+    #[serde(default)]
     pub peer_id: PeerIdConfig,
 }
 
+impl Default for PeerIdConfig {
+    fn default() -> Self {
+        PeerIdConfig::AutoId
+    }
+}
+
 /// Peer ID configuration mode.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
 pub enum PeerIdConfig {
     /// Exact peer ID required - reject connections with mismatched IDs
+    #[serde(skip)]
     Explicit(PeerId),
 
     /// Accept and store peer ID on first connection, enforce on subsequent connections
@@ -47,7 +56,7 @@ pub enum PeerIdConfig {
 }
 
 /// Network configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Node ID for this node (used in heartbeat messages and identification)
     pub node_id: String,
@@ -56,25 +65,74 @@ pub struct Config {
     pub listen_addresses: Vec<String>,
 
     /// Configured peers
+    #[serde(default)]
     pub peers: Vec<PeerConfig>,
 
     /// Path to store discovered peer IDs (for auto-ID mode)
     pub peer_id_store_path: PathBuf,
 
     /// Maximum number of peers to maintain
+    #[serde(default = "default_max_peers")]
     pub max_peers: usize,
 
     /// Maximum connections per peer
+    #[serde(default = "default_max_connections_per_peer")]
     pub max_connections_per_peer: usize,
 
-    /// Connection timeout
+    /// Connection timeout in seconds
+    #[serde(default = "default_connection_timeout_secs", with = "duration_serde")]
     pub connection_timeout: Duration,
 
-    /// Idle connection timeout
+    /// Idle connection timeout in seconds
+    #[serde(
+        default = "default_idle_connection_timeout_secs",
+        with = "duration_serde"
+    )]
     pub idle_connection_timeout: Duration,
 
-    /// Keep-alive interval
+    /// Keep-alive interval in seconds
+    #[serde(default = "default_keep_alive_interval_secs", with = "duration_serde")]
     pub keep_alive_interval: Duration,
+}
+
+fn default_max_peers() -> usize {
+    100
+}
+
+fn default_max_connections_per_peer() -> usize {
+    3
+}
+
+fn default_connection_timeout_secs() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn default_idle_connection_timeout_secs() -> Duration {
+    Duration::from_secs(600) // 10 minutes
+}
+
+fn default_keep_alive_interval_secs() -> Duration {
+    Duration::from_secs(30)
+}
+
+mod duration_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(duration.as_secs())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
 }
 
 /// State of a peer in the network.
@@ -97,6 +155,12 @@ pub struct PeerState {
 
     /// Last time we received a heartbeat from this peer
     pub last_heartbeat: Option<SystemTime>,
+
+    /// WormFS node ID (from heartbeat messages)
+    pub node_id: Option<String>,
+
+    /// Last heartbeat sequence number received
+    pub heartbeat_sequence: Option<u64>,
 }
 
 /// Peer validation status.
@@ -364,6 +428,12 @@ pub struct PeerInfo {
 
     /// Last time we received a heartbeat from this peer
     pub last_heartbeat: Option<SystemTime>,
+
+    /// WormFS node ID (from heartbeat messages)
+    pub node_id: Option<String>,
+
+    /// Last heartbeat sequence number received
+    pub heartbeat_sequence: Option<u64>,
 }
 
 /// Peer connection state.
