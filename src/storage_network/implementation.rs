@@ -356,6 +356,7 @@ impl super::StorageNetworkInner {
                 );
 
                 // Validate peer ID directly (not based on IP address)
+                // IP addresses can change, but peer IDs are stable identities
                 let validation_result =
                     match self.validate_peer_id_direct(internal_peer_id.clone()).await {
                         Ok(result) => result,
