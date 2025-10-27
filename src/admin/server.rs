@@ -194,6 +194,7 @@ mod tests {
             file_store_config: crate::file_store::types::Config::default(),
             metric_config: Some(MetricsConfig::default()),
             admin_config: Some(admin_config.clone()),
+            network_config: None,
             mount_point: std::path::PathBuf::from("/tmp/test"),
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });
@@ -227,6 +228,7 @@ mod tests {
             file_store_config: crate::file_store::types::Config::default(),
             metric_config: Some(MetricsConfig::default()),
             admin_config: Some(admin_config.clone()),
+            network_config: None,
             mount_point: std::path::PathBuf::from("/tmp/test"),
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });

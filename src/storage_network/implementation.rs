@@ -1744,6 +1744,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         }
     }
 
@@ -1794,6 +1795,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
@@ -1835,6 +1837,7 @@ mod tests {
                     connection_timeout: Duration::from_secs(30),
                     idle_connection_timeout: Duration::from_secs(600),
                     keep_alive_interval: Duration::from_secs(30),
+                    admin_url: None,
                 };
 
                 let (inner, handle) = super::super::StorageNetworkFactory::create(config)
@@ -1873,6 +1876,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
@@ -1911,6 +1915,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
@@ -1948,6 +1953,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
@@ -1993,6 +1999,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
@@ -2032,6 +2039,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
@@ -2076,6 +2084,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
@@ -2128,6 +2137,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
@@ -2176,6 +2186,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
@@ -2291,6 +2302,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let result = super::super::StorageNetworkFactory::create(config).await;
@@ -2696,6 +2708,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let result = super::super::StorageNetworkFactory::create(config).await;
@@ -2722,6 +2735,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let result = super::super::StorageNetworkFactory::create(config).await;
@@ -2913,6 +2927,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         };
 
         let (inner, _handle) = super::super::StorageNetworkFactory::create(config.clone())
