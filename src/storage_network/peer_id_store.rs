@@ -81,12 +81,9 @@ impl PeerIdStore {
 
     /// Save current mappings to disk.
     fn save_to_disk(&self) -> Result<(), Error> {
-        let mappings = self
-            .mappings
-            .read()
-            .map_err(|e| {
-                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
-            })?;
+        let mappings = self.mappings.read().map_err(|e| {
+            Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+        })?;
 
         let data = PeerIdStoreData {
             mappings: mappings
@@ -132,12 +129,9 @@ impl PeerIdStore {
     ///
     /// Returns an error if the internal lock is poisoned.
     pub fn get(&self, ip: &IpAddr) -> Result<Option<PeerId>, Error> {
-        let mappings = self
-            .mappings
-            .read()
-            .map_err(|e| {
-                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
-            })?;
+        let mappings = self.mappings.read().map_err(|e| {
+            Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+        })?;
         Ok(mappings.get(ip).cloned())
     }
 
@@ -158,12 +152,9 @@ impl PeerIdStore {
     ///
     /// Returns an error if the internal lock is poisoned.
     pub fn get_by_peer_id(&self, peer_id: &PeerId) -> Result<Option<PeerId>, Error> {
-        let mappings = self
-            .mappings
-            .read()
-            .map_err(|e| {
-                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
-            })?;
+        let mappings = self.mappings.read().map_err(|e| {
+            Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+        })?;
 
         // Check if this peer ID exists in any of the stored mappings
         for stored_peer_id in mappings.values() {
@@ -188,12 +179,9 @@ impl PeerIdStore {
     ///
     /// `Ok(())` if successful, error otherwise.
     pub fn store_by_peer_id(&self, peer_id: PeerId) -> Result<(), Error> {
-        let mappings_guard = self
-            .mappings
-            .read()
-            .map_err(|e| {
-                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
-            })?;
+        let mappings_guard = self.mappings.read().map_err(|e| {
+            Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+        })?;
 
         // Check if this peer ID already exists
         for stored_peer_id in mappings_guard.values() {
@@ -245,12 +233,9 @@ impl PeerIdStore {
     /// - The mapping cannot be persisted to disk
     /// - The internal lock is poisoned
     pub fn store(&self, ip: IpAddr, peer_id: PeerId) -> Result<(), Error> {
-        let mut mappings = self
-            .mappings
-            .write()
-            .map_err(|e| {
-                Error::ConfigError(format!("Lock poisoned while writing peer ID store: {}", e))
-            })?;
+        let mut mappings = self.mappings.write().map_err(|e| {
+            Error::ConfigError(format!("Lock poisoned while writing peer ID store: {}", e))
+        })?;
 
         // Check if IP already has a peer ID
         if let Some(existing_peer_id) = mappings.get(&ip) {
@@ -296,12 +281,9 @@ impl PeerIdStore {
     ///
     /// Returns an error if the internal lock is poisoned.
     pub fn get_all(&self) -> Result<HashMap<IpAddr, PeerId>, Error> {
-        let mappings = self
-            .mappings
-            .read()
-            .map_err(|e| {
-                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
-            })?;
+        let mappings = self.mappings.read().map_err(|e| {
+            Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+        })?;
         Ok(mappings.clone())
     }
 
@@ -324,12 +306,9 @@ impl PeerIdStore {
     #[allow(dead_code)]
     pub fn remove(&self, ip: &IpAddr) -> Result<Option<PeerId>, Error> {
         let removed = {
-            let mut mappings = self
-                .mappings
-                .write()
-                .map_err(|e| {
-                    Error::ConfigError(format!("Lock poisoned while writing peer ID store: {}", e))
-                })?;
+            let mut mappings = self.mappings.write().map_err(|e| {
+                Error::ConfigError(format!("Lock poisoned while writing peer ID store: {}", e))
+            })?;
             mappings.remove(ip)
         };
 
@@ -352,7 +331,10 @@ mod tests {
         let _ = std::fs::remove_file(&temp_path); // Clean up from previous test
 
         let store = PeerIdStore::new(&temp_path).expect("Failed to create store");
-        assert_eq!(store.get_all().expect("Failed to get all mappings").len(), 0);
+        assert_eq!(
+            store.get_all().expect("Failed to get all mappings").len(),
+            0
+        );
     }
 
     #[test]
@@ -370,7 +352,10 @@ mod tests {
             .expect("Failed to store mapping");
 
         // Retrieve mapping
-        let retrieved = store.get(&ip).expect("Failed to get mapping").expect("Mapping not found");
+        let retrieved = store
+            .get(&ip)
+            .expect("Failed to get mapping")
+            .expect("Mapping not found");
         assert_eq!(retrieved, peer_id);
     }
 
@@ -443,7 +428,10 @@ mod tests {
 
         // Create new store instance - should load from disk
         let store2 = PeerIdStore::new(&temp_path).expect("Failed to load store");
-        let retrieved = store2.get(&ip).expect("Failed to get mapping").expect("Mapping not found after reload");
+        let retrieved = store2
+            .get(&ip)
+            .expect("Failed to get mapping")
+            .expect("Mapping not found after reload");
         assert_eq!(retrieved, peer_id);
     }
 
