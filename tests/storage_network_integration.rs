@@ -2708,65 +2708,164 @@ async fn test_peer_id_store_persistence() {
     let _ = event_loop2_restarted.join();
 }
 
-// TODO: This test is causing hangs - needs investigation
-// Likely issue: cluster.stop_node() might not be properly triggering disconnection detection
-// or the 5 second wait is insufficient for libp2p's ping timeout
 #[tokio::test]
-#[ignore]
 async fn test_stale_connection_cleanup() {
     // Test that stale connections (from crashed nodes) are eventually detected
-    // and cleaned up, allowing new connections to be established.
-    // This relies on libp2p's ping/keep-alive mechanisms to detect dead connections.
+    // and cleaned up. This relies on libp2p's ping/keep-alive mechanisms.
+    // Simplified version using only 2 nodes with fixed ports.
 
-    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+    use tokio::time::timeout;
 
-    cluster
-        .wait_for_connectivity(Duration::from_secs(10))
+    let base_port = 40200;
+    let temp_dir1 = tempfile::tempdir().expect("Failed to create temp dir");
+    let temp_dir2 = tempfile::tempdir().expect("Failed to create temp dir");
+
+    // Node1: configured to connect to node2
+    let config1 = Config {
+        node_id: "stale-test-1".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port + 1),
+            peer_id: PeerIdConfig::AutoId,
+        }],
+        peer_id_store_path: temp_dir1.path().join("peer_ids.json"),
+        max_peers: 10,
+        max_connections_per_peer: 1,
+        connection_timeout: Duration::from_secs(10),
+        idle_connection_timeout: Duration::from_secs(30),
+        keep_alive_interval: Duration::from_secs(2),
+    };
+
+    let (inner1, handle1) = StorageNetworkFactory::create(config1)
         .await
-        .expect("Nodes failed to connect");
+        .expect("Failed to create node1");
 
-    // Verify initial full mesh
-    let peers0_initial = cluster.node(0).handle.get_connected_peers().await;
-    let peers1_initial = cluster.node(1).handle.get_connected_peers().await;
-    assert_eq!(peers0_initial.len(), 2, "Node 0 should have 2 peers");
-    assert_eq!(peers1_initial.len(), 2, "Node 1 should have 2 peers");
+    // Start node1 event loop
+    let event_loop1 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner1.run().await {
+                eprintln!("Event loop 1 error: {}", e);
+            }
+        }));
+    });
 
-    // Simulate a crash of node 2 by stopping it without proper cleanup
-    // (just shutdown is graceful enough for libp2p, so we just test that
-    // the other nodes detect the disconnection)
-    cluster.stop_node(2).await.expect("Failed to stop node 2");
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Wait for the other nodes to detect the disconnection
-    // libp2p's ping mechanism should detect this within a few seconds
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Node2: configured to connect to node1
+    let config2 = Config {
+        node_id: "stale-test-2".to_string(),
+        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", base_port + 1)],
+        peers: vec![PeerConfig {
+            multiaddr: format!("/ip4/127.0.0.1/tcp/{}", base_port),
+            peer_id: PeerIdConfig::AutoId,
+        }],
+        peer_id_store_path: temp_dir2.path().join("peer_ids.json"),
+        max_peers: 10,
+        max_connections_per_peer: 1,
+        connection_timeout: Duration::from_secs(10),
+        idle_connection_timeout: Duration::from_secs(30),
+        keep_alive_interval: Duration::from_secs(2),
+    };
 
-    // Verify that nodes 0 and 1 detected the disconnection
-    let peers0_after = cluster.node(0).handle.get_connected_peers().await;
-    let peers1_after = cluster.node(1).handle.get_connected_peers().await;
+    let (inner2, handle2) = StorageNetworkFactory::create(config2)
+        .await
+        .expect("Failed to create node2");
 
-    assert!(
-        peers0_after.len() <= 1,
-        "Node 0 should have at most 1 peer after node 2 crashed (has {})",
-        peers0_after.len()
+    // Start node2 event loop
+    let event_loop2 = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            if let Err(e) = inner2.run().await {
+                eprintln!("Event loop 2 error: {}", e);
+            }
+        }));
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Connect nodes - both nodes try to dial
+    handle1
+        .dial_configured_peers()
+        .await
+        .expect("Failed to dial peers from node1");
+    handle2
+        .dial_configured_peers()
+        .await
+        .expect("Failed to dial peers from node2");
+
+    // Wait for connection establishment with retry loop
+    let mut attempts = 0;
+    let mut peers1_initial = Vec::new();
+    while attempts < 15 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let peers = timeout(Duration::from_secs(2), handle1.get_connected_peers())
+            .await
+            .expect("Timeout getting node1 peers");
+        if !peers.is_empty() {
+            peers1_initial = peers;
+            break;
+        }
+        attempts += 1;
+    }
+
+    println!(
+        "Node1 initial peers: {} (after {} attempts)",
+        peers1_initial.len(),
+        attempts
     );
-    assert!(
-        peers1_after.len() <= 1,
-        "Node 1 should have at most 1 peer after node 2 crashed (has {})",
-        peers1_after.len()
+    assert_eq!(
+        peers1_initial.len(),
+        1,
+        "Node 1 should have 1 peer initially"
     );
 
-    // Verify that nodes 0 and 1 can still communicate
-    // (the remaining connection should be healthy)
-    let final_peers0 = cluster.node(0).handle.get_connected_peers().await;
-    let final_peers1 = cluster.node(1).handle.get_connected_peers().await;
+    // Shutdown node2 (simulates a crash)
+    println!("Shutting down node2...");
+    let _ = timeout(Duration::from_secs(3), handle2.shutdown()).await;
 
-    // At least one connection should remain (between node 0 and node 1)
-    assert!(
-        final_peers0.len() >= 1 || final_peers1.len() >= 1,
-        "Nodes 0 and 1 should maintain their connection"
-    );
+    // Wait for node2's event loop to terminate
+    let _ = event_loop2.join();
 
-    cluster.stop().await.expect("Failed to stop cluster");
+    println!("Node2 stopped. Waiting for node1 to detect disconnection...");
+
+    // Wait for node1 to detect the disconnection via ping/keepalive timeout
+    // libp2p's default ping interval is 15 seconds, but our keep_alive is 2 seconds
+    tokio::time::sleep(Duration::from_secs(8)).await;
+
+    // Check if node1 detected the disconnection (with timeout to prevent hang)
+    println!("Checking node1 peers after node2 crash...");
+    let peers1_after_result = timeout(Duration::from_secs(3), handle1.get_connected_peers()).await;
+
+    match peers1_after_result {
+        Ok(peers) => {
+            println!("Node1 peers after crash: {}", peers.len());
+            assert_eq!(
+                peers.len(),
+                0,
+                "Node 1 should have detected disconnection (has {} peers)",
+                peers.len()
+            );
+        }
+        Err(_) => {
+            panic!("Timeout waiting for get_connected_peers - possible deadlock or hang");
+        }
+    }
+
+    // Cleanup
+    println!("Cleaning up...");
+    let _ = timeout(Duration::from_secs(3), handle1.shutdown()).await;
+    let _ = event_loop1.join();
+
+    println!("Test completed successfully");
 }
 
 // ... Additional placeholder tests for remaining phases
