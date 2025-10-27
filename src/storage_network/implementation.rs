@@ -1475,10 +1475,23 @@ impl super::StorageNetworkInner {
                 }
                 PeerIdConfig::AutoId => {
                     // AutoId mode: check if we've seen this peer ID before
-                    if let Some(stored_id) = self.inner.peer_id_store.get_by_peer_id(&peer_id) {
-                        if stored_id == peer_id {
+                    match self.inner.peer_id_store.get_by_peer_id(&peer_id) {
+                        Ok(Some(stored_id)) if stored_id == peer_id => {
                             info!("Peer {:?} validated as previously discovered", peer_id);
                             return Ok(ValidationResult::Validated);
+                        }
+                        Ok(None) => {
+                            // Not seen before, continue to new discovery logic
+                        }
+                        Ok(Some(_)) => {
+                            // This should never happen - stored ID doesn't match peer ID
+                            warn!("Peer ID mismatch in store");
+                        }
+                        Err(e) => {
+                            return Err(Error::ValidationFailed(format!(
+                                "Failed to check peer ID store: {}",
+                                e
+                            )));
                         }
                     }
                 }
@@ -1577,7 +1590,7 @@ impl InnerState {
             PeerIdConfig::AutoId => {
                 // AutoId mode: check if we've seen this peer before
                 match self.peer_id_store.get(&ip) {
-                    Some(stored_id) => {
+                    Ok(Some(stored_id)) => {
                         // We've seen this peer before, validate against stored ID
                         if stored_id == peer_id {
                             info!("Peer {} validated with learned ID", ip);
@@ -1593,13 +1606,16 @@ impl InnerState {
                             })
                         }
                     }
-                    None => {
+                    Ok(None) => {
                         // First time seeing this peer, store its ID
                         self.peer_id_store.store(ip, peer_id.clone()).map_err(|e| {
                             Error::ValidationFailed(format!("Failed to store peer ID: {}", e))
                         })?;
                         info!("Peer {} newly discovered with ID {:?}", ip, peer_id);
                         Ok(ValidationResult::NewlyDiscovered(peer_id))
+                    }
+                    Err(e) => {
+                        Err(Error::ValidationFailed(format!("Failed to check peer ID store: {}", e)))
                     }
                 }
             }
@@ -1991,7 +2007,7 @@ mod tests {
         }
 
         // Verify peer ID was stored (using peer-ID-based lookup)
-        let stored_id = inner.inner.peer_id_store.get_by_peer_id(&peer_id);
+        let stored_id = inner.inner.peer_id_store.get_by_peer_id(&peer_id).expect("Failed to get peer ID");
         assert_eq!(stored_id, Some(peer_id));
     }
 

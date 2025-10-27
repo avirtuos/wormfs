@@ -84,7 +84,9 @@ impl PeerIdStore {
         let mappings = self
             .mappings
             .read()
-            .expect("Failed to acquire mappings lock");
+            .map_err(|e| {
+                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+            })?;
 
         let data = PeerIdStoreData {
             mappings: mappings
@@ -125,12 +127,18 @@ impl PeerIdStore {
     /// # Returns
     ///
     /// The stored peer ID if found, `None` otherwise.
-    pub fn get(&self, ip: &IpAddr) -> Option<PeerId> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the internal lock is poisoned.
+    pub fn get(&self, ip: &IpAddr) -> Result<Option<PeerId>, Error> {
         let mappings = self
             .mappings
             .read()
-            .expect("Failed to acquire mappings lock");
-        mappings.get(ip).cloned()
+            .map_err(|e| {
+                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+            })?;
+        Ok(mappings.get(ip).cloned())
     }
 
     /// Check if a peer ID has been previously seen/stored.
@@ -145,19 +153,25 @@ impl PeerIdStore {
     /// # Returns
     ///
     /// The peer ID if it exists in the store, `None` otherwise.
-    pub fn get_by_peer_id(&self, peer_id: &PeerId) -> Option<PeerId> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the internal lock is poisoned.
+    pub fn get_by_peer_id(&self, peer_id: &PeerId) -> Result<Option<PeerId>, Error> {
         let mappings = self
             .mappings
             .read()
-            .expect("Failed to acquire mappings lock");
+            .map_err(|e| {
+                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+            })?;
 
         // Check if this peer ID exists in any of the stored mappings
         for stored_peer_id in mappings.values() {
             if stored_peer_id == peer_id {
-                return Some(peer_id.clone());
+                return Ok(Some(peer_id.clone()));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Store a peer ID for peer-ID-based validation.
@@ -177,7 +191,9 @@ impl PeerIdStore {
         let mappings_guard = self
             .mappings
             .read()
-            .expect("Failed to acquire mappings lock");
+            .map_err(|e| {
+                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+            })?;
 
         // Check if this peer ID already exists
         for stored_peer_id in mappings_guard.values() {
@@ -227,11 +243,14 @@ impl PeerIdStore {
     /// - The IP already has a different peer ID
     /// - The peer ID is already associated with a different IP
     /// - The mapping cannot be persisted to disk
+    /// - The internal lock is poisoned
     pub fn store(&self, ip: IpAddr, peer_id: PeerId) -> Result<(), Error> {
         let mut mappings = self
             .mappings
             .write()
-            .expect("Failed to acquire mappings lock");
+            .map_err(|e| {
+                Error::ConfigError(format!("Lock poisoned while writing peer ID store: {}", e))
+            })?;
 
         // Check if IP already has a peer ID
         if let Some(existing_peer_id) = mappings.get(&ip) {
@@ -272,12 +291,18 @@ impl PeerIdStore {
     /// # Returns
     ///
     /// A clone of all currently stored mappings.
-    pub fn get_all(&self) -> HashMap<IpAddr, PeerId> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the internal lock is poisoned.
+    pub fn get_all(&self) -> Result<HashMap<IpAddr, PeerId>, Error> {
         let mappings = self
             .mappings
             .read()
-            .expect("Failed to acquire mappings lock");
-        mappings.clone()
+            .map_err(|e| {
+                Error::ConfigError(format!("Lock poisoned while reading peer ID store: {}", e))
+            })?;
+        Ok(mappings.clone())
     }
 
     /// Remove a mapping for an IP address.
@@ -292,13 +317,19 @@ impl PeerIdStore {
     /// # Returns
     ///
     /// The removed peer ID if it existed, `None` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the internal lock is poisoned or disk I/O fails.
     #[allow(dead_code)]
     pub fn remove(&self, ip: &IpAddr) -> Result<Option<PeerId>, Error> {
         let removed = {
             let mut mappings = self
                 .mappings
                 .write()
-                .expect("Failed to acquire mappings lock");
+                .map_err(|e| {
+                    Error::ConfigError(format!("Lock poisoned while writing peer ID store: {}", e))
+                })?;
             mappings.remove(ip)
         };
 
@@ -321,7 +352,7 @@ mod tests {
         let _ = std::fs::remove_file(&temp_path); // Clean up from previous test
 
         let store = PeerIdStore::new(&temp_path).expect("Failed to create store");
-        assert_eq!(store.get_all().len(), 0);
+        assert_eq!(store.get_all().expect("Failed to get all mappings").len(), 0);
     }
 
     #[test]
@@ -339,7 +370,7 @@ mod tests {
             .expect("Failed to store mapping");
 
         // Retrieve mapping
-        let retrieved = store.get(&ip).expect("Mapping not found");
+        let retrieved = store.get(&ip).expect("Failed to get mapping").expect("Mapping not found");
         assert_eq!(retrieved, peer_id);
     }
 
@@ -367,7 +398,7 @@ mod tests {
             .contains("already has a different peer ID"));
 
         // Original mapping should still be intact
-        assert_eq!(store.get(&ip).unwrap(), peer_id1);
+        assert_eq!(store.get(&ip).unwrap().unwrap(), peer_id1);
     }
 
     #[test]
@@ -412,7 +443,7 @@ mod tests {
 
         // Create new store instance - should load from disk
         let store2 = PeerIdStore::new(&temp_path).expect("Failed to load store");
-        let retrieved = store2.get(&ip).expect("Mapping not found after reload");
+        let retrieved = store2.get(&ip).expect("Failed to get mapping").expect("Mapping not found after reload");
         assert_eq!(retrieved, peer_id);
     }
 
@@ -433,6 +464,6 @@ mod tests {
             .store(ip, peer_id.clone())
             .expect("Failed to store second time");
 
-        assert_eq!(store.get(&ip).unwrap(), peer_id);
+        assert_eq!(store.get(&ip).unwrap().unwrap(), peer_id);
     }
 }
