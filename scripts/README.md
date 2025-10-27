@@ -4,9 +4,9 @@ This directory contains utility scripts for WormFS development and demonstration
 
 ## Available Scripts
 
-### 🎬 `demo_wormfs.sh` - FUSE Filesystem Demo
+### 🌐 `demo_wormfs.sh` - Complete WormFS Demo with Networking
 
-Demonstrates WormFS Phase 1, Step 7 capabilities by mounting the filesystem and running various operations.
+Demonstrates all Phase 1 WormFS capabilities PLUS peer-to-peer networking with two FUSE mount instances discovering each other via libp2p and displaying real-time network status via Admin UI.
 
 **Usage:**
 ```bash
@@ -14,42 +14,73 @@ Demonstrates WormFS Phase 1, Step 7 capabilities by mounting the filesystem and 
 ```
 
 **Options:**
-- `-v, --verbose` - Enable verbose debug output
+- `-v, --verbose` - Enable verbose output
+- `--skip-tests` - Skip file/directory operation tests (mount only)
 - `-h, --help` - Show help message
 
 **What it demonstrates:**
-1. ✅ Pre-flight checks (FUSE availability, binary existence)
-2. ✅ Automatic build if binary doesn't exist
-3. ✅ Mount WormFS filesystem
-4. ✅ Verify mount in system mount table
-5. ✅ Query root directory attributes (`stat`)
-6. ✅ List directory contents (`ls`, `ls -la`)
-7. ✅ Navigate into filesystem (`cd`)
-8. ✅ Check filesystem statistics (`df`)
-9. ✅ Show current limitations (file/directory creation)
-10. ✅ Performance test (inode caching)
-11. ✅ Automatic cleanup and unmount
+1. ✅ Configuration Management (TOML + CLI overrides)
+2. ✅ Metadata Persistence (MetadataStore + SQLite)
+3. ✅ Erasure Coding (FileStore + Reed-Solomon 2+1)
+4. ✅ StripeCache (Write Buffering & I/O Amplification Reduction)
+5. ✅ FUSE Filesystem (FileSystemService)
+6. ✅ **StorageNetwork (libp2p peer-to-peer networking)**
+7. ✅ **Two Networked Mount Points (connected via libp2p)**
+8. ✅ File & Directory Operations
+9. ✅ Metrics Collection (I/O Amplification Tracking)
+10. ✅ Graceful Shutdown
 
 **Example:**
 ```bash
-# Run the demo
+# Run the complete demo with networking
 ./scripts/demo_wormfs.sh
 
-# Run with verbose output
-./scripts/demo_wormfs.sh --verbose
+# The script will:
+# 1. Build wormfs binary with FUSE support
+# 2. Create two mount instances with unique configs
+# 3. Mount both filesystems with StorageNetwork enabled
+# 4. Display Admin UI URLs:
+#    - Node 1: http://127.0.0.1:9090 (Mount 1)
+#    - Node 2: http://127.0.0.1:9091 (Mount 2)
+# 5. Show peer connectivity status
+# 6. Run complete Phase 1 tests on Node 1
+# 7. Demonstrate file operations, erasure coding, and data integrity
+
+# Open both Admin UIs in your browser
+# Click the "Network" tab to see peer connectivity!
+
+# Quick test without file operations
+./scripts/demo_wormfs.sh --skip-tests
 ```
 
 **Features:**
 - 🎨 Colored, readable output
 - 🧹 Automatic cleanup on exit or Ctrl+C
-- ⚡ Background mount with health checking
-- 📊 Performance benchmarking
-- 🔍 Shows what works and what's coming
+- 🌐 Embedded Admin UI in each mount instance
+- 📊 Live metrics and heartbeat monitoring
+- 🔄 Real-time network status updates with actual peer data
+- 📁 Complete Phase 1 FUSE filesystem testing
+- 🔐 Erasure coding and data integrity verification
+
+**What you'll see:**
+- **In Terminal:**
+  - Mount status for both nodes
+  - Peer connectivity verification
+  - File operations on Node 1
+  - Performance metrics
+  - Data integrity checks (2GB file with MD5 verification)
+- **In Admin UI:** Network tab showing:
+  - Connected peers with actual node IDs
+  - Last heartbeat timestamps (auto-updating)
+  - Heartbeat sequence numbers
+  - Connection states
+  - Peer addresses
 
 **Requirements:**
-- FUSE3 (Linux) or macFUSE (macOS)
 - Rust toolchain for building
-- `bc` command for calculations
+- FUSE3 (Linux) or macFUSE (macOS)
+- Two available ports (9090, 9091) for Admin UIs
+- Two available ports (7101, 7102) for libp2p
 
 ---
 
@@ -172,7 +203,7 @@ brew install macfuse
 
 ### Quick Demo
 ```bash
-# Run the demo to see WormFS in action
+# Run multi-node networking demo with Admin UI
 ./scripts/demo_wormfs.sh
 ```
 

@@ -35,6 +35,9 @@ pub struct MountConfig {
     /// Admin server configuration (optional)
     pub admin_config: Option<crate::admin::Config>,
 
+    /// StorageNetwork configuration (optional)
+    pub network_config: Option<crate::storage_network::Config>,
+
     /// Mount point path
     pub mount_point: std::path::PathBuf,
 
@@ -154,6 +157,51 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         None
     };
 
+    // Initialize StorageNetwork if configured
+    let network_handle = if let Some(network_config) = config.network_config.clone() {
+        tracing::info!("Initializing StorageNetwork...");
+
+        use crate::storage_network::StorageNetworkFactory;
+
+        let (network_inner, handle) = StorageNetworkFactory::create(network_config)
+            .await
+            .map_err(|e| Error::Internal(format!("Failed to create StorageNetwork: {}", e)))?;
+
+        // Spawn the network event loop in a dedicated thread with LocalSet
+        // This is necessary because libp2p's Swarm is !Send
+        let node_id = handle.config.node_id.clone();
+        std::thread::spawn(move || {
+            // Create a new tokio runtime for this thread
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create runtime for network event loop");
+
+            // Run the event loop in a LocalSet to support !Send futures
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(async move {
+                tracing::info!("Starting StorageNetwork event loop for node {}", node_id);
+                if let Err(e) = network_inner.run().await {
+                    tracing::error!("StorageNetwork event loop failed for {}: {}", node_id, e);
+                }
+                tracing::info!("StorageNetwork event loop stopped for {}", node_id);
+            }));
+        });
+
+        // Dial configured peers
+        tracing::info!("Dialing configured peers...");
+        if let Err(e) = handle.dial_configured_peers().await {
+            tracing::warn!("Failed to dial some peers: {}", e);
+        } else {
+            tracing::info!("Peer dialing initiated");
+        }
+
+        Some(Arc::new(handle))
+    } else {
+        tracing::info!("StorageNetwork disabled");
+        None
+    };
+
     // Start admin server if configured and metrics are available
     let _admin_handle = if let (Some(admin_cfg), Some(metrics_svc)) =
         (config.admin_config.clone(), metrics.as_ref())
@@ -171,6 +219,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
             admin_cfg.clone(),
             mount_config_arc,
             Arc::clone(metrics_svc),
+            network_handle.clone(),
         );
 
         match admin_server.start() {

@@ -110,6 +110,16 @@ async fn main() {
         tracing::info!("Use 'wormfs mount' command to mount the filesystem");
     }
 
+    // Dial configured peers if network is available
+    if let Some(network) = node.storage_network() {
+        tracing::info!("Dialing configured peers...");
+        if let Err(e) = network.dial_configured_peers().await {
+            tracing::warn!("Failed to dial some peers: {}", e);
+        } else {
+            tracing::info!("Peer dialing initiated");
+        }
+    }
+
     // Start Admin UI
     tracing::info!("Starting Admin UI on port {}...", args.admin_port);
     let admin_config = wormfs::admin::types::Config {
@@ -125,6 +135,7 @@ async fn main() {
         file_store_config: wormfs::file_store::types::Config::default(),
         metric_config: None,
         admin_config: None,
+        network_config: None, // StorageNode handles networking separately
         mount_point: std::path::PathBuf::from("/tmp/wormfs-not-mounted"),
         mount_options: wormfs::filesystem_service::mount::MountOptions::default(),
     });
@@ -142,7 +153,10 @@ async fn main() {
         }
     };
 
-    let admin_server = AdminServer::new(admin_config, mount_config, metrics);
+    // Get network handle for Admin UI
+    let network_handle = node.storage_network().map(|n| Arc::new(n.clone()));
+
+    let admin_server = AdminServer::new(admin_config, mount_config, metrics, network_handle);
     let _admin_handle = match admin_server.start() {
         Ok(handle) => {
             tracing::info!("Admin UI started at http://127.0.0.1:{}", args.admin_port);

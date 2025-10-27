@@ -132,10 +132,21 @@ impl StorageNodeImpl {
 
         // Step 4: Initialize StorageNetwork (Phase 2+)
         info!("Initializing StorageNetwork...");
+
+        // Convert peer_addresses to PeerConfig format with AutoId mode
+        let peers = config
+            .peer_addresses
+            .iter()
+            .map(|addr| crate::storage_network::types::PeerConfig {
+                multiaddr: format!("/ip4/{}/tcp/{}", addr.ip(), addr.port()),
+                peer_id: crate::storage_network::types::PeerIdConfig::AutoId,
+            })
+            .collect();
+
         let network_config = crate::storage_network::Config {
             node_id: config.node_id.clone(),
             listen_addresses: vec![format!("/ip4/0.0.0.0/tcp/{}", config.libp2p_listen_port)],
-            peers: vec![], // Will be populated from config.peer_addresses in future phases
+            peers,
             peer_id_store_path: config.peer_id_store_path.clone(),
             max_peers: config.max_peers,
             max_connections_per_peer: config.max_connections_per_peer,
