@@ -20,11 +20,13 @@ NC='\033[0m' # No Color
 # Configuration
 VERBOSE=0
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STORAGE_NODE_BINARY="${PROJECT_ROOT}/target/release/storage_node"
+STORAGE_NODE_BINARY="${PROJECT_ROOT}/target/release/wormfs-storage-node"
 NODE1_DATA_DIR=""
 NODE2_DATA_DIR=""
 NODE1_PID=""
 NODE2_PID=""
+NODE1_ADMIN_PORT=8080
+NODE2_ADMIN_PORT=8081
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -129,11 +131,11 @@ echo "  WormFS Phase 2: StorageNetwork Multi-Node Demo"
 echo "================================================================"
 echo -e "${NC}"
 
-# Step 1: Build the storage_node binary
-echo -e "${BOLD}Step 1: Building storage_node binary${NC}"
+# Step 1: Build the wormfs-storage-node binary
+echo -e "${BOLD}Step 1: Building wormfs-storage-node binary${NC}"
 echo -e "${CYAN}Building in release mode for optimal performance...${NC}"
 cd "$PROJECT_ROOT"
-cargo build --release --bin storage_node --features libp2p
+cargo build --release --bin wormfs-storage-node
 if [ $? -ne 0 ]; then
     fail "Failed to build storage_node binary"
 fi
@@ -179,18 +181,20 @@ echo ""
 # Step 4: Start storage nodes
 echo -e "${BOLD}Step 4: Starting storage nodes${NC}"
 
-echo -e "${CYAN}Starting Node 1...${NC}"
+echo -e "${CYAN}Starting Node 1 with Admin UI on port $NODE1_ADMIN_PORT...${NC}"
 RUST_LOG=info "$STORAGE_NODE_BINARY" \
     --config "$NODE1_DATA_DIR/config.toml" \
+    --admin-port "$NODE1_ADMIN_PORT" \
     > "$NODE1_DATA_DIR/node.log" 2>&1 &
 NODE1_PID=$!
 echo -e "${GREEN}✓ Node 1 started (PID: $NODE1_PID)${NC}"
 
 sleep 2
 
-echo -e "${CYAN}Starting Node 2...${NC}"
+echo -e "${CYAN}Starting Node 2 with Admin UI on port $NODE2_ADMIN_PORT...${NC}"
 RUST_LOG=info "$STORAGE_NODE_BINARY" \
     --config "$NODE2_DATA_DIR/config.toml" \
+    --admin-port "$NODE2_ADMIN_PORT" \
     > "$NODE2_DATA_DIR/node.log" 2>&1 &
 NODE2_PID=$!
 echo -e "${GREEN}✓ Node 2 started (PID: $NODE2_PID)${NC}"
@@ -237,14 +241,17 @@ echo -e "${CYAN}Node 1:${NC}"
 echo -e "  - Node ID: wormfs-node-001"
 echo -e "  - Address: 127.0.0.1:7001"
 echo -e "  - libp2p: 127.0.0.1:7101"
+echo -e "  - Admin UI: ${BOLD}${BLUE}http://127.0.0.1:$NODE1_ADMIN_PORT${NC}"
 echo -e "  - Log: $NODE1_DATA_DIR/node.log"
 echo ""
 echo -e "${CYAN}Node 2:${NC}"
 echo -e "  - Node ID: wormfs-node-002"
 echo -e "  - Address: 127.0.0.1:7002"
 echo -e "  - libp2p: 127.0.0.1:7102"
+echo -e "  - Admin UI: ${BOLD}${BLUE}http://127.0.0.1:$NODE2_ADMIN_PORT${NC}"
 echo -e "  - Log: $NODE2_DATA_DIR/node.log"
 echo ""
+echo -e "${BOLD}${MAGENTA}🌐 Open the Admin UIs in your browser and click the Network tab!${NC}"
 echo -e "${YELLOW}Nodes are exchanging heartbeats every 5 seconds${NC}"
 echo -e "${YELLOW}Press Ctrl+C to stop and cleanup${NC}"
 echo ""

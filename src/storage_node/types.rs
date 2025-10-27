@@ -44,6 +44,33 @@ pub struct Config {
     #[serde(default = "default_libp2p_port")]
     pub libp2p_listen_port: u16,
 
+    /// Path to store discovered peer IDs (Phase 2+)
+    #[serde(default = "default_peer_id_store_path")]
+    pub peer_id_store_path: PathBuf,
+
+    /// Maximum number of peers to maintain (Phase 2+)
+    #[serde(default = "default_max_peers")]
+    pub max_peers: usize,
+
+    /// Maximum connections per peer (Phase 2+)
+    #[serde(default = "default_max_connections_per_peer")]
+    pub max_connections_per_peer: usize,
+
+    /// Network connection timeout in seconds (Phase 2+)
+    #[serde(default = "default_connection_timeout_secs", with = "duration_serde")]
+    pub connection_timeout: Duration,
+
+    /// Idle connection timeout in seconds (Phase 2+)
+    #[serde(
+        default = "default_idle_connection_timeout_secs",
+        with = "duration_serde"
+    )]
+    pub idle_connection_timeout: Duration,
+
+    /// Keep-alive interval in seconds (Phase 2+)
+    #[serde(default = "default_keep_alive_interval_secs", with = "duration_serde")]
+    pub keep_alive_interval: Duration,
+
     /// Default stripe size in bytes
     #[serde(default = "default_stripe_size")]
     pub default_stripe_size: u64,
@@ -93,6 +120,30 @@ fn default_listen_address() -> SocketAddr {
 
 fn default_libp2p_port() -> u16 {
     7001
+}
+
+fn default_peer_id_store_path() -> PathBuf {
+    PathBuf::from("/var/lib/wormfs/peer_ids.json")
+}
+
+fn default_max_peers() -> usize {
+    100
+}
+
+fn default_max_connections_per_peer() -> usize {
+    3
+}
+
+fn default_connection_timeout_secs() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn default_idle_connection_timeout_secs() -> Duration {
+    Duration::from_secs(600) // 10 minutes
+}
+
+fn default_keep_alive_interval_secs() -> Duration {
+    Duration::from_secs(30)
 }
 
 fn default_stripe_size() -> u64 {
@@ -168,6 +219,12 @@ impl Default for Config {
             snapshot_dir: PathBuf::from("/var/lib/wormfs/snapshots"),
             peer_addresses: Vec::new(),
             libp2p_listen_port: default_libp2p_port(),
+            peer_id_store_path: default_peer_id_store_path(),
+            max_peers: default_max_peers(),
+            max_connections_per_peer: default_max_connections_per_peer(),
+            connection_timeout: default_connection_timeout_secs(),
+            idle_connection_timeout: default_idle_connection_timeout_secs(),
+            keep_alive_interval: default_keep_alive_interval_secs(),
             default_stripe_size: default_stripe_size(),
             default_data_shards: default_data_shards(),
             default_parity_shards: default_parity_shards(),

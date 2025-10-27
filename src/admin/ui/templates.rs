@@ -406,6 +406,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <button class="tab-button" :class="{ 'active': activeTab === 'logs' }" @click="activeTab = 'logs'">
                 📝 Logs
             </button>
+            <button class="tab-button" :class="{ 'active': activeTab === 'network' }" @click="activeTab = 'network'">
+                🌐 Network
+            </button>
         </div>
 
         <!-- Monitoring Tab -->
@@ -588,6 +591,69 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 <p>📝 Log viewer coming soon</p>
             </div>
         </div>
+
+        <!-- Network Tab -->
+        <div class="tab-panel" :class="{ 'active': activeTab === 'network' }">
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-label">Node ID</div>
+                    <div class="metric-value" style="font-size: 1rem;" x-text="networkStatus?.local_node?.node_id || 'Unknown'"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total Peers</div>
+                    <div class="metric-value" x-text="networkStatus?.statistics?.total_peers || 0"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Connected Peers</div>
+                    <div class="metric-value" x-text="networkStatus?.statistics?.connected_peers || 0"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Messages Sent</div>
+                    <div class="metric-value" x-text="formatNumber(networkStatus?.statistics?.messages_sent || 0)"></div>
+                </div>
+            </div>
+
+            <div class="metrics-section">
+                <h2 class="section-title">Connected Peers</h2>
+                <div class="table-container">
+                    <template x-if="networkStatus?.peers && networkStatus.peers.length > 0">
+                        <table class="metrics-table">
+                            <thead>
+                                <tr>
+                                    <th>Node ID</th>
+                                    <th>Peer ID</th>
+                                    <th>Address</th>
+                                    <th>State</th>
+                                    <th>Last Heartbeat</th>
+                                    <th>Sequence</th>
+                                    <th>RTT</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="peer in networkStatus.peers" :key="peer.peer_id">
+                                    <tr>
+                                        <td x-text="peer.node_id"></td>
+                                        <td><code style="font-size: 0.75rem;" x-text="peer.peer_id"></code></td>
+                                        <td x-text="peer.addresses?.[0] || 'N/A'"></td>
+                                        <td>
+                                            <span class="status-badge" :style="'background: ' + (peer.connection_state === 'Connected' ? 'var(--success)' : 'var(--error)')" x-text="peer.connection_state"></span>
+                                        </td>
+                                        <td x-text="formatTimestamp(peer.last_heartbeat)"></td>
+                                        <td x-text="peer.heartbeat_sequence || 'N/A'"></td>
+                                        <td x-text="peer.rtt_ms ? peer.rtt_ms + ' ms' : 'N/A'"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </template>
+                    <template x-if="!networkStatus?.peers || networkStatus.peers.length === 0">
+                        <div class="placeholder">
+                            <p>🌐 No peers connected</p>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div class="connection-status">
@@ -602,6 +668,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 metrics: {},
                 droppedMetrics: 0,
                 config: {},  // System configuration
+                networkStatus: null,  // Network status
                 wsConnected: false,
                 ws: null,
                 components: {},  // Component-based metric discovery
@@ -623,9 +690,11 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     this.fetchMetrics();  // Initial fetch
                     this.fetchComponents();  // Fetch available components
                     this.fetchConfig();  // Fetch configuration
+                    this.fetchNetworkStatus();  // Fetch network status
                     this.initGraph();  // Initialize Plotly graph
                     this.startByteRateTracking();  // Start byte rate updates every second
                     this.startComponentRefresh();  // Discover new metrics every 30 seconds
+                    this.startNetworkStatusRefresh();  // Refresh network status every 5 seconds
                 },
 
                 connectWebSocket() {
@@ -721,6 +790,25 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     }
                 },
 
+                async fetchNetworkStatus() {
+                    try {
+                        const response = await fetch('/api/network/status');
+                        const data = await response.json();
+                        if (data) {
+                            this.networkStatus = data;
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch network status:', e);
+                    }
+                },
+
+                startNetworkStatusRefresh() {
+                    // Refresh network status every 5 seconds
+                    setInterval(() => {
+                        this.fetchNetworkStatus();
+                    }, 5000);  // 5 seconds
+                },
+
                 startComponentRefresh() {
                     // Refresh component list every 30 seconds to discover new metrics
                     this.componentRefreshInterval = setInterval(() => {
@@ -808,6 +896,25 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                         return (seconds * 1000).toFixed(2) + 'ms';
                     } else {
                         return seconds.toFixed(2) + 's';
+                    }
+                },
+
+                formatTimestamp(timestamp) {
+                    if (!timestamp) return 'N/A';
+                    try {
+                        const date = new Date(timestamp);
+                        const now = new Date();
+                        const diffSeconds = Math.floor((now - date) / 1000);
+
+                        if (diffSeconds < 60) {
+                            return `${diffSeconds}s ago`;
+                        } else if (diffSeconds < 3600) {
+                            return `${Math.floor(diffSeconds / 60)}m ago`;
+                        } else {
+                            return date.toLocaleTimeString();
+                        }
+                    } catch (e) {
+                        return 'Invalid';
                     }
                 },
 

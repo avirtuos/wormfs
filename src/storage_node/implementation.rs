@@ -16,9 +16,10 @@ use super::{Config, Error, StorageNode};
 use crate::file_store::{FileStore, FileStoreImpl};
 use crate::filesystem_service::implementation::FileSystemServiceImpl;
 use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
+use crate::storage_network::{StorageNetworkFactory, StorageNetworkHandle};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Phase 1 StorageNode implementation.
 ///
@@ -37,6 +38,13 @@ pub struct StorageNodeImpl {
 
     /// FileSystemService for FUSE operations
     filesystem_service: Option<FileSystemServiceImpl>,
+
+    /// StorageNetwork for peer-to-peer communication (Phase 2+)
+    storage_network: Option<StorageNetworkHandle>,
+
+    /// Network event loop thread handle (Phase 2+)
+    /// The event loop runs in a dedicated thread with LocalSet due to !Send constraints
+    network_thread: Option<std::thread::JoinHandle<()>>,
 
     /// Flag indicating if the node has been started
     started: bool,
@@ -122,11 +130,66 @@ impl StorageNodeImpl {
 
         info!("FileSystemService initialized successfully");
 
+        // Step 4: Initialize StorageNetwork (Phase 2+)
+        info!("Initializing StorageNetwork...");
+        let network_config = crate::storage_network::Config {
+            node_id: config.node_id.clone(),
+            listen_addresses: vec![format!("/ip4/0.0.0.0/tcp/{}", config.libp2p_listen_port)],
+            peers: vec![], // Will be populated from config.peer_addresses in future phases
+            peer_id_store_path: config.peer_id_store_path.clone(),
+            max_peers: config.max_peers,
+            max_connections_per_peer: config.max_connections_per_peer,
+            connection_timeout: config.connection_timeout,
+            idle_connection_timeout: config.idle_connection_timeout,
+            keep_alive_interval: config.keep_alive_interval,
+        };
+
+        let (network_inner, network_handle) = StorageNetworkFactory::create(network_config)
+            .await
+            .map_err(|e| Error::ComponentInitFailed {
+            component: "StorageNetwork".to_string(),
+            reason: e.to_string(),
+        })?;
+
+        // Spawn the network event loop in a dedicated thread with LocalSet
+        // This is necessary because libp2p's Swarm is !Send
+        let node_id_for_thread = config.node_id.clone();
+        let network_thread = std::thread::spawn(move || {
+            // Create a new tokio runtime for this thread
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create runtime for network event loop");
+
+            // Run the event loop in a LocalSet to support !Send futures
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(async move {
+                info!(
+                    "Starting StorageNetwork event loop for node {}",
+                    node_id_for_thread
+                );
+                if let Err(e) = network_inner.run().await {
+                    error!(
+                        "StorageNetwork event loop failed for {}: {}",
+                        node_id_for_thread, e
+                    );
+                }
+                info!(
+                    "StorageNetwork event loop stopped for {}",
+                    node_id_for_thread
+                );
+            }));
+        });
+
+        info!("StorageNetwork event loop thread started successfully");
+
         Ok(Self {
             config,
             metadata_store,
             file_store,
             filesystem_service: Some(filesystem_service),
+            storage_network: Some(network_handle),
+            network_thread: Some(network_thread),
             started: false,
         })
     }
@@ -134,6 +197,22 @@ impl StorageNodeImpl {
     /// Get reference to FileSystemService (for mounting)
     pub fn filesystem_service(&self) -> Option<&FileSystemServiceImpl> {
         self.filesystem_service.as_ref()
+    }
+
+    /// Get reference to StorageNetwork (for network operations)
+    pub fn storage_network(&self) -> Option<&StorageNetworkHandle> {
+        self.storage_network.as_ref()
+    }
+
+    /// Get list of currently connected peers.
+    ///
+    /// This is a convenience method that queries the StorageNetwork for peer information.
+    /// Returns an empty vector if the network is not initialized.
+    pub async fn get_connected_peers(&self) -> Vec<crate::storage_network::PeerInfo> {
+        match &self.storage_network {
+            Some(network) => network.get_connected_peers().await,
+            None => vec![],
+        }
     }
 }
 
@@ -182,15 +261,33 @@ impl StorageNode for StorageNodeImpl {
 
         // Shutdown in reverse order of initialization
 
-        // Step 1: Stop FileSystemService (in Phase 1, this is a no-op as FUSE is managed externally)
+        // Step 1: Stop StorageNetwork event loop (Phase 2+)
+        if let Some(network_handle) = self.storage_network.take() {
+            info!("Shutting down StorageNetwork...");
+            if let Err(e) = network_handle.shutdown().await {
+                warn!("Failed to shutdown StorageNetwork gracefully: {}", e);
+            }
+
+            // Wait for network event loop thread to complete
+            if let Some(thread) = self.network_thread.take() {
+                // Give the thread a reasonable amount of time to complete
+                // Using a timeout-like mechanism by waiting in a blocking fashion
+                match thread.join() {
+                    Ok(()) => info!("StorageNetwork event loop thread stopped"),
+                    Err(_) => warn!("StorageNetwork event loop thread panicked"),
+                }
+            }
+        }
+
+        // Step 2: Stop FileSystemService (in Phase 1, this is a no-op as FUSE is managed externally)
         if let Some(_fs_service) = self.filesystem_service.take() {
             info!("FileSystemService stopped");
         }
 
-        // Step 2: FileStore cleanup (in Phase 1, this is a no-op)
+        // Step 3: FileStore cleanup (in Phase 1, this is a no-op)
         info!("FileStore stopped");
 
-        // Step 3: MetadataStore cleanup (connection will be dropped automatically)
+        // Step 4: MetadataStore cleanup (connection will be dropped automatically)
         info!("MetadataStore stopped");
 
         self.started = false;
@@ -209,9 +306,9 @@ impl StorageNode for StorageNodeImpl {
                 file_store: true,
                 filesystem_service: self.filesystem_service.is_some(),
                 raft_member: false, // Phase 2+
-                network: false,     // Phase 2+
-                endpoint: false,    // Phase 3+
-                watchdog: false,    // Phase 4+
+                network: self.storage_network.is_some(),
+                endpoint: false, // Phase 3+
+                watchdog: false, // Phase 4+
             },
         }
     }

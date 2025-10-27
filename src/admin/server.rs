@@ -6,7 +6,7 @@
 use super::{
     handlers::{
         component_metrics_handler, components_handler, config_handler, health_handler,
-        logs_handler, metrics_handler, status_handler,
+        logs_handler, metrics_handler, network_status_handler, peers_handler, status_handler,
     },
     types::{Config, Error},
     ui::templates::INDEX_HTML,
@@ -133,6 +133,9 @@ impl AdminServer {
             .route("/api/health", get(health_handler))
             .route("/api/status", get(status_handler))
             .route("/api/logs", get(logs_handler))
+            // Network routes
+            .route("/api/network/status", get(network_status_handler))
+            .route("/api/network/peers", get(peers_handler))
             .with_state(metrics);
 
         // Merge routers and add tracing layer

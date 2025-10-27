@@ -5,6 +5,10 @@
 use clap::Parser;
 use std::path::PathBuf;
 use std::process;
+use std::sync::Arc;
+use wormfs::admin::AdminServer;
+use wormfs::filesystem_service::mount::MountConfig;
+use wormfs::metric_service::{MetricService, MetricServiceImpl};
 use wormfs::storage_node::{Config, StorageNode, StorageNodeFactory};
 
 /// WormFS Storage Node - Distributed filesystem storage daemon
@@ -39,6 +43,10 @@ struct Args {
     /// Bootstrap mode (initialize a new cluster - Phase 2+)
     #[arg(long)]
     bootstrap: bool,
+
+    /// Admin UI port (default: 8080)
+    #[arg(long, default_value = "8080")]
+    admin_port: u16,
 }
 
 #[tokio::main]
@@ -101,6 +109,51 @@ async fn main() {
         tracing::info!("FileSystemService is available for mounting");
         tracing::info!("Use 'wormfs mount' command to mount the filesystem");
     }
+
+    // Start Admin UI
+    tracing::info!("Starting Admin UI on port {}...", args.admin_port);
+    let admin_config = wormfs::admin::types::Config {
+        enabled: true,
+        bind_address: "127.0.0.1".to_string(),
+        port: args.admin_port,
+    };
+
+    // Create minimal mount config for Admin UI
+    let mount_config = Arc::new(MountConfig {
+        filesystem_config: wormfs::filesystem_service::types::Config::default(),
+        metadata_config: wormfs::metadata_store::Config::default(),
+        file_store_config: wormfs::file_store::types::Config::default(),
+        metric_config: None,
+        admin_config: None,
+        mount_point: std::path::PathBuf::from("/tmp/wormfs-not-mounted"),
+        mount_options: wormfs::filesystem_service::mount::MountOptions::default(),
+    });
+
+    // Initialize metrics service
+    let metric_config = wormfs::metric_service::Config::default();
+    let metrics = match MetricServiceImpl::new(metric_config) {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            tracing::warn!("Failed to initialize metrics service: {}", e);
+            tracing::warn!("Admin UI will have limited functionality");
+            // Can't continue without metrics for Admin UI
+            eprintln!("Failed to initialize metrics service: {}", e);
+            process::exit(1);
+        }
+    };
+
+    let admin_server = AdminServer::new(admin_config, mount_config, metrics);
+    let _admin_handle = match admin_server.start() {
+        Ok(handle) => {
+            tracing::info!("Admin UI started at http://127.0.0.1:{}", args.admin_port);
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to start Admin UI: {}", e);
+            tracing::warn!("Continuing without Admin UI...");
+            None
+        }
+    };
 
     // Setup signal handlers for graceful shutdown
     setup_signal_handlers();
