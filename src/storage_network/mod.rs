@@ -661,6 +661,7 @@ mod tests {
             connection_timeout: Duration::from_secs(30),
             idle_connection_timeout: Duration::from_secs(600),
             keep_alive_interval: Duration::from_secs(30),
+            admin_url: None,
         }
     }
 
