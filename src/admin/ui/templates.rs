@@ -403,10 +403,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         }
 
         .peer-id-tooltip {
-            position: absolute;
-            left: 0;
-            top: 100%;
-            margin-top: 0.5rem;
+            position: fixed;
             background: rgba(0, 0, 0, 0.9);
             color: white;
             padding: 0.5rem 0.75rem;
@@ -414,7 +411,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             font-size: 0.75rem;
             font-family: 'Courier New', monospace;
             white-space: nowrap;
-            z-index: 1000;
+            z-index: 10000;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
             pointer-events: none;
         }
@@ -426,6 +423,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             left: 1rem;
             border: 0.375rem solid transparent;
             border-bottom-color: rgba(0, 0, 0, 0.9);
+        }
+
+        .metrics-section {
+            overflow: visible !important;
         }
 
         .metrics-table {
@@ -710,8 +711,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                                     <tr>
                                         <td>
                                             <div class="peer-name-cell"
-                                                 x-data="{ showTooltip: false }"
-                                                 @mouseenter="showTooltip = true"
+                                                 x-data="{ showTooltip: false, tooltipX: 0, tooltipY: 0 }"
+                                                 @mouseenter="showTooltip = true; const rect = $el.getBoundingClientRect(); tooltipX = rect.left; tooltipY = rect.bottom + 8"
                                                  @mouseleave="showTooltip = false">
                                                 <template x-if="peer.admin_url">
                                                     <a :href="peer.admin_url"
@@ -726,6 +727,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                                                 <div x-show="showTooltip"
                                                      class="peer-id-tooltip"
                                                      x-text="peer.peer_id"
+                                                     :style="`left: ${tooltipX}px; top: ${tooltipY}px; display: block;`"
                                                      style="display: none;">
                                                 </div>
                                             </div>
