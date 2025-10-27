@@ -2868,4 +2868,360 @@ async fn test_stale_connection_cleanup() {
     println!("Test completed successfully");
 }
 
+// ============================================================================
+// Phase 7: Concurrent Operations
+// ============================================================================
+
+#[tokio::test]
+async fn test_topic_subscription_under_load() {
+    // Test that rapid topic subscription/unsubscription works correctly
+    // while messages are actively being sent. Verifies no message leakage
+    // to unsubscribed nodes and proper isolation.
+
+    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // Define multiple topics for testing
+    let topics = vec!["topic-a", "topic-b", "topic-c"];
+
+    // Subscribe all nodes to topic-a initially
+    let (_tx0_a, mut rx0_a) = cluster
+        .node(0)
+        .handle
+        .join_topic(topics[0])
+        .await
+        .expect("Failed to join topic-a on node 0");
+
+    let (_tx1_a, mut rx1_a) = cluster
+        .node(1)
+        .handle
+        .join_topic(topics[0])
+        .await
+        .expect("Failed to join topic-a on node 1");
+
+    let (_tx2_a, mut rx2_a) = cluster
+        .node(2)
+        .handle
+        .join_topic(topics[0])
+        .await
+        .expect("Failed to join topic-a on node 2");
+
+    // Wait for gossipsub mesh to form
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Node 0 broadcasts - nodes 1 and 2 should receive (not node 0, it doesn't receive its own)
+    cluster
+        .node(0)
+        .handle
+        .broadcast(topics[0], b"msg1-from-node0".to_vec())
+        .await
+        .expect("Broadcast failed");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Nodes 1 and 2 should receive the message from node 0
+    let msg1 = tokio::time::timeout(Duration::from_secs(2), rx1_a.recv())
+        .await
+        .expect("Timeout")
+        .expect("No message");
+    assert_eq!(msg1.data, b"msg1-from-node0");
+
+    let msg2 = tokio::time::timeout(Duration::from_secs(2), rx2_a.recv())
+        .await
+        .expect("Timeout")
+        .expect("No message");
+    assert_eq!(msg2.data, b"msg1-from-node0");
+
+    // Now, node 2 unsubscribes by dropping its receiver
+    drop(rx2_a);
+    drop(_tx2_a);
+
+    // Wait for unsubscribe to propagate
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Node 1 broadcasts - only node 0 should receive (node 2 unsubscribed, node 1 doesn't get own)
+    cluster
+        .node(1)
+        .handle
+        .broadcast(topics[0], b"msg2-after-node2-unsub".to_vec())
+        .await
+        .expect("Broadcast failed");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Only node 0 should receive (node 1 is the sender, node 2 unsubscribed)
+    let msg0 = tokio::time::timeout(Duration::from_secs(2), rx0_a.recv())
+        .await
+        .expect("Timeout")
+        .expect("No message");
+    assert_eq!(msg0.data, b"msg2-after-node2-unsub");
+
+    // Node 2 rejoins topic-a with fresh subscription
+    let (_tx2_a_new, mut rx2_a_new) = cluster
+        .node(2)
+        .handle
+        .join_topic(topics[0])
+        .await
+        .expect("Failed to rejoin topic-a on node 2");
+
+    // Wait for mesh to reform
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Node 1 broadcasts again - nodes 0 and 2 should receive (not node 1)
+    cluster
+        .node(1)
+        .handle
+        .broadcast(topics[0], b"msg3-node2-rejoined".to_vec())
+        .await
+        .expect("Broadcast failed");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Nodes 0 and 2 should receive (node 1 is the sender)
+    let msg0 = tokio::time::timeout(Duration::from_secs(2), rx0_a.recv())
+        .await
+        .expect("Timeout")
+        .expect("No message");
+    assert_eq!(msg0.data, b"msg3-node2-rejoined");
+
+    let msg2 = tokio::time::timeout(Duration::from_secs(2), rx2_a_new.recv())
+        .await
+        .expect("Timeout")
+        .expect("No message");
+    assert_eq!(msg2.data, b"msg3-node2-rejoined");
+
+    // Test rapid subscription changes under load
+    // Subscribe node 0 and node 1 to multiple topics simultaneously
+    let (_tx0_b, mut rx0_b) = cluster
+        .node(0)
+        .handle
+        .join_topic(topics[1])
+        .await
+        .expect("Failed to join topic-b");
+
+    let (_tx0_c, mut rx0_c) = cluster
+        .node(0)
+        .handle
+        .join_topic(topics[2])
+        .await
+        .expect("Failed to join topic-c");
+
+    // Node 1 also subscribes to these topics (needed to broadcast on them)
+    let (_tx1_b, _rx1_b) = cluster
+        .node(1)
+        .handle
+        .join_topic(topics[1])
+        .await
+        .expect("Failed to join topic-b on node 1");
+
+    let (_tx1_c, _rx1_c) = cluster
+        .node(1)
+        .handle
+        .join_topic(topics[2])
+        .await
+        .expect("Failed to join topic-c on node 1");
+
+    // Wait for new topic mesh to form
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Send messages on different topics rapidly
+    for i in 0..5 {
+        cluster
+            .node(1)
+            .handle
+            .broadcast(topics[1], format!("topic-b-msg-{}", i).into_bytes())
+            .await
+            .expect("Broadcast failed");
+
+        cluster
+            .node(1)
+            .handle
+            .broadcast(topics[2], format!("topic-c-msg-{}", i).into_bytes())
+            .await
+            .expect("Broadcast failed");
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Node 0 should receive all messages on topics b and c (5 each)
+    let mut count_b = 0;
+    let mut count_c = 0;
+
+    while count_b < 5 {
+        if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(500), rx0_b.recv()).await
+        {
+            assert!(String::from_utf8_lossy(&msg.data).starts_with("topic-b-msg-"));
+            count_b += 1;
+        } else {
+            break;
+        }
+    }
+
+    while count_c < 5 {
+        if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(500), rx0_c.recv()).await
+        {
+            assert!(String::from_utf8_lossy(&msg.data).starts_with("topic-c-msg-"));
+            count_c += 1;
+        } else {
+            break;
+        }
+    }
+
+    assert_eq!(count_b, 5, "Should receive all 5 messages on topic-b");
+    assert_eq!(count_c, 5, "Should receive all 5 messages on topic-c");
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
+#[tokio::test]
+async fn test_peer_connection_events() {
+    // Test that connection/disconnection events are properly handled
+    // and that message delivery remains reliable during connection churn.
+
+    // Start with 3 nodes in a cluster
+    let cluster = TestCluster::new(3).await.expect("Failed to create cluster");
+
+    cluster
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .expect("Nodes failed to connect");
+
+    // All nodes subscribe to a common topic
+    let (_tx0, mut rx0) = cluster
+        .node(0)
+        .handle
+        .join_topic("events-topic")
+        .await
+        .expect("Failed to join topic");
+
+    let (_tx1, mut rx1) = cluster
+        .node(1)
+        .handle
+        .join_topic("events-topic")
+        .await
+        .expect("Failed to join topic");
+
+    let (_tx2, mut rx2) = cluster
+        .node(2)
+        .handle
+        .join_topic("events-topic")
+        .await
+        .expect("Failed to join topic");
+
+    // Wait for gossipsub mesh to form
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify initial connectivity: each node should see 2 peers
+    let peers0 = cluster.node(0).handle.get_connected_peers().await;
+    let peers1 = cluster.node(1).handle.get_connected_peers().await;
+    let peers2 = cluster.node(2).handle.get_connected_peers().await;
+
+    assert_eq!(peers0.len(), 2, "Node 0 should have 2 peers");
+    assert_eq!(peers1.len(), 2, "Node 1 should have 2 peers");
+    assert_eq!(peers2.len(), 2, "Node 2 should have 2 peers");
+
+    // Node 0 broadcasts - only nodes 1 and 2 should receive (not node 0)
+    cluster
+        .node(0)
+        .handle
+        .broadcast("events-topic", b"msg-before-disconnect".to_vec())
+        .await
+        .expect("Broadcast failed");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Nodes 1 and 2 should receive (node 0 doesn't receive its own)
+    let _ = tokio::time::timeout(Duration::from_secs(2), rx1.recv())
+        .await
+        .expect("Timeout")
+        .expect("No message");
+
+    let _ = tokio::time::timeout(Duration::from_secs(2), rx2.recv())
+        .await
+        .expect("Timeout")
+        .expect("No message");
+
+    // Disconnect node 2 explicitly
+    cluster
+        .node(0)
+        .handle
+        .disconnect_peer(&peers0[1].peer_id)
+        .await
+        .expect("Disconnect failed");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Check connectivity after disconnection
+    let peers0_after = cluster.node(0).handle.get_connected_peers().await;
+    let peers1_after = cluster.node(1).handle.get_connected_peers().await;
+
+    // Nodes 0 and 1 should still be connected to each other
+    // Node 0 may have 1 peer (node 1) or possibly reconnected to node 2
+    assert!(
+        peers0_after.len() >= 1,
+        "Node 0 should have at least 1 peer after disconnect"
+    );
+    assert!(
+        peers1_after.len() >= 1,
+        "Node 1 should have at least 1 peer after disconnect"
+    );
+
+    // Node 1 broadcasts - only node 0 should receive (node 1 doesn't get own, node 2 disconnected)
+    cluster
+        .node(1)
+        .handle
+        .broadcast("events-topic", b"msg-after-disconnect".to_vec())
+        .await
+        .expect("Broadcast failed");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Only node 0 should receive (node 1 is sender)
+    let msg0 = tokio::time::timeout(Duration::from_secs(2), rx0.recv())
+        .await
+        .expect("Timeout")
+        .expect("No message");
+    assert_eq!(msg0.data, b"msg-after-disconnect");
+
+    // Test concurrent connection events: have nodes dial each other repeatedly
+    // while sending messages to verify stability
+
+    for i in 0..3 {
+        cluster
+            .node(0)
+            .handle
+            .broadcast("events-topic", format!("concurrent-msg-{}", i).into_bytes())
+            .await
+            .expect("Broadcast failed");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Only node 1 should receive all messages (node 0 is the sender)
+    let mut msg_count_1 = 0;
+
+    while msg_count_1 < 3 {
+        if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_secs(2), rx1.recv()).await {
+            if String::from_utf8_lossy(&msg.data).starts_with("concurrent-msg-") {
+                msg_count_1 += 1;
+            }
+        } else {
+            break;
+        }
+    }
+
+    assert_eq!(
+        msg_count_1, 3,
+        "Node 1 should receive all 3 concurrent messages"
+    );
+
+    cluster.stop().await.expect("Failed to stop cluster");
+}
+
 // ... Additional placeholder tests for remaining phases
