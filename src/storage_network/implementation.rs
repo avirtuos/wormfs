@@ -110,7 +110,7 @@ impl super::StorageNetworkFactory {
                 noise::Config::new,
                 yamux::Config::default,
             )
-            .expect("Failed to configure TCP transport")
+            .map_err(|e| Error::ConfigError(format!("Failed to configure TCP transport: {}", e)))?
             .with_behaviour(|key| {
                 // Configure gossipsub behavior
                 let behaviour_config = BehaviourConfig::default();
@@ -121,7 +121,7 @@ impl super::StorageNetworkFactory {
                     gossipsub::MessageAuthenticity::Signed(key.clone()),
                     gossipsub_config,
                 )
-                .expect("Valid gossipsub configuration");
+                .map_err(|e| format!("Failed to create gossipsub behaviour: {}", e))?;
 
                 // Configure request-response protocol
                 let req_resp_config = request_response::Config::default()
@@ -158,7 +158,7 @@ impl super::StorageNetworkFactory {
                     ping,
                 })
             })
-            .expect("Failed to build behaviour")
+            .map_err(|e| Error::ConfigError(format!("Failed to build behaviour: {}", e)))?
             .build();
 
         // Create command channel for network operations
@@ -176,7 +176,7 @@ impl super::StorageNetworkFactory {
         // Create peer ID store for learned peer IDs (AutoId mode)
         let peer_id_store = Arc::new(
             super::peer_id_store::PeerIdStore::new(&config.peer_id_store_path)
-                .expect("Failed to create peer ID store"),
+                .map_err(|e| Error::ConfigError(format!("Failed to create peer ID store: {}", e)))?,
         );
 
         // Create inner state
