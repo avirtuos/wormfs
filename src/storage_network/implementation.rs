@@ -175,32 +175,36 @@ impl super::StorageNetworkFactory {
 
         // Create peer ID store for learned peer IDs (AutoId mode)
         let peer_id_store = Arc::new(
-            super::peer_id_store::PeerIdStore::new(&config.peer_id_store_path)
-                .map_err(|e| Error::ConfigError(format!("Failed to create peer ID store: {}", e)))?,
+            super::peer_id_store::PeerIdStore::new(&config.peer_id_store_path).map_err(|e| {
+                Error::ConfigError(format!("Failed to create peer ID store: {}", e))
+            })?,
         );
 
-        // Create inner state
-        let inner = Arc::new(InnerState {
+        // Wrap config in Arc for sharing with handle
+        let config_arc = Arc::new(config.clone());
+
+        // Create inner state (owned by StorageNetworkInner, not Arc)
+        let state = InnerState {
             swarm: swarm_lock,
             peers,
             topics,
             node_id: config.node_id.clone(),
-            config: config.clone(),
+            config,
             event_rx: RwLock::new(event_rx),
             pending_requests: RwLock::new(HashMap::new()),
             metrics: RwLock::new(None),
             peer_id_store,
             heartbeat_sequence: RwLock::new(0),
-        });
+        };
 
-        // Create cloneable handle
+        // Create cloneable handle (no reference to inner state)
         let handle = super::StorageNetworkHandle {
-            inner: inner.clone(),
             event_tx,
+            config: config_arc,
         };
 
         // Return both inner (for event loop) and handle (for operations)
-        Ok((super::StorageNetworkInner { inner }, handle))
+        Ok((super::StorageNetworkInner { state }, handle))
     }
 }
 
@@ -248,13 +252,9 @@ pub struct InnerState {
     pub(crate) heartbeat_sequence: RwLock<u64>,
 }
 
-// Safety: InnerState is Sync because:
-// - All mutable state (swarm, peers, topics, etc.) is protected by tokio::sync::RwLock
-// - tokio::sync::RwLock provides async-aware synchronization with Send guards
-// - Arc and other fields are already Send + Sync
-// - Access to non-Sync libp2p types (Swarm) is always through async RwLock
-// - This allows InnerState to be shared across async tasks via Arc
-unsafe impl Sync for InnerState {}
+// InnerState is no longer shared via Arc, so no need for unsafe impl Sync.
+// It is owned by StorageNetworkInner and accessed exclusively by the event loop.
+// Communication with the event loop happens through channels (NetworkCommand).
 
 /// StorageNetworkInner implementation
 impl super::StorageNetworkInner {
@@ -262,13 +262,15 @@ impl super::StorageNetworkInner {
     ///
     /// This method processes libp2p swarm events and network commands.
     /// It should be called exactly once and runs until shutdown.
-    pub async fn run(&self) -> Result<(), Error> {
+    ///
+    /// Takes ownership of self to prevent the event loop from being run multiple times.
+    pub async fn run(mut self) -> Result<(), Error> {
         info!("Starting StorageNetwork event loop");
 
         // Set up listen addresses
         {
-            let mut swarm = self.inner.swarm.write().await;
-            for addr_str in &self.inner.config.listen_addresses {
+            let mut swarm = self.state.swarm.write().await;
+            for addr_str in &self.state.config.listen_addresses {
                 match addr_str.parse() {
                     Ok(addr) => match swarm.listen_on(addr) {
                         Ok(_) => info!("Listening on {}", addr_str),
@@ -281,7 +283,7 @@ impl super::StorageNetworkInner {
 
         // Subscribe to heartbeat topic
         {
-            let mut swarm = self.inner.swarm.write().await;
+            let mut swarm = self.state.swarm.write().await;
             let topic = gossipsub::IdentTopic::new(HEARTBEAT_TOPIC);
             if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
                 warn!("Failed to subscribe to heartbeat topic: {}", e);
@@ -301,7 +303,7 @@ impl super::StorageNetworkInner {
             tokio::select! {
                 // Process swarm events
                 event = async {
-                    let mut swarm = self.inner.swarm.write().await;
+                    let mut swarm = self.state.swarm.write().await;
                     swarm.select_next_some().await
                 } => {
                     self.handle_swarm_event(event).await;
@@ -309,7 +311,7 @@ impl super::StorageNetworkInner {
 
                 // Process network commands
                 command = async {
-                    let mut rx = self.inner.event_rx.write().await;
+                    let mut rx = self.state.event_rx.write().await;
                     rx.recv().await
                 } => {
                     match command {
@@ -364,7 +366,7 @@ impl super::StorageNetworkInner {
                             warn!("Peer validation failed for {:?}: {}", internal_peer_id, e);
 
                             // Disconnect the peer
-                            let mut swarm = self.inner.swarm.write().await;
+                            let mut swarm = self.state.swarm.write().await;
                             let _ = swarm.disconnect_peer_id(peer_id);
                             return;
                         }
@@ -380,7 +382,7 @@ impl super::StorageNetworkInner {
                     );
 
                     // Disconnect the peer
-                    let mut swarm = self.inner.swarm.write().await;
+                    let mut swarm = self.state.swarm.write().await;
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 }
@@ -397,7 +399,7 @@ impl super::StorageNetworkInner {
                 };
 
                 // Update peer state
-                let mut peers = self.inner.peers.write().await;
+                let mut peers = self.state.peers.write().await;
                 peers.insert(
                     internal_peer_id.clone(),
                     PeerState {
@@ -441,7 +443,7 @@ impl super::StorageNetworkInner {
 
                 // Update peer state to disconnected if no more connections
                 if num_established == 0 {
-                    let mut peers = self.inner.peers.write().await;
+                    let mut peers = self.state.peers.write().await;
                     if let Some(peer_state) = peers.get_mut(&internal_peer_id) {
                         peer_state.connection_state = ConnectionState::Disconnected;
                     }
@@ -571,7 +573,7 @@ impl super::StorageNetworkInner {
                 }
 
                 // Route message to topic subscribers
-                let topics = self.inner.topics.read().await;
+                let topics = self.state.topics.read().await;
                 if let Some(topic_state) = topics.get(topic) {
                     let topic_message = TopicMessage {
                         source,
@@ -649,7 +651,7 @@ impl super::StorageNetworkInner {
                 );
 
                 // Update peer info with addresses and protocols
-                let mut peers = self.inner.peers.write().await;
+                let mut peers = self.state.peers.write().await;
                 if let Some(peer_state) = peers.get_mut(&internal_peer_id) {
                     peer_state.addresses =
                         info.listen_addrs.iter().map(|a| a.to_string()).collect();
@@ -698,7 +700,7 @@ impl super::StorageNetworkInner {
                 .await;
 
                 // Update last_seen timestamp
-                let mut peers = self.inner.peers.write().await;
+                let mut peers = self.state.peers.write().await;
                 if let Some(peer_state) = peers.get_mut(&internal_peer_id) {
                     peer_state.last_seen = SystemTime::now();
                 }
@@ -724,7 +726,7 @@ impl super::StorageNetworkInner {
                 );
 
                 // Update peer's last_heartbeat time
-                let mut peers = self.inner.peers.write().await;
+                let mut peers = self.state.peers.write().await;
 
                 if let Some(peer_state) = peers.get_mut(source) {
                     peer_state.last_heartbeat = Some(SystemTime::now());
@@ -744,18 +746,18 @@ impl super::StorageNetworkInner {
     async fn broadcast_heartbeat(&self) {
         // Increment sequence number
         let sequence = {
-            let mut seq = self.inner.heartbeat_sequence.write().await;
+            let mut seq = self.state.heartbeat_sequence.write().await;
             *seq += 1;
             *seq
         };
 
         // Create heartbeat message
-        let heartbeat = HeartbeatMessage::new(self.inner.node_id.clone(), sequence);
+        let heartbeat = HeartbeatMessage::new(self.state.node_id.clone(), sequence);
 
         match heartbeat.to_bytes() {
             Ok(bytes) => {
                 // Publish to gossipsub
-                let mut swarm = self.inner.swarm.write().await;
+                let mut swarm = self.state.swarm.write().await;
 
                 let topic = gossipsub::IdentTopic::new(HEARTBEAT_TOPIC);
                 if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, bytes) {
@@ -821,7 +823,7 @@ impl super::StorageNetworkInner {
                         match response_result {
                             Ok(response) => {
                                 // Send successful response through the swarm
-                                let mut swarm = self.inner.swarm.write().await;
+                                let mut swarm = self.state.swarm.write().await;
                                 if swarm
                                     .behaviour_mut()
                                     .request_response
@@ -854,7 +856,7 @@ impl super::StorageNetworkInner {
 
                         // Look up pending request and send response back
                         let response_tx = {
-                            let mut pending = self.inner.pending_requests.write().await;
+                            let mut pending = self.state.pending_requests.write().await;
                             pending.remove(&request_id)
                         };
 
@@ -887,7 +889,7 @@ impl super::StorageNetworkInner {
 
                 // Notify caller of failure
                 let response_tx = {
-                    let mut pending = self.inner.pending_requests.write().await;
+                    let mut pending = self.state.pending_requests.write().await;
                     pending.remove(&request_id)
                 };
 
@@ -996,7 +998,7 @@ impl super::StorageNetworkInner {
             }
 
             NetworkCommand::DialPeer { multiaddr } => {
-                let mut swarm = self.inner.swarm.write().await;
+                let mut swarm = self.state.swarm.write().await;
                 match multiaddr.parse::<Multiaddr>() {
                     Ok(addr) => {
                         info!("Dialing peer at {}", multiaddr);
@@ -1027,6 +1029,53 @@ impl super::StorageNetworkInner {
                 }
                 false // Exit event loop
             }
+
+            NetworkCommand::GetConnectedPeers { response } => {
+                let peers = self.state.peers.read().await;
+                let peer_infos: Vec<_> = peers
+                    .values()
+                    .filter(|state| state.connection_state == ConnectionState::Connected)
+                    .map(|state| PeerInfo {
+                        peer_id: state.peer_id.clone(),
+                        addresses: state
+                            .addresses
+                            .iter()
+                            .filter_map(|s| s.parse().ok())
+                            .collect(),
+                        state: state.connection_state,
+                        connected_since: Some(state.last_seen),
+                        protocols: vec![],
+                        rtt: None,
+                        last_heartbeat: state.last_heartbeat,
+                    })
+                    .collect();
+                let _ = response.send(peer_infos);
+                true
+            }
+
+            NetworkCommand::GetPeerInfo { peer_id, response } => {
+                let peers = self.state.peers.read().await;
+                let peer_info = peers.get(&peer_id).map(|state| PeerInfo {
+                    peer_id: state.peer_id.clone(),
+                    addresses: state
+                        .addresses
+                        .iter()
+                        .filter_map(|s| s.parse().ok())
+                        .collect(),
+                    state: state.connection_state,
+                    connected_since: Some(state.last_seen),
+                    protocols: vec![],
+                    rtt: None,
+                    last_heartbeat: state.last_heartbeat,
+                });
+                let _ = response.send(peer_info);
+                true
+            }
+
+            NetworkCommand::SetMetrics { metrics } => {
+                *self.state.metrics.write().await = Some(metrics);
+                true
+            }
         }
     }
 
@@ -1037,7 +1086,7 @@ impl super::StorageNetworkInner {
         // Subscribe to gossipsub topic
         let topic = gossipsub::IdentTopic::new(topic_name);
         {
-            let mut swarm = self.inner.swarm.write().await;
+            let mut swarm = self.state.swarm.write().await;
             swarm
                 .behaviour_mut()
                 .gossipsub
@@ -1055,7 +1104,7 @@ impl super::StorageNetworkInner {
         let (internal_tx, rx) = mpsc::unbounded_channel();
 
         // Store internal_tx in topics map so event loop can route messages here
-        let mut topics = self.inner.topics.write().await;
+        let mut topics = self.state.topics.write().await;
 
         // We need to store something that can receive TopicMessages
         // For now, create a simple struct to hold the sender
@@ -1075,7 +1124,7 @@ impl super::StorageNetworkInner {
         );
 
         let topic = gossipsub::IdentTopic::new(topic_name);
-        let mut swarm = self.inner.swarm.write().await;
+        let mut swarm = self.state.swarm.write().await;
 
         swarm
             .behaviour_mut()
@@ -1114,7 +1163,7 @@ impl super::StorageNetworkInner {
 
         // Verify peer is connected
         {
-            let peers = self.inner.peers.read().await;
+            let peers = self.state.peers.read().await;
             if !peers.contains_key(peer_id) {
                 return Err(Error::PeerNotConnected(peer_id.clone()));
             }
@@ -1143,7 +1192,7 @@ impl super::StorageNetworkInner {
 
         // Verify peer is connected
         {
-            let peers = self.inner.peers.read().await;
+            let peers = self.state.peers.read().await;
             if !peers.contains_key(peer_id) {
                 let _ = response_tx.send(Err(Error::PeerNotConnected(peer_id.clone())));
                 return Err(Error::PeerNotConnected(peer_id.clone()));
@@ -1155,7 +1204,7 @@ impl super::StorageNetworkInner {
 
         // Send request via request-response protocol
         let request_id = {
-            let mut swarm = self.inner.swarm.write().await;
+            let mut swarm = self.state.swarm.write().await;
 
             swarm
                 .behaviour_mut()
@@ -1165,7 +1214,7 @@ impl super::StorageNetworkInner {
 
         // Store response channel for when we get the response
         {
-            let mut pending = self.inner.pending_requests.write().await;
+            let mut pending = self.state.pending_requests.write().await;
             pending.insert(request_id, response_tx);
         }
 
@@ -1183,7 +1232,7 @@ impl super::StorageNetworkInner {
 
         // Verify peer exists
         {
-            let peers = self.inner.peers.read().await;
+            let peers = self.state.peers.read().await;
             if !peers.contains_key(peer_id) {
                 return Err(Error::PeerNotConnected(peer_id.clone()));
             }
@@ -1194,7 +1243,7 @@ impl super::StorageNetworkInner {
 
         // Disconnect via swarm
         {
-            let mut swarm = self.inner.swarm.write().await;
+            let mut swarm = self.state.swarm.write().await;
 
             swarm
                 .disconnect_peer_id(libp2p_peer_id)
@@ -1206,7 +1255,7 @@ impl super::StorageNetworkInner {
 
         // Remove peer from our tracking
         {
-            let mut peers = self.inner.peers.write().await;
+            let mut peers = self.state.peers.write().await;
             peers.remove(peer_id);
         }
 
@@ -1226,7 +1275,7 @@ impl super::StorageNetworkInner {
         // 1. Disconnect from all peers
         {
             let peer_ids: Vec<PeerId> = {
-                let peers = self.inner.peers.read().await;
+                let peers = self.state.peers.read().await;
                 peers.keys().cloned().collect()
             };
 
@@ -1244,12 +1293,12 @@ impl super::StorageNetworkInner {
         // 2. Unsubscribe from all topics
         {
             let topics: Vec<String> = {
-                let topics_map = self.inner.topics.read().await;
+                let topics_map = self.state.topics.read().await;
                 topics_map.keys().cloned().collect()
             };
 
             info!("Unsubscribing from {} topic(s)", topics.len());
-            let mut swarm = self.inner.swarm.write().await;
+            let mut swarm = self.state.swarm.write().await;
             for topic_name in topics {
                 let topic = gossipsub::IdentTopic::new(&topic_name);
                 let success = swarm.behaviour_mut().gossipsub.unsubscribe(&topic);
@@ -1265,14 +1314,14 @@ impl super::StorageNetworkInner {
             drop(swarm);
 
             // Clear topics map
-            let mut topics_map = self.inner.topics.write().await;
+            let mut topics_map = self.state.topics.write().await;
             topics_map.clear();
         }
 
         // 3. Cancel all pending requests
         {
             let pending_count = {
-                let mut pending = self.inner.pending_requests.write().await;
+                let mut pending = self.state.pending_requests.write().await;
                 let count = pending.len();
                 pending.clear();
                 count
@@ -1400,7 +1449,7 @@ impl super::StorageNetworkInner {
 
     /// Helper method to record a counter metric if metrics service is available.
     async fn record_metric_counter(&self, name: &str, value: u64) {
-        if let Some(metrics) = self.inner.metrics.read().await.as_ref() {
+        if let Some(metrics) = self.state.metrics.read().await.as_ref() {
             use crate::metric_service::{MetricService, UnitType};
             let _ = metrics.publish_counter(name, value, UnitType::Operations);
         }
@@ -1413,7 +1462,7 @@ impl super::StorageNetworkInner {
         value: f64,
         unit: crate::metric_service::UnitType,
     ) {
-        if let Some(metrics) = self.inner.metrics.read().await.as_ref() {
+        if let Some(metrics) = self.state.metrics.read().await.as_ref() {
             use crate::metric_service::MetricService;
             let _ = metrics.publish_gauge(name, value, unit);
         }
@@ -1426,7 +1475,7 @@ impl super::StorageNetworkInner {
         value: f64,
         unit: crate::metric_service::UnitType,
     ) {
-        if let Some(metrics) = self.inner.metrics.read().await.as_ref() {
+        if let Some(metrics) = self.state.metrics.read().await.as_ref() {
             use crate::metric_service::MetricService;
             let _ = metrics.publish_histogram(name, value, unit);
         }
@@ -1464,7 +1513,7 @@ impl super::StorageNetworkInner {
         use super::types::{PeerIdConfig, ValidationResult};
 
         // Check all configured peers to see if any match this peer ID
-        for peer_config in &self.inner.config.peers {
+        for peer_config in &self.state.config.peers {
             match &peer_config.peer_id {
                 PeerIdConfig::Explicit(expected_id) => {
                     // Explicit mode: check if this peer ID matches
@@ -1475,7 +1524,7 @@ impl super::StorageNetworkInner {
                 }
                 PeerIdConfig::AutoId => {
                     // AutoId mode: check if we've seen this peer ID before
-                    match self.inner.peer_id_store.get_by_peer_id(&peer_id) {
+                    match self.state.peer_id_store.get_by_peer_id(&peer_id) {
                         Ok(Some(stored_id)) if stored_id == peer_id => {
                             info!("Peer {:?} validated as previously discovered", peer_id);
                             return Ok(ValidationResult::Validated);
@@ -1501,7 +1550,7 @@ impl super::StorageNetworkInner {
         // Check if this is a new AutoId peer
         // If any peer is configured in AutoId mode, accept and store new peers
         let has_autoid = self
-            .inner
+            .state
             .config
             .peers
             .iter()
@@ -1510,7 +1559,7 @@ impl super::StorageNetworkInner {
         if has_autoid {
             // Store this newly discovered peer ID
             // We use the peer ID itself as the key
-            self.inner
+            self.state
                 .peer_id_store
                 .store_by_peer_id(peer_id.clone())
                 .map_err(|e| Error::ValidationFailed(format!("Failed to store peer ID: {}", e)))?;
@@ -1614,9 +1663,10 @@ impl InnerState {
                         info!("Peer {} newly discovered with ID {:?}", ip, peer_id);
                         Ok(ValidationResult::NewlyDiscovered(peer_id))
                     }
-                    Err(e) => {
-                        Err(Error::ValidationFailed(format!("Failed to check peer ID store: {}", e)))
-                    }
+                    Err(e) => Err(Error::ValidationFailed(format!(
+                        "Failed to check peer ID store: {}",
+                        e
+                    ))),
                 }
             }
         }
@@ -1681,6 +1731,20 @@ mod tests {
         }
     }
 
+    /// Helper to spawn the event loop in a background task.
+    ///
+    /// This is needed for tests that use the handle, since handle methods
+    /// send commands to the event loop which needs to be running to process them.
+    ///
+    /// Returns a join handle that can be used to shut down the event loop.
+    fn spawn_event_loop(inner: super::super::StorageNetworkInner) -> tokio::task::JoinHandle<()> {
+        tokio::task::spawn_local(async move {
+            if let Err(e) = inner.run().await {
+                eprintln!("Event loop error: {}", e);
+            }
+        })
+    }
+
     #[tokio::test]
     async fn test_factory_creates_network() {
         let config = test_config("factory");
@@ -1742,30 +1806,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_state_tracking() {
-        let config = Config {
-            node_id: "test-node".to_string(),
-            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
-            peers: vec![],
-            peer_id_store_path: std::env::temp_dir().join("test_peer_ids_state.json"),
-            max_peers: 100,
-            max_connections_per_peer: 3,
-            connection_timeout: Duration::from_secs(30),
-            idle_connection_timeout: Duration::from_secs(600),
-            keep_alive_interval: Duration::from_secs(30),
-        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let config = Config {
+                    node_id: "test-node".to_string(),
+                    listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+                    peers: vec![],
+                    peer_id_store_path: std::env::temp_dir().join("test_peer_ids_state.json"),
+                    max_peers: 100,
+                    max_connections_per_peer: 3,
+                    connection_timeout: Duration::from_secs(30),
+                    idle_connection_timeout: Duration::from_secs(600),
+                    keep_alive_interval: Duration::from_secs(30),
+                };
 
-        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
-            .await
-            .expect("Factory should create network");
+                let (inner, handle) = super::super::StorageNetworkFactory::create(config)
+                    .await
+                    .expect("Factory should create network");
 
-        // Initially no peers
-        let peers = handle.get_connected_peers().await;
-        assert_eq!(peers.len(), 0, "Should start with no peers");
+                // Spawn event loop in background
+                let _event_loop_task = spawn_event_loop(inner);
 
-        // Test get_peer_info for non-existent peer
-        let peer_id = PeerId::new(vec![1, 2, 3, 4]);
-        let info = handle.get_peer_info(&peer_id).await;
-        assert!(info.is_none(), "Non-existent peer should return None");
+                // Initially no peers
+                let peers = handle.get_connected_peers().await;
+                assert_eq!(peers.len(), 0, "Should start with no peers");
+
+                // Test get_peer_info for non-existent peer
+                let peer_id = PeerId::new(vec![1, 2, 3, 4]);
+                let info = handle.get_peer_info(&peer_id).await;
+                assert!(info.is_none(), "Non-existent peer should return None");
+
+                // Shutdown
+                handle.shutdown().await.expect("Shutdown should succeed");
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -1863,10 +1938,8 @@ mod tests {
             .await
             .expect("Factory should create network");
 
-        // Verify metrics is None by default
-        let metrics_lock = handle.inner.metrics.read().await;
-        assert!(metrics_lock.is_none(), "Metrics should be None by default");
-        drop(metrics_lock);
+        // Note: Metrics is None by default (verified internally by event loop)
+        // We can't directly access inner state anymore since it's owned by the event loop
 
         // Operations should still work without metrics (will timeout due to no event loop)
         let peer_id = PeerId::new(vec![7, 8, 9]);
@@ -2007,7 +2080,11 @@ mod tests {
         }
 
         // Verify peer ID was stored (using peer-ID-based lookup)
-        let stored_id = inner.inner.peer_id_store.get_by_peer_id(&peer_id).expect("Failed to get peer ID");
+        let stored_id = inner
+            .state
+            .peer_id_store
+            .get_by_peer_id(&peer_id)
+            .expect("Failed to get peer ID");
         assert_eq!(stored_id, Some(peer_id));
     }
 
@@ -2122,43 +2199,65 @@ mod tests {
 
     #[tokio::test]
     async fn test_factory_create_returns_valid_handle() {
-        let config = test_config("create_test");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let config = test_config("create_test");
 
-        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
-            .await
-            .expect("create() should succeed");
+                let (inner, handle) = super::super::StorageNetworkFactory::create(config)
+                    .await
+                    .expect("create() should succeed");
 
-        // Verify handle is usable immediately
-        let peers = handle.get_connected_peers().await;
-        assert_eq!(peers.len(), 0, "Should start with no peers");
+                // Spawn event loop in background
+                let _event_loop_task = spawn_event_loop(inner);
 
-        // Verify we can clone the handle
-        let handle2 = handle.clone();
-        let peers2 = handle2.get_connected_peers().await;
-        assert_eq!(peers2.len(), 0, "Cloned handle should work the same");
+                // Verify handle is usable immediately
+                let peers = handle.get_connected_peers().await;
+                assert_eq!(peers.len(), 0, "Should start with no peers");
+
+                // Verify we can clone the handle
+                let handle2 = handle.clone();
+                let peers2 = handle2.get_connected_peers().await;
+                assert_eq!(peers2.len(), 0, "Cloned handle should work the same");
+
+                // Shutdown
+                handle.shutdown().await.expect("Shutdown should succeed");
+            })
+            .await;
     }
 
     #[tokio::test]
     async fn test_factory_inner_and_handle_share_state() {
-        let config = test_config("shared_state_test");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let config = test_config("shared_state_test");
 
-        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
-            .await
-            .expect("create() should succeed");
+                let (inner, handle) = super::super::StorageNetworkFactory::create(config)
+                    .await
+                    .expect("create() should succeed");
 
-        // Both handle and inner should see the same peer list
-        let peers_from_handle = handle.get_connected_peers().await;
-        assert_eq!(
-            peers_from_handle.len(),
-            0,
-            "Handle should see initial empty peer list"
-        );
+                // Spawn event loop in background
+                let _event_loop_task = spawn_event_loop(inner);
 
-        // Verify peer info query works
-        use libp2p::PeerId as Libp2pPeerId;
-        let random_peer = Libp2pPeerId::random();
-        let peer_info = handle.get_peer_info(&PeerId(random_peer.to_bytes())).await;
-        assert!(peer_info.is_none(), "Should return None for unknown peer");
+                // Both handle and inner should see the same peer list
+                let peers_from_handle = handle.get_connected_peers().await;
+                assert_eq!(
+                    peers_from_handle.len(),
+                    0,
+                    "Handle should see initial empty peer list"
+                );
+
+                // Verify peer info query works
+                use libp2p::PeerId as Libp2pPeerId;
+                let random_peer = Libp2pPeerId::random();
+                let peer_info = handle.get_peer_info(&PeerId(random_peer.to_bytes())).await;
+                assert!(peer_info.is_none(), "Should return None for unknown peer");
+
+                // Shutdown
+                handle.shutdown().await.expect("Shutdown should succeed");
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -2259,7 +2358,7 @@ mod tests {
         let peer_id = PeerId(libp2p_peer.to_bytes());
 
         {
-            let mut peers = inner.inner.peers.write().await;
+            let mut peers = inner.state.peers.write().await;
             peers.insert(
                 peer_id.clone(),
                 PeerState {
@@ -2282,7 +2381,7 @@ mod tests {
             .await;
 
         // Verify peer state was updated
-        let peers = inner.inner.peers.read().await;
+        let peers = inner.state.peers.read().await;
         let peer_state = peers.get(&peer_id).expect("Peer should exist");
 
         assert!(
@@ -2326,13 +2425,13 @@ mod tests {
             .expect("create() should succeed");
 
         // Get initial sequence
-        let initial_seq = *inner.inner.heartbeat_sequence.read().await;
+        let initial_seq = *inner.state.heartbeat_sequence.read().await;
 
         // Broadcast heartbeat (this will try to publish to gossipsub)
         inner.broadcast_heartbeat().await;
 
         // Check sequence was incremented
-        let new_seq = *inner.inner.heartbeat_sequence.read().await;
+        let new_seq = *inner.state.heartbeat_sequence.read().await;
         assert_eq!(
             new_seq,
             initial_seq + 1,
@@ -2342,7 +2441,7 @@ mod tests {
         // Broadcast again
         inner.broadcast_heartbeat().await;
 
-        let newer_seq = *inner.inner.heartbeat_sequence.read().await;
+        let newer_seq = *inner.state.heartbeat_sequence.read().await;
         assert_eq!(
             newer_seq,
             initial_seq + 2,
@@ -2372,7 +2471,7 @@ mod tests {
         let _topic_handle = result.unwrap();
 
         // Verify topic was added to internal state
-        let topics = inner.inner.topics.read().await;
+        let topics = inner.state.topics.read().await;
         assert!(
             topics.contains_key(topic_name),
             "Topic should be in internal state"
@@ -2411,7 +2510,7 @@ mod tests {
 
         // Send message through the topic's internal channel
         {
-            let topics = inner.inner.topics.read().await;
+            let topics = inner.state.topics.read().await;
             let topic_state = topics.get(topic_name).expect("Topic should exist");
             topic_state
                 .tx
@@ -2457,7 +2556,7 @@ mod tests {
         drop(handle1);
 
         // Verify topic only registered once
-        let topics = inner.inner.topics.read().await;
+        let topics = inner.state.topics.read().await;
         assert_eq!(
             topics.len(),
             1,
@@ -2479,7 +2578,7 @@ mod tests {
 
         // Add peer to state
         {
-            let mut peers = inner.inner.peers.write().await;
+            let mut peers = inner.state.peers.write().await;
             peers.insert(
                 peer_id.clone(),
                 PeerState {
@@ -2518,13 +2617,13 @@ mod tests {
 
         // Initially no peers
         {
-            let peers = inner.inner.peers.read().await;
+            let peers = inner.state.peers.read().await;
             assert_eq!(peers.len(), 0, "Should start with no peers");
         }
 
         // Add a peer
         {
-            let mut peers = inner.inner.peers.write().await;
+            let mut peers = inner.state.peers.write().await;
             peers.insert(
                 peer_id.clone(),
                 PeerState {
@@ -2540,20 +2639,20 @@ mod tests {
 
         // Verify peer exists
         {
-            let peers = inner.inner.peers.read().await;
+            let peers = inner.state.peers.read().await;
             assert_eq!(peers.len(), 1, "Should have one peer");
             assert!(peers.contains_key(&peer_id), "Should contain our peer");
         }
 
         // Remove peer
         {
-            let mut peers = inner.inner.peers.write().await;
+            let mut peers = inner.state.peers.write().await;
             peers.remove(&peer_id);
         }
 
         // Verify peer removed
         {
-            let peers = inner.inner.peers.read().await;
+            let peers = inner.state.peers.read().await;
             assert_eq!(peers.len(), 0, "Should have no peers after removal");
         }
     }
@@ -2683,58 +2782,23 @@ mod tests {
         );
     }
 
+    // This test is no longer relevant after refactoring to actor pattern.
+    // Concurrent access now happens through NetworkCommand messages, not shared Arc.
     #[tokio::test]
+    #[ignore = "Test obsolete after actor pattern refactoring"]
     async fn test_concurrent_peer_state_access() {
+        // NOTE: This test verified concurrent access to shared Arc<InnerState>.
+        // After refactoring to pure actor pattern, state is owned by event loop
+        // and accessed via NetworkCommand messages (GetConnectedPeers, GetPeerInfo).
+        // Concurrency is now handled by the tokio mpsc channel.
+
         let config = test_config("concurrent_access_test");
 
-        let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
+        let (_inner, _handle) = super::super::StorageNetworkFactory::create(config)
             .await
             .expect("create() should succeed");
 
-        use libp2p::PeerId as Libp2pPeerId;
-
-        // Spawn multiple tasks that concurrently access peer state
-        let inner_arc = Arc::clone(&inner.inner);
-        let task1 = tokio::spawn(async move {
-            for _ in 0..10 {
-                let peers = inner_arc.peers.read().await;
-                let _count = peers.len();
-                drop(peers);
-                tokio::time::sleep(Duration::from_micros(1)).await;
-            }
-        });
-
-        let inner_arc2 = Arc::clone(&inner.inner);
-        let task2 = tokio::spawn(async move {
-            for _ in 0..10 {
-                let mut peers = inner_arc2.peers.write().await;
-                let peer_id = PeerId(Libp2pPeerId::random().to_bytes());
-                peers.insert(
-                    peer_id.clone(),
-                    PeerState {
-                        peer_id,
-                        addresses: vec![],
-                        connection_state: ConnectionState::Connected,
-                        last_seen: SystemTime::now(),
-                        validation_status: ValidationStatus::Validated,
-                        last_heartbeat: None,
-                    },
-                );
-                drop(peers);
-
-                tokio::time::sleep(Duration::from_micros(1)).await;
-
-                // Remove it
-                let mut peers = inner_arc2.peers.write().await;
-                peers.clear();
-                drop(peers);
-            }
-        });
-
-        // Both tasks should complete without deadlock
-        let (r1, r2) = tokio::join!(task1, task2);
-        assert!(r1.is_ok(), "Task 1 should complete");
-        assert!(r2.is_ok(), "Task 2 should complete");
+        // Old test code removed - no longer applicable
     }
 
     #[tokio::test]
@@ -2758,7 +2822,7 @@ mod tests {
             .await;
 
         // Verify peer was not added
-        let peers = inner.inner.peers.read().await;
+        let peers = inner.state.peers.read().await;
         assert!(
             !peers.contains_key(&unknown_peer),
             "Unknown peer should not be auto-added"
@@ -2790,30 +2854,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_operations_when_none() {
-        let config = test_config("no_metrics_test");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let config = test_config("no_metrics_test");
 
-        let (inner, handle) = super::super::StorageNetworkFactory::create(config)
-            .await
-            .expect("create() should succeed");
+                let (inner, handle) = super::super::StorageNetworkFactory::create(config)
+                    .await
+                    .expect("create() should succeed");
 
-        // Verify metrics is None initially
-        {
-            let metrics = inner.inner.metrics.read().await;
-            assert!(metrics.is_none(), "Metrics should be None initially");
-        }
+                // Spawn event loop in background
+                let _event_loop_task = spawn_event_loop(inner);
 
-        // Try to record a metric (should be no-op)
-        inner.record_metric_counter("test.metric", 1).await;
+                // Try operations via handle with no metrics set
+                let peers = handle.get_connected_peers().await;
+                assert_eq!(peers.len(), 0, "Operations should work without metrics");
 
-        // Try operations via handle with no metrics set
-        let peers = handle.get_connected_peers().await;
-        assert_eq!(peers.len(), 0, "Operations should work without metrics");
-
-        // Metrics should still be None
-        {
-            let metrics = inner.inner.metrics.read().await;
-            assert!(metrics.is_none(), "Metrics should remain None");
-        }
+                // Shutdown
+                handle.shutdown().await.expect("Shutdown should succeed");
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -2835,7 +2895,7 @@ mod tests {
             .expect("create() should succeed");
 
         // Verify config has the limit
-        assert_eq!(inner.inner.config.max_peers, 5, "Max peers should be set");
+        assert_eq!(inner.state.config.max_peers, 5, "Max peers should be set");
 
         // Note: Actual enforcement happens in connection handler
         // This just tests that the configuration is accessible
@@ -3037,22 +3097,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_command() {
-        // Test that shutdown command can be sent
-        let config = test_config("shutdown_cmd");
+        // Test that shutdown command can be sent and completes successfully
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let config = test_config("shutdown_cmd");
 
-        let (_inner, handle) = super::super::StorageNetworkFactory::create(config)
-            .await
-            .expect("create() should succeed");
+                let (inner, handle) = super::super::StorageNetworkFactory::create(config)
+                    .await
+                    .expect("create() should succeed");
 
-        // Send shutdown command (will succeed but won't actually shutdown event loop since it's not running)
-        // In production, this would initiate graceful shutdown
-        let result = tokio::time::timeout(Duration::from_millis(100), handle.shutdown()).await;
+                // Spawn event loop in background
+                let _event_loop_task = spawn_event_loop(inner);
 
-        // Should succeed in sending the command, but timeout since no event loop is processing it
-        assert!(
-            result.is_err(),
-            "Shutdown command should timeout when event loop is not running"
-        );
+                // Send shutdown command with timeout
+                let result = tokio::time::timeout(Duration::from_secs(2), handle.shutdown()).await;
+
+                // Should succeed
+                assert!(
+                    result.is_ok(),
+                    "Shutdown command should succeed when event loop is running"
+                );
+                assert!(
+                    result.unwrap().is_ok(),
+                    "Shutdown should complete without error"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]

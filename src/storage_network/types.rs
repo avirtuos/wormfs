@@ -126,7 +126,6 @@ pub struct TopicHandle {
 }
 
 /// Commands sent to the network event loop.
-#[derive(Debug)]
 pub enum NetworkCommand {
     /// Join a topic and get a handle for communication
     JoinTopic {
@@ -195,6 +194,87 @@ pub enum NetworkCommand {
         /// Channel to send response back when shutdown is complete
         response: tokio::sync::oneshot::Sender<Result<(), Error>>,
     },
+
+    /// Get list of currently connected peers
+    GetConnectedPeers {
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<Vec<PeerInfo>>,
+    },
+
+    /// Get detailed information about a specific peer
+    GetPeerInfo {
+        /// Peer ID to query
+        peer_id: PeerId,
+        /// Channel to send response back
+        response: tokio::sync::oneshot::Sender<Option<PeerInfo>>,
+    },
+
+    /// Set the metrics service for tracking network operations
+    SetMetrics {
+        /// Metrics service implementation
+        metrics: std::sync::Arc<crate::metric_service::MetricServiceImpl>,
+    },
+}
+
+impl std::fmt::Debug for NetworkCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::JoinTopic { name, .. } => {
+                f.debug_struct("JoinTopic").field("name", name).finish()
+            }
+            Self::SendToPeer {
+                peer_id,
+                topic,
+                message,
+            } => f
+                .debug_struct("SendToPeer")
+                .field("peer_id", peer_id)
+                .field("topic", topic)
+                .field("message_len", &message.len())
+                .finish(),
+            Self::Broadcast { topic, message } => f
+                .debug_struct("Broadcast")
+                .field("topic", topic)
+                .field("message_len", &message.len())
+                .finish(),
+            Self::OpenStream {
+                peer_id, protocol, ..
+            } => f
+                .debug_struct("OpenStream")
+                .field("peer_id", peer_id)
+                .field("protocol", protocol)
+                .finish(),
+            Self::SendRequest {
+                peer_id,
+                protocol,
+                request,
+                ..
+            } => f
+                .debug_struct("SendRequest")
+                .field("peer_id", peer_id)
+                .field("protocol", protocol)
+                .field("request_len", &request.len())
+                .finish(),
+            Self::DialPeer { multiaddr } => f
+                .debug_struct("DialPeer")
+                .field("multiaddr", multiaddr)
+                .finish(),
+            Self::DisconnectPeer { peer_id, .. } => f
+                .debug_struct("DisconnectPeer")
+                .field("peer_id", peer_id)
+                .finish(),
+            Self::Shutdown { .. } => f.debug_struct("Shutdown").finish(),
+            Self::GetConnectedPeers { .. } => f.debug_struct("GetConnectedPeers").finish(),
+            Self::GetPeerInfo { peer_id, .. } => f
+                .debug_struct("GetPeerInfo")
+                .field("peer_id", peer_id)
+                .finish(),
+            Self::SetMetrics { .. } => f
+                .debug_struct("SetMetrics")
+                .field("metrics", &"<metrics>")
+                .finish(),
+        }
+    }
 }
 
 /// Errors that can occur during network operations.
