@@ -86,6 +86,8 @@ struct TransactionLogStoreInner {
     // Cached indices for quick access (updated on writes)
     cached_first_index: RwLock<Option<u64>>,
     cached_last_index: RwLock<Option<u64>>,
+    // Last compaction timestamp
+    last_compaction: RwLock<Option<SystemTime>>,
 }
 
 /// TransactionLogStore implementation using redb
@@ -137,6 +139,7 @@ impl TransactionLogStoreImpl {
                 config,
                 cached_first_index: RwLock::new(first_index),
                 cached_last_index: RwLock::new(last_index),
+                last_compaction: RwLock::new(None),
             }),
         })
     }
@@ -506,6 +509,37 @@ impl TransactionLogStoreImpl {
 
         Ok(count)
     }
+
+    /// Compact the database (blocking version).
+    ///
+    /// This defragments the database and reclaims space from deleted entries.
+    fn compact_blocking(&self) -> Result<u64, LogError> {
+        // Get the database file size before compaction
+        let size_before = std::fs::metadata(&self.inner.config.db_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        // Perform compaction (requires mutable access)
+        {
+            let mut db = self.inner.db.write().unwrap();
+            db.compact().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to compact database: {}", e))
+            })?;
+        }
+
+        // Get the database file size after compaction
+        let size_after = std::fs::metadata(&self.inner.config.db_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        // Calculate space reclaimed
+        let space_reclaimed = size_before.saturating_sub(size_after);
+
+        // Update last compaction timestamp
+        *self.inner.last_compaction.write().unwrap() = Some(SystemTime::now());
+
+        Ok(space_reclaimed)
+    }
 }
 
 #[async_trait]
@@ -579,6 +613,13 @@ impl TransactionLogStore for TransactionLogStoreImpl {
             .map_err(|e| LogError::DatabaseError(format!("Task join error: {}", e)))?
     }
 
+    async fn compact(&self) -> Result<u64, LogError> {
+        let self_clone = self.clone();
+        task::spawn_blocking(move || self_clone.compact_blocking())
+            .await
+            .map_err(|e| LogError::DatabaseError(format!("Task join error: {}", e)))?
+    }
+
     fn get_stats(&self) -> LogStats {
         let first_index = *self.inner.cached_first_index.read().unwrap();
         let last_index = *self.inner.cached_last_index.read().unwrap();
@@ -593,12 +634,14 @@ impl TransactionLogStore for TransactionLogStoreImpl {
             .map(|m| m.len())
             .unwrap_or(0);
 
+        let last_compaction = *self.inner.last_compaction.read().unwrap();
+
         LogStats {
             first_index,
             last_index,
             entry_count,
             db_size_bytes,
-            last_compaction: None, // TODO: Track compaction time
+            last_compaction,
         }
     }
 }
@@ -1064,5 +1107,156 @@ mod tests {
         assert_eq!(deleted, 6);
         assert_eq!(store.get_first_index(), 1);
         assert_eq!(store.get_last_index(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_compact_empty_log() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Compact empty log should succeed (may reclaim initial overhead or not)
+        let _reclaimed = store.compact().await.unwrap();
+
+        // Verify compaction timestamp is set
+        let stats = store.get_stats();
+        assert!(stats.last_compaction.is_some());
+
+        // Log should still be empty and functional
+        assert_eq!(store.get_first_index(), 0);
+        assert_eq!(store.get_last_index(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_compact_after_trim() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Add many entries to grow the database
+        for i in 1..=1000 {
+            store.append(1, vec![0xAAu8; 1024]).await.unwrap();
+        }
+
+        let stats_before_trim = store.get_stats();
+        let size_before_trim = stats_before_trim.db_size_bytes;
+
+        // Trim first 900 entries
+        store.trim(901).await.unwrap();
+
+        // Compact to reclaim space
+        let reclaimed = store.compact().await.unwrap();
+
+        // Should reclaim some space
+        println!("Size before trim: {}", size_before_trim);
+        println!("Space reclaimed: {}", reclaimed);
+
+        // Verify last_compaction is set
+        let stats_after = store.get_stats();
+        assert!(stats_after.last_compaction.is_some());
+
+        // Verify log still works after compaction
+        assert_eq!(store.get_first_index(), 901);
+        assert_eq!(store.get_last_index(), 1000);
+
+        let entry = store.get_entry(901).await.unwrap();
+        assert_eq!(entry.index, 901);
+    }
+
+    #[tokio::test]
+    async fn test_compact_after_delete_from() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Add entries
+        for i in 1..=500 {
+            store.append(1, vec![0xBBu8; 2048]).await.unwrap();
+        }
+
+        // Delete from middle
+        store.delete_from(250).await.unwrap();
+
+        // Compact
+        let reclaimed = store.compact().await.unwrap();
+        println!("Compaction reclaimed {} bytes", reclaimed);
+
+        // Verify log still works
+        assert_eq!(store.get_first_index(), 1);
+        assert_eq!(store.get_last_index(), 249);
+
+        let entry1 = store.get_entry(1).await.unwrap();
+        assert_eq!(entry1.index, 1);
+
+        let entry249 = store.get_entry(249).await.unwrap();
+        assert_eq!(entry249.index, 249);
+
+        // Verify compaction timestamp is recorded
+        let stats = store.get_stats();
+        assert!(stats.last_compaction.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_compact_multiple_times() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Add and remove entries multiple times
+        for _ in 0..3 {
+            for i in 1..=100 {
+                store.append(1, vec![0xCCu8; 512]).await.unwrap();
+            }
+            store.trim(51).await.unwrap();
+            store.delete_from(76).await.unwrap();
+
+            // Compact each time
+            let reclaimed = store.compact().await.unwrap();
+            println!("Iteration compaction reclaimed {} bytes", reclaimed);
+        }
+
+        // Verify log is in consistent state
+        let stats = store.get_stats();
+        assert!(stats.last_compaction.is_some());
+        assert_eq!(stats.entry_count, 25); // entries 51-75
+    }
+
+    #[tokio::test]
+    async fn test_compact_concurrent_with_reads() {
+        let (config, _temp_dir) = create_test_config();
+        let store = Arc::new(TransactionLogStoreImpl::new(config).unwrap());
+
+        // Pre-populate with entries
+        for i in 1..=200 {
+            store.append(1, vec![0xDDu8; 256]).await.unwrap();
+        }
+
+        let mut handles = vec![];
+
+        // Spawn compaction task
+        {
+            let store_clone = Arc::clone(&store);
+            let handle = tokio::spawn(async move {
+                store_clone.compact().await.unwrap();
+            });
+            handles.push(handle);
+        }
+
+        // Spawn concurrent readers
+        for _ in 0..5 {
+            let store_clone = Arc::clone(&store);
+            let handle = tokio::spawn(async move {
+                for i in 1..=200 {
+                    let _ = store_clone.get_entry(i).await;
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify log is still consistent
+        assert_eq!(store.get_last_index(), 200);
+        let stats = store.get_stats();
+        assert!(stats.last_compaction.is_some());
     }
 }
