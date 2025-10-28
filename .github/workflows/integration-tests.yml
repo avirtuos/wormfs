@@ -2,7 +2,7 @@ name: Integration Tests
 
 # Run FUSE integration tests
 # These tests mount actual filesystems and require more setup than unit tests
-# Run on-demand or nightly to catch integration issues
+# Run on PRs, nightly, and on-demand to catch integration issues
 
 on:
   # Manual trigger for on-demand testing
@@ -21,6 +21,10 @@ on:
   # Scheduled nightly runs at 2 AM UTC
   schedule:
     - cron: '0 2 * * *'
+
+  # Run on all pull requests
+  pull_request:
+    branches: [ main, develop ]
 
   # Optional: Run on push to main branch
   push:
@@ -179,7 +183,13 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Test Configuration:**" >> $GITHUB_STEP_SUMMARY
           echo "- Trigger: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "- PR: #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Branch: ${{ github.head_ref }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          fi
 
           if [ -n "${{ github.event.inputs.specific_test }}" ]; then
             echo "- Specific test: ${{ github.event.inputs.specific_test }}" >> $GITHUB_STEP_SUMMARY
