@@ -127,7 +127,7 @@ walkdir = "2"
 reqwest = { version = "0.11", features = ["json"] }
 
 [features]
-default = ["rusqlite", "tokio-rusqlite", "reed-solomon-erasure", "fuser"]
+default = ["rusqlite", "tokio-rusqlite", "redb", "reed-solomon-erasure", "fuser"]
 test-utils = ["mockall"]
 # Note: sqlx and rusqlite cannot be used together due to libsqlite3-sys version conflicts
 # Note: libp2p is now always enabled (no longer optional)
