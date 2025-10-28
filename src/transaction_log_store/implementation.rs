@@ -170,18 +170,25 @@ impl TransactionLogStoreImpl {
     }
 
     /// Update cached indices
-    fn update_cached_indices(&self, new_first: Option<u64>, new_last: Option<u64>) {
+    fn update_cached_indices(&self, new_first: Option<u64>, new_last: Option<u64>) -> Result<(), LogError> {
         if let Some(first) = new_first {
-            *self.inner.cached_first_index.write().unwrap() = Some(first);
+            *self.inner.cached_first_index.write().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
+            })? = Some(first);
         }
         if let Some(last) = new_last {
-            *self.inner.cached_last_index.write().unwrap() = Some(last);
+            *self.inner.cached_last_index.write().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
+            })? = Some(last);
         }
+        Ok(())
     }
 
     /// Get a log entry from the database (blocking operation)
     fn get_entry_blocking(&self, index: u64) -> Result<LogEntry, LogError> {
-        let db = self.inner.db.read().unwrap();
+        let db = self.inner.db.read().map_err(|e| {
+            LogError::DatabaseError(format!("Failed to acquire read lock: {}", e))
+        })?;
         let read_txn = db.begin_read().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin read transaction: {}", e))
         })?;
@@ -224,7 +231,9 @@ impl TransactionLogStoreImpl {
             return Err(LogError::InvalidIndex(start_index));
         }
 
-        let db = self.inner.db.read().unwrap();
+        let db = self.inner.db.read().map_err(|e| {
+            LogError::DatabaseError(format!("Failed to acquire read lock: {}", e))
+        })?;
         let read_txn = db.begin_read().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin read transaction: {}", e))
         })?;
@@ -265,7 +274,9 @@ impl TransactionLogStoreImpl {
 
     /// Append a single entry (blocking operation)
     fn append_blocking(&self, term: u64, data: Vec<u8>) -> Result<u64, LogError> {
-        let db = self.inner.db.write().unwrap();
+        let db = self.inner.db.write().map_err(|e| {
+            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        })?;
         let write_txn = db.begin_write().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin write transaction: {}", e))
         })?;
@@ -307,7 +318,7 @@ impl TransactionLogStoreImpl {
         self.update_cached_indices(
             if next_index == 1 { Some(1) } else { None },
             Some(next_index),
-        );
+        )?;
 
         Ok(next_index)
     }
@@ -318,7 +329,9 @@ impl TransactionLogStoreImpl {
             return Err(LogError::InvalidIndex(0));
         }
 
-        let db = self.inner.db.write().unwrap();
+        let db = self.inner.db.write().map_err(|e| {
+            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        })?;
         let write_txn = db.begin_write().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin write transaction: {}", e))
         })?;
@@ -366,14 +379,16 @@ impl TransactionLogStoreImpl {
         self.update_cached_indices(
             if start_index == 1 { Some(1) } else { None },
             Some(last_index),
-        );
+        )?;
 
         Ok(start_index)
     }
 
     /// Trim entries before the specified index (blocking operation)
     fn trim_blocking(&self, up_to_index: u64) -> Result<u64, LogError> {
-        let db = self.inner.db.write().unwrap();
+        let db = self.inner.db.write().map_err(|e| {
+            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        })?;
         let write_txn = db.begin_write().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin write transaction: {}", e))
         })?;
@@ -421,7 +436,9 @@ impl TransactionLogStoreImpl {
             .map_err(|e| LogError::DatabaseError(format!("Failed to commit transaction: {}", e)))?;
 
         // Update cached first index
-        *self.inner.cached_first_index.write().unwrap() = new_first_index;
+        *self.inner.cached_first_index.write().map_err(|e| {
+            LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
+        })? = new_first_index;
 
         Ok(count)
     }
@@ -437,8 +454,10 @@ impl TransactionLogStoreImpl {
             ));
         }
 
-        // Get database handle
-        let db = self.inner.db.read().unwrap();
+        // Get database handle (write lock needed for write transaction)
+        let db = self.inner.db.write().map_err(|e| {
+            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        })?;
         let write_txn = db
             .begin_write()
             .map_err(|e| LogError::DatabaseError(format!("Failed to begin transaction: {}", e)))?;
@@ -500,11 +519,15 @@ impl TransactionLogStoreImpl {
             .map_err(|e| LogError::DatabaseError(format!("Failed to commit transaction: {}", e)))?;
 
         // Update cached last index
-        *self.inner.cached_last_index.write().unwrap() = new_last_index;
+        *self.inner.cached_last_index.write().map_err(|e| {
+            LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
+        })? = new_last_index;
 
         // If we deleted everything, update first index too
         if new_last_index.is_none() {
-            *self.inner.cached_first_index.write().unwrap() = None;
+            *self.inner.cached_first_index.write().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
+            })? = None;
         }
 
         Ok(count)
@@ -521,7 +544,9 @@ impl TransactionLogStoreImpl {
 
         // Perform compaction (requires mutable access)
         {
-            let mut db = self.inner.db.write().unwrap();
+            let mut db = self.inner.db.write().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+            })?;
             db.compact().map_err(|e| {
                 LogError::DatabaseError(format!("Failed to compact database: {}", e))
             })?;
@@ -536,7 +561,9 @@ impl TransactionLogStoreImpl {
         let space_reclaimed = size_before.saturating_sub(size_after);
 
         // Update last compaction timestamp
-        *self.inner.last_compaction.write().unwrap() = Some(SystemTime::now());
+        *self.inner.last_compaction.write().map_err(|e| {
+            LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
+        })? = Some(SystemTime::now());
 
         Ok(space_reclaimed)
     }
@@ -642,11 +669,17 @@ impl TransactionLogStore for TransactionLogStoreImpl {
     }
 
     fn get_last_index(&self) -> u64 {
-        self.inner.cached_last_index.read().unwrap().unwrap_or(0)
+        self.inner.cached_last_index.read()
+            .ok()
+            .and_then(|guard| *guard)
+            .unwrap_or(0)
     }
 
     fn get_first_index(&self) -> u64 {
-        self.inner.cached_first_index.read().unwrap().unwrap_or(0)
+        self.inner.cached_first_index.read()
+            .ok()
+            .and_then(|guard| *guard)
+            .unwrap_or(0)
     }
 
     async fn trim(&self, up_to_index: u64) -> Result<u64, LogError> {
@@ -678,8 +711,12 @@ impl TransactionLogStore for TransactionLogStoreImpl {
     }
 
     fn get_stats(&self) -> LogStats {
-        let first_index = *self.inner.cached_first_index.read().unwrap();
-        let last_index = *self.inner.cached_last_index.read().unwrap();
+        let first_index = self.inner.cached_first_index.read()
+            .ok()
+            .and_then(|guard| *guard);
+        let last_index = self.inner.cached_last_index.read()
+            .ok()
+            .and_then(|guard| *guard);
 
         let entry_count = match (first_index, last_index) {
             (Some(first), Some(last)) => last - first + 1,
@@ -691,7 +728,9 @@ impl TransactionLogStore for TransactionLogStoreImpl {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        let last_compaction = *self.inner.last_compaction.read().unwrap();
+        let last_compaction = self.inner.last_compaction.read()
+            .ok()
+            .and_then(|guard| *guard);
 
         LogStats {
             first_index,
