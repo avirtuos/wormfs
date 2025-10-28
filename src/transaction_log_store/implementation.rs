@@ -422,6 +422,90 @@ impl TransactionLogStoreImpl {
 
         Ok(count)
     }
+
+    /// Delete entries from the specified index onwards (blocking version).
+    ///
+    /// This is the opposite of trim: it deletes entries from `from_index` to the end.
+    /// Critical for Raft log conflict resolution.
+    fn delete_from_blocking(&self, from_index: u64) -> Result<u64, LogError> {
+        if from_index == 0 {
+            return Err(LogError::InvalidRange(
+                "Cannot delete from index 0".to_string(),
+            ));
+        }
+
+        // Get database handle
+        let db = self.inner.db.read().unwrap();
+        let write_txn = db
+            .begin_write()
+            .map_err(|e| LogError::DatabaseError(format!("Failed to begin transaction: {}", e)))?;
+
+        let (count, new_last_index) = {
+            let mut table = write_txn
+                .open_table(LOG_ENTRIES_TABLE)
+                .map_err(|e| LogError::DatabaseError(format!("Failed to open table: {}", e)))?;
+
+            // Find all entries >= from_index
+            let indices_to_remove: Vec<u64> = table
+                .range(from_index..)
+                .map_err(|e| {
+                    LogError::DatabaseError(format!("Failed to create range iterator: {}", e))
+                })?
+                .map(|result| {
+                    result.map(|(k, _)| k.value()).map_err(|e| {
+                        LogError::DatabaseError(format!("Failed to iterate entries: {}", e))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let count = indices_to_remove.len() as u64;
+
+            // Remove entries
+            for index in indices_to_remove {
+                table.remove(index).map_err(|e| {
+                    LogError::DatabaseError(format!(
+                        "Failed to remove entry at index {}: {}",
+                        index, e
+                    ))
+                })?;
+            }
+
+            // Determine new last index (the entry just before from_index)
+            let new_last_index = if from_index > 1 {
+                // Check if the entry before from_index exists
+                table
+                    .range(..from_index)
+                    .map_err(|e| {
+                        LogError::DatabaseError(format!("Failed to create range iterator: {}", e))
+                    })?
+                    .last()
+                    .transpose()
+                    .map_err(|e| {
+                        LogError::DatabaseError(format!("Failed to get last entry: {}", e))
+                    })?
+                    .map(|(k, _)| k.value())
+            } else {
+                None
+            };
+
+            (count, new_last_index)
+        };
+
+        // Commit transaction
+        write_txn
+            .commit()
+            .map_err(|e| LogError::DatabaseError(format!("Failed to commit transaction: {}", e)))?;
+
+        // Update cached last index
+        *self.inner.cached_last_index.write().unwrap() = new_last_index;
+
+        // If we deleted everything, update first index too
+        if new_last_index.is_none() {
+            *self.inner.cached_first_index.write().unwrap() = None;
+        }
+
+        Ok(count)
+    }
 }
 
 #[async_trait]
@@ -484,6 +568,13 @@ impl TransactionLogStore for TransactionLogStoreImpl {
     async fn trim(&self, up_to_index: u64) -> Result<u64, LogError> {
         let self_clone = self.clone();
         task::spawn_blocking(move || self_clone.trim_blocking(up_to_index))
+            .await
+            .map_err(|e| LogError::DatabaseError(format!("Task join error: {}", e)))?
+    }
+
+    async fn delete_from(&self, from_index: u64) -> Result<u64, LogError> {
+        let self_clone = self.clone();
+        task::spawn_blocking(move || self_clone.delete_from_blocking(from_index))
             .await
             .map_err(|e| LogError::DatabaseError(format!("Task join error: {}", e)))?
     }
@@ -735,5 +826,243 @@ mod tests {
         }
 
         assert_eq!(store.get_last_index(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_delete_from_basic() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Create entries 1-10
+        for i in 1..=10 {
+            store
+                .append(i, format!("op{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Delete from index 7 onwards
+        let deleted = store.delete_from(7).await.unwrap();
+        assert_eq!(deleted, 4); // Entries 7, 8, 9, 10 removed
+
+        assert_eq!(store.get_first_index(), 1);
+        assert_eq!(store.get_last_index(), 6);
+
+        // Verify remaining entries exist
+        for i in 1..=6 {
+            let entry = store.get_entry(i).await.unwrap();
+            assert_eq!(entry.index, i);
+        }
+
+        // Verify deleted entries are gone
+        for i in 7..=10 {
+            let result = store.get_entry(i).await;
+            assert!(result.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_from_raft_conflict_scenario() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Simulate split-brain: follower has entries from old leader
+        // Entries 1-5 are committed (term 1)
+        for i in 1..=5 {
+            store
+                .append(1, format!("committed-{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Entries 6-8 are uncommitted from old leader (term 2)
+        for i in 6..=8 {
+            store
+                .append(2, format!("uncommitted-old-{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.get_last_index(), 8);
+
+        // New leader sends conflicting entry at index 6 (term 3)
+        // Follower must delete from index 6 onwards first
+        let deleted = store.delete_from(6).await.unwrap();
+        assert_eq!(deleted, 3); // Removed 6, 7, 8
+
+        assert_eq!(store.get_last_index(), 5);
+
+        // Now append new leader's entry
+        store.append(3, b"new-leader-6".to_vec()).await.unwrap();
+        assert_eq!(store.get_last_index(), 6);
+
+        let entry6 = store.get_entry(6).await.unwrap();
+        assert_eq!(entry6.term, 3);
+        assert_eq!(entry6.operations, b"new-leader-6");
+    }
+
+    #[tokio::test]
+    async fn test_delete_from_all_entries() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        for i in 1..=5 {
+            store
+                .append(1, format!("op{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Delete all entries
+        let deleted = store.delete_from(1).await.unwrap();
+        assert_eq!(deleted, 5);
+
+        assert_eq!(store.get_first_index(), 0);
+        assert_eq!(store.get_last_index(), 0);
+
+        let result = store.get_last_entry().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_from_last_entry_only() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        for i in 1..=5 {
+            store
+                .append(1, format!("op{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Delete only the last entry
+        let deleted = store.delete_from(5).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        assert_eq!(store.get_first_index(), 1);
+        assert_eq!(store.get_last_index(), 4);
+
+        let last_entry = store.get_last_entry().await.unwrap();
+        assert_eq!(last_entry.index, 4);
+    }
+
+    #[tokio::test]
+    async fn test_delete_from_nonexistent_index() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        for i in 1..=5 {
+            store
+                .append(1, format!("op{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Try to delete from beyond the end
+        let deleted = store.delete_from(100).await.unwrap();
+        assert_eq!(deleted, 0);
+
+        // Log should be unchanged
+        assert_eq!(store.get_first_index(), 1);
+        assert_eq!(store.get_last_index(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_delete_from_zero_index() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        for i in 1..=5 {
+            store
+                .append(1, format!("op{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Index 0 is invalid
+        let result = store.delete_from(0).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_from_empty_log() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Delete from empty log
+        let deleted = store.delete_from(1).await.unwrap();
+        assert_eq!(deleted, 0);
+
+        assert_eq!(store.get_first_index(), 0);
+        assert_eq!(store.get_last_index(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_from_after_trim() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Create entries 1-10
+        for i in 1..=10 {
+            store
+                .append(1, format!("op{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Trim first 5 entries (remove 1-4, keep 5-10)
+        store.trim(5).await.unwrap();
+        assert_eq!(store.get_first_index(), 5);
+        assert_eq!(store.get_last_index(), 10);
+
+        // Now delete from index 8 onwards
+        let deleted = store.delete_from(8).await.unwrap();
+        assert_eq!(deleted, 3); // Removed 8, 9, 10
+
+        assert_eq!(store.get_first_index(), 5);
+        assert_eq!(store.get_last_index(), 7);
+
+        // Verify entries 5-7 exist
+        for i in 5..=7 {
+            let entry = store.get_entry(i).await.unwrap();
+            assert_eq!(entry.index, i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_trim_and_delete_from_difference() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Create entries 1-10
+        for i in 1..=10 {
+            store
+                .append(1, format!("op{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // trim(5) removes entries BEFORE 5: [1,2,3,4] -> leaves [5,6,7,8,9,10]
+        let trimmed = store.trim(5).await.unwrap();
+        assert_eq!(trimmed, 4);
+        assert_eq!(store.get_first_index(), 5);
+        assert_eq!(store.get_last_index(), 10);
+
+        // Restore log for second test
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+        for i in 1..=10 {
+            store
+                .append(1, format!("op{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // delete_from(5) removes entries FROM 5 onwards: [5,6,7,8,9,10] -> leaves [1,2,3,4]
+        let deleted = store.delete_from(5).await.unwrap();
+        assert_eq!(deleted, 6);
+        assert_eq!(store.get_first_index(), 1);
+        assert_eq!(store.get_last_index(), 4);
     }
 }

@@ -50,6 +50,10 @@ pub enum LogError {
     #[error("Invalid log index: {0}")]
     InvalidIndex(u64),
 
+    /// Invalid range provided
+    #[error("Invalid range: {0}")]
+    InvalidRange(String),
+
     /// Serialization error
     #[error("Serialization error: {0}")]
     SerializationError(String),
