@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 /// Configuration provider for Admin component.
 pub struct AdminConfigProvider {
+    /// Optional admin configuration. None if admin server is disabled.
     pub config: Option<crate::admin::Config>,
 }
 
@@ -49,6 +50,7 @@ impl ConfigProvider for AdminConfigProvider {
 
 /// Configuration provider for Metrics component.
 pub struct MetricsConfigProvider {
+    /// Optional metrics configuration. None if metrics collection is disabled.
     pub config: Option<crate::metric_service::Config>,
 }
 
@@ -135,6 +137,7 @@ impl ConfigProvider for MetricsConfigProvider {
 
 /// Configuration provider for Metadata component.
 pub struct MetadataConfigProvider {
+    /// Metadata store configuration. Always required as metadata is essential.
     pub config: crate::metadata_store::Config,
 }
 
@@ -232,6 +235,7 @@ impl ConfigProvider for MetadataConfigProvider {
 
 /// Configuration provider for FileStore component.
 pub struct FileStoreConfigProvider {
+    /// File store configuration for chunk storage and erasure coding.
     pub config: crate::file_store::types::Config,
 }
 
@@ -305,6 +309,7 @@ impl ConfigProvider for FileStoreConfigProvider {
 
 /// Configuration provider for Filesystem component.
 pub struct FilesystemConfigProvider {
+    /// Filesystem service configuration for FUSE operations and file handling.
     pub config: crate::filesystem_service::types::Config,
 }
 
@@ -410,6 +415,7 @@ impl ConfigProvider for FilesystemConfigProvider {
 
 /// Configuration provider for BufferedFileHandle component.
 pub struct BufferedFileHandleConfigProvider {
+    /// Configuration for file handle buffering and write caching behavior.
     pub config: crate::filesystem_service::types::BufferedFileHandleConfig,
 }
 
@@ -450,7 +456,9 @@ impl ConfigProvider for BufferedFileHandleConfigProvider {
 
 /// Configuration provider for Mount options.
 pub struct MountConfigProvider {
+    /// Path where the WormFS filesystem is mounted.
     pub mount_point: std::path::PathBuf,
+    /// FUSE mount options controlling permissions and behavior.
     pub options: crate::filesystem_service::mount::MountOptions,
 }
 
