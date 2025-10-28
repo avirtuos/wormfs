@@ -58,6 +58,10 @@ pub enum LogError {
     #[error("Serialization error: {0}")]
     SerializationError(String),
 
+    /// Checksum verification failed (data corruption detected)
+    #[error("Checksum verification failed at index {0}: data is corrupted")]
+    ChecksumFailed(u64),
+
     /// I/O error
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
