@@ -1,6 +1,6 @@
 //! redb-based implementation of TransactionLogStore.
 
-use super::types::{LogEntry, LogError, LogStats, TransactionLogConfig};
+use super::types::{IntegrityReport, LogEntry, LogError, LogStats, TransactionLogConfig};
 use super::TransactionLogStore;
 use async_trait::async_trait;
 use crc32fast::Hasher;
@@ -540,6 +540,56 @@ impl TransactionLogStoreImpl {
 
         Ok(space_reclaimed)
     }
+
+    /// Verify log integrity (blocking version).
+    ///
+    /// Scans all entries to check for gaps and validate checksums.
+    fn verify_integrity_blocking(&self) -> Result<IntegrityReport, LogError> {
+        let last_index = self.get_last_index();
+
+        // Empty log is valid
+        if last_index == 0 {
+            return Ok(IntegrityReport {
+                total_entries: 0,
+                missing_indices: Vec::new(),
+                is_valid: true,
+            });
+        }
+
+        let mut total_entries = 0u64;
+        let mut missing_indices = Vec::new();
+        let mut is_valid = true;
+
+        // Scan from index 1 to last_index to detect all gaps
+        // (Raft log indices start at 1)
+        for index in 1..=last_index {
+            match self.get_entry_blocking(index) {
+                Ok(_entry) => {
+                    // Entry exists and checksum is valid (verified in get_entry_blocking)
+                    total_entries += 1;
+                }
+                Err(LogError::EntryNotFound(_)) => {
+                    // Gap in the sequence - allowed, but record it
+                    missing_indices.push(index);
+                }
+                Err(LogError::SerializationError(_)) => {
+                    // Checksum failure or corrupted data
+                    missing_indices.push(index);
+                    is_valid = false;
+                }
+                Err(e) => {
+                    // Other errors (database errors, etc.)
+                    return Err(e);
+                }
+            }
+        }
+
+        Ok(IntegrityReport {
+            total_entries,
+            missing_indices,
+            is_valid,
+        })
+    }
 }
 
 #[async_trait]
@@ -616,6 +666,13 @@ impl TransactionLogStore for TransactionLogStoreImpl {
     async fn compact(&self) -> Result<u64, LogError> {
         let self_clone = self.clone();
         task::spawn_blocking(move || self_clone.compact_blocking())
+            .await
+            .map_err(|e| LogError::DatabaseError(format!("Task join error: {}", e)))?
+    }
+
+    async fn verify_integrity(&self) -> Result<IntegrityReport, LogError> {
+        let self_clone = self.clone();
+        task::spawn_blocking(move || self_clone.verify_integrity_blocking())
             .await
             .map_err(|e| LogError::DatabaseError(format!("Task join error: {}", e)))?
     }
@@ -1258,5 +1315,138 @@ mod tests {
         assert_eq!(store.get_last_index(), 200);
         let stats = store.get_stats();
         assert!(stats.last_compaction.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_verify_integrity_empty_log() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        let report = store.verify_integrity().await.unwrap();
+
+        assert_eq!(report.total_entries, 0);
+        assert_eq!(report.missing_indices.len(), 0);
+        assert!(report.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_verify_integrity_valid_log() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Add entries 1-100
+        for i in 1..=100 {
+            store.append(1, vec![0xAAu8; 128]).await.unwrap();
+        }
+
+        let report = store.verify_integrity().await.unwrap();
+
+        assert_eq!(report.total_entries, 100);
+        assert_eq!(report.missing_indices.len(), 0);
+        assert!(report.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_verify_integrity_with_gaps_after_trim() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Add entries 1-100
+        for _i in 1..=100 {
+            store.append(1, vec![0xBBu8; 128]).await.unwrap();
+        }
+
+        // Trim first 50 entries (creates gap from 1-49)
+        store.trim(50).await.unwrap();
+
+        let report = store.verify_integrity().await.unwrap();
+
+        // Should have 51 entries (50-100)
+        assert_eq!(report.total_entries, 51);
+        // Should report indices 1-49 as missing
+        assert_eq!(report.missing_indices.len(), 49);
+        assert_eq!(report.missing_indices[0], 1);
+        assert_eq!(report.missing_indices[48], 49);
+        // Gaps are allowed, so log is still valid
+        assert!(report.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_verify_integrity_with_gaps_after_delete_from() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Add entries 1-100
+        for _i in 1..=100 {
+            store.append(1, vec![0xCCu8; 128]).await.unwrap();
+        }
+
+        // Delete from 75 onwards
+        store.delete_from(75).await.unwrap();
+
+        let report = store.verify_integrity().await.unwrap();
+
+        // Should have 74 entries (1-74)
+        assert_eq!(report.total_entries, 74);
+        // No missing indices - deleted entries don't count as gaps
+        // (last_index is now 74, so we only scan 1-74)
+        assert_eq!(report.missing_indices.len(), 0);
+        // All entries present are valid
+        assert!(report.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_verify_integrity_with_sparse_log() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Add entries 1-50
+        for _i in 1..=50 {
+            store.append(1, vec![0xDDu8; 128]).await.unwrap();
+        }
+
+        // Trim to remove 1-9, keep 10 onwards
+        store.trim(10).await.unwrap();
+        // Delete from 31 onwards
+        store.delete_from(31).await.unwrap();
+
+        // Now we have entries 10-30 (21 entries)
+        // last_index is now 30, so we scan 1-30
+        let report = store.verify_integrity().await.unwrap();
+
+        assert_eq!(report.total_entries, 21);
+        // Missing: 1-9 (9 indices before first_index)
+        assert_eq!(report.missing_indices.len(), 9);
+        assert_eq!(report.missing_indices[0], 1);
+        assert_eq!(report.missing_indices[8], 9);
+        assert!(report.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_verify_integrity_large_log() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Add 10,000 entries
+        for _i in 1..=10000 {
+            store.append(1, vec![0xEEu8; 64]).await.unwrap();
+        }
+
+        let start = std::time::Instant::now();
+        let report = store.verify_integrity().await.unwrap();
+        let elapsed = start.elapsed();
+
+        println!("Verified 10,000 entries in {:?}", elapsed);
+
+        assert_eq!(report.total_entries, 10000);
+        assert_eq!(report.missing_indices.len(), 0);
+        assert!(report.is_valid);
+
+        // Should complete in reasonable time (<5 seconds)
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "Verification took too long: {:?}",
+            elapsed
+        );
     }
 }

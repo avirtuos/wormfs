@@ -251,6 +251,35 @@ pub trait TransactionLogStore: Send + Sync {
     /// it during low-traffic periods or when database size exceeds threshold.
     async fn compact(&self) -> Result<u64, LogError>;
 
+    /// Verify the integrity of the transaction log.
+    ///
+    /// This operation scans the entire log to:
+    /// - Detect gaps in the log sequence (missing indices)
+    /// - Verify CRC32 checksums for all entries
+    /// - Report overall log health
+    ///
+    /// Gaps in the log sequence are allowed (e.g., after trim operations)
+    /// and are reported but don't make the log invalid. Checksum failures
+    /// indicate corruption and make the log invalid.
+    ///
+    /// # Returns
+    ///
+    /// An IntegrityReport containing:
+    /// - total_entries: Number of entries checked
+    /// - missing_indices: Vec of gaps found in the sequence
+    /// - is_valid: true if all checksums are valid
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the verification process itself fails
+    /// (not if corruption is found - that's reported in the IntegrityReport).
+    ///
+    /// # Performance
+    ///
+    /// This is an expensive operation that reads every entry. Run it
+    /// during maintenance windows or low-traffic periods.
+    async fn verify_integrity(&self) -> Result<IntegrityReport, LogError>;
+
     /// Get transaction log statistics.
     ///
     /// # Returns
