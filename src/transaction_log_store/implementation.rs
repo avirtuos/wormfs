@@ -223,10 +223,7 @@ impl TransactionLogStoreImpl {
 
                 // Verify checksum
                 if !data.verify_checksum() {
-                    return Err(LogError::DatabaseError(format!(
-                        "Checksum verification failed for entry at index {}",
-                        index
-                    )));
+                    return Err(LogError::ChecksumFailed(index));
                 }
 
                 Ok(data.to_log_entry(index))
@@ -275,10 +272,7 @@ impl TransactionLogStoreImpl {
 
             // Verify checksum
             if !data.verify_checksum() {
-                return Err(LogError::DatabaseError(format!(
-                    "Checksum verification failed for entry at index {}",
-                    index
-                )));
+                return Err(LogError::ChecksumFailed(index));
             }
 
             entries.push(data.to_log_entry(index));
@@ -699,8 +693,13 @@ impl TransactionLogStoreImpl {
                     // Gap in the sequence - allowed, but record it
                     missing_indices.push(index);
                 }
+                Err(LogError::ChecksumFailed(_)) => {
+                    // Checksum verification failed - data is corrupted
+                    missing_indices.push(index);
+                    is_valid = false;
+                }
                 Err(LogError::SerializationError(_)) => {
-                    // Checksum failure or corrupted data
+                    // Deserialization failed - data is corrupted
                     missing_indices.push(index);
                     is_valid = false;
                 }
