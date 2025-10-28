@@ -153,7 +153,24 @@ impl TransactionLogStoreImpl {
         })
     }
 
-    /// Load first and last indices from the database
+    /// Load first and last indices from the database.
+    ///
+    /// This method queries the LOG_ENTRIES_TABLE to find the minimum and maximum
+    /// log indices currently stored. Called during initialization to populate
+    /// the cached indices for O(1) access.
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - Reference to the redb Database
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (first_index, last_index) where each is None if the log is empty,
+    /// or Some(index) if entries exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LogError::DatabaseError` if database operations fail.
     fn load_indices_from_db(db: &Database) -> Result<(Option<u64>, Option<u64>), LogError> {
         let read_txn = db.begin_read().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin read transaction: {}", e))
@@ -178,7 +195,24 @@ impl TransactionLogStoreImpl {
         Ok((first_index, last_index))
     }
 
-    /// Update cached indices
+    /// Update cached indices after write operations.
+    ///
+    /// Synchronizes the in-memory cached first and/or last indices with the
+    /// database state after operations that modify log boundaries (append, trim,
+    /// delete_from). Only updates indices if the corresponding Option is Some.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_first` - New first index to cache, or None to leave unchanged
+    /// * `new_last` - New last index to cache, or None to leave unchanged
+    ///
+    /// # Returns
+    ///
+    /// Returns Ok(()) on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LogError::DatabaseError` if acquiring the cache write lock fails.
     fn update_cached_indices(
         &self,
         new_first: Option<u64>,
@@ -197,7 +231,26 @@ impl TransactionLogStoreImpl {
         Ok(())
     }
 
-    /// Get a log entry from the database (blocking operation)
+    /// Get a log entry from the database (blocking operation).
+    ///
+    /// Performs a synchronous database read and verifies the entry's CRC32 checksum.
+    /// This is the blocking implementation called from the async API wrapper via
+    /// `tokio::task::spawn_blocking`.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The log index to retrieve
+    ///
+    /// # Returns
+    ///
+    /// Returns the log entry with verified checksum.
+    ///
+    /// # Errors
+    ///
+    /// * `LogError::EntryNotFound` - Entry at the specified index doesn't exist
+    /// * `LogError::ChecksumFailed` - Entry exists but CRC32 verification failed (data corruption)
+    /// * `LogError::SerializationError` - Failed to deserialize the entry data
+    /// * `LogError::DatabaseError` - Database operation failed
     fn get_entry_blocking(&self, index: u64) -> Result<LogEntry, LogError> {
         let db =
             self.inner.db.read().map_err(|e| {
@@ -232,7 +285,28 @@ impl TransactionLogStoreImpl {
         }
     }
 
-    /// Get a range of log entries (blocking operation)
+    /// Get a range of log entries (blocking operation).
+    ///
+    /// Retrieves all log entries from start_index to end_index (inclusive) using
+    /// efficient range queries. Validates CRC32 checksums for all entries. This is
+    /// the blocking implementation called from the async API wrapper via
+    /// `tokio::task::spawn_blocking`.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_index` - First index to retrieve (inclusive)
+    /// * `end_index` - Last index to retrieve (inclusive)
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of log entries in the specified range, ordered by index.
+    ///
+    /// # Errors
+    ///
+    /// * `LogError::InvalidIndex` - start_index > end_index
+    /// * `LogError::ChecksumFailed` - An entry's CRC32 verification failed (data corruption)
+    /// * `LogError::SerializationError` - Failed to deserialize an entry
+    /// * `LogError::DatabaseError` - Database operation failed
     fn get_entries_blocking(
         &self,
         start_index: u64,
@@ -281,7 +355,27 @@ impl TransactionLogStoreImpl {
         Ok(entries)
     }
 
-    /// Append a single entry (blocking operation)
+    /// Append a single entry (blocking operation).
+    ///
+    /// Appends a log entry to the database with automatic index assignment,
+    /// CRC32 checksum calculation, and immediate fsync for durability. Records
+    /// metrics and updates state gauges after successful append. This is the
+    /// blocking implementation called from the async API wrapper via
+    /// `tokio::task::spawn_blocking`.
+    ///
+    /// # Arguments
+    ///
+    /// * `term` - Raft term number for this log entry
+    /// * `data` - Serialized operation data to store
+    ///
+    /// # Returns
+    ///
+    /// Returns the index assigned to the newly appended entry.
+    ///
+    /// # Errors
+    ///
+    /// * `LogError::DatabaseError` - Database operation or fsync failed
+    /// * `LogError::SerializationError` - Failed to serialize the entry
     fn append_blocking(&self, term: u64, data: Vec<u8>) -> Result<u64, LogError> {
         let start_time = std::time::Instant::now();
 
@@ -347,7 +441,28 @@ impl TransactionLogStoreImpl {
         Ok(next_index)
     }
 
-    /// Append multiple entries atomically (blocking operation)
+    /// Append multiple entries atomically (blocking operation).
+    ///
+    /// Appends a batch of log entries in a single database transaction, making
+    /// batch operations more efficient than individual appends. All entries are
+    /// fsynced together. Records metrics and updates state gauges after successful
+    /// batch append. This is the blocking implementation called from the async API
+    /// wrapper via `tokio::task::spawn_blocking`.
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - Vector of (term, data) tuples to append
+    ///
+    /// # Returns
+    ///
+    /// Returns the starting index of the batch. Subsequent entries are at
+    /// consecutive indices.
+    ///
+    /// # Errors
+    ///
+    /// * `LogError::InvalidRange` - Batch is empty
+    /// * `LogError::DatabaseError` - Database operation or fsync failed (entire batch rolled back)
+    /// * `LogError::SerializationError` - Failed to serialize an entry
     fn append_batch_blocking(&self, entries: Vec<(u64, Vec<u8>)>) -> Result<u64, LogError> {
         if entries.is_empty() {
             return Err(LogError::InvalidRange(
@@ -426,7 +541,26 @@ impl TransactionLogStoreImpl {
         Ok(start_index)
     }
 
-    /// Trim entries before the specified index (blocking operation)
+    /// Trim entries before the specified index (blocking operation).
+    ///
+    /// Removes all log entries with indices less than `up_to_index`. Used for
+    /// log compaction and garbage collection after snapshot creation. Updates
+    /// the cached first index to reflect the new log start. Records metrics and
+    /// updates state gauges after successful trim. This is the blocking
+    /// implementation called from the async API wrapper via
+    /// `tokio::task::spawn_blocking`.
+    ///
+    /// # Arguments
+    ///
+    /// * `up_to_index` - Remove all entries before this index (exclusive)
+    ///
+    /// # Returns
+    ///
+    /// Returns the count of entries removed.
+    ///
+    /// # Errors
+    ///
+    /// * `LogError::DatabaseError` - Database operation failed
     fn trim_blocking(&self, up_to_index: u64) -> Result<u64, LogError> {
         let start_time = std::time::Instant::now();
 
@@ -756,7 +890,15 @@ impl TransactionLogStoreImpl {
         }
     }
 
-    /// Record a histogram metric if metrics service is available
+    /// Record a histogram metric if metrics service is available.
+    ///
+    /// Used for recording latency measurements in seconds. If the metrics service
+    /// has not been configured via `set_metrics()`, this method silently does nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Metric name (e.g., "transaction_log.append.latency")
+    /// * `value` - Metric value in seconds
     fn record_histogram(&self, name: &str, value: f64) {
         if let Ok(metrics_guard) = self.inner.metrics.read() {
             if let Some(metrics) = metrics_guard.as_ref() {
@@ -766,7 +908,15 @@ impl TransactionLogStoreImpl {
         }
     }
 
-    /// Record a counter metric if metrics service is available
+    /// Record a counter metric if metrics service is available.
+    ///
+    /// Used for recording operation counts. If the metrics service has not been
+    /// configured via `set_metrics()`, this method silently does nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Metric name (e.g., "transaction_log.append.total")
+    /// * `value` - Counter value to add
     fn record_counter(&self, name: &str, value: u64) {
         if let Ok(metrics_guard) = self.inner.metrics.read() {
             if let Some(metrics) = metrics_guard.as_ref() {
@@ -776,7 +926,16 @@ impl TransactionLogStoreImpl {
         }
     }
 
-    /// Record a gauge metric if metrics service is available
+    /// Record a gauge metric if metrics service is available.
+    ///
+    /// Used for recording point-in-time measurements like file sizes. If the
+    /// metrics service has not been configured via `set_metrics()`, this method
+    /// silently does nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Metric name (e.g., "transaction_log.db_size_bytes")
+    /// * `value` - Gauge value in bytes
     fn record_gauge(&self, name: &str, value: f64) {
         if let Ok(metrics_guard) = self.inner.metrics.read() {
             if let Some(metrics) = metrics_guard.as_ref() {
@@ -786,7 +945,12 @@ impl TransactionLogStoreImpl {
         }
     }
 
-    /// Update state gauges for log size and entry count
+    /// Update state gauges for log size and entry count.
+    ///
+    /// Records current database file size and approximate entry count based on
+    /// first/last indices. Called after write operations (append, trim, delete_from)
+    /// to maintain up-to-date state visibility in monitoring dashboards. If the
+    /// metrics service has not been configured, this method silently does nothing.
     fn update_state_gauges(&self) {
         // Record database file size
         if let Ok(metadata) = std::fs::metadata(&self.inner.config.db_path) {
