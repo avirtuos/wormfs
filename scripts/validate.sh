@@ -57,17 +57,21 @@ run_check() {
     fi
 }
 
+cargo clean --package wormfs
+
+sleep 2
+
 # 1. Cargo Build - Check for errors and warnings
 echo -e "${YELLOW}Step 1/7: Building project...${NC}"
 run_check "Cargo Build" "cargo build 2>&1 | tee /tmp/wormfs_build.log && ! grep 'error:' /tmp/wormfs_build.log"
 
-# 2. Cargo Test - Run all tests (hide successful test output)
+# 2. Cargo Test - Run all tests (check for compilation errors first, then run tests)
 echo -e "${YELLOW}Step 2/7: Running tests...${NC}"
-run_check "Cargo Test" "cargo test 2>&1 | grep -v ' ... ok$' | grep -v '^$'"
+run_check "Cargo Test" "cargo test 2>&1 | tee /tmp/wormfs_test.log && ! grep -E '^error:|^error\[E[0-9]+\]|could not compile' /tmp/wormfs_test.log"
 
 # 3. Cargo Test (Integration Tests) - Run integration tests with test-utils feature
 echo -e "${YELLOW}Step 3/7: Running integration tests...${NC}"
-run_check "Cargo Integration Tests" "cargo test --tests --features test-utils 2>&1 | grep -v ' ... ok$' | grep -v '^$'"
+run_check "Cargo Integration Tests" "cargo test --tests --features test-utils 2>&1 | tee /tmp/wormfs_integration_test.log && ! grep -E '^error:|^error\[E[0-9]+\]|could not compile' /tmp/wormfs_integration_test.log"
 
 # 4. FUSE Integration Tests - Run ignored integration tests that mount filesystems
 echo -e "${YELLOW}Step 4/7: Running FUSE integration tests (ignored)...${NC}"

@@ -34,11 +34,12 @@
 //!     file_store_config: Default::default(),
 //!     metric_config: Some(Default::default()),
 //!     admin_config: Some(config.clone()),
+//!     network_config: None,
 //!     mount_point: std::path::PathBuf::from("/tmp/wormfs"),
 //!     mount_options: Default::default(),
 //! });
 //!
-//! let server = AdminServer::new(config, mount_config, metrics);
+//! let server = AdminServer::new(config, mount_config, metrics, None);
 //! let handle = server.start()?;
 //!
 //! // Server runs in the background
