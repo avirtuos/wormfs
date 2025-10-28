@@ -33,7 +33,7 @@ async fn test_large_log_performance() {
     let start = std::time::Instant::now();
     for i in 1..=1000 {
         let data = format!("operation {}", i).into_bytes();
-        store.append(i % 10 + 1, data).await.unwrap();
+        store.append(i, i % 10 + 1, data).await.unwrap();
     }
     let elapsed = start.elapsed();
 
@@ -61,7 +61,7 @@ async fn test_batch_append_performance() {
     let mut entries = Vec::new();
     for i in 1..=10000 {
         let data = format!("batch operation {}", i).into_bytes();
-        entries.push((i % 10 + 1, data));
+        entries.push((i, i % 10 + 1, data));
     }
 
     // Measure batch append time
@@ -96,7 +96,7 @@ async fn test_persistence_across_restarts() {
 
         for i in 1..=100 {
             let data = format!("persistent entry {}", i).into_bytes();
-            store.append(i % 5 + 1, data).await.unwrap();
+            store.append(i, i % 5 + 1, data).await.unwrap();
         }
 
         assert_eq!(store.get_last_index(), 100);
@@ -137,7 +137,7 @@ async fn test_trim_and_persistence() {
 
         for i in 1..=100 {
             store
-                .append(1, format!("entry {}", i).into_bytes())
+                .append(i, 1, format!("entry {}", i).into_bytes())
                 .await
                 .unwrap();
         }
@@ -171,23 +171,13 @@ async fn test_concurrent_appends() {
     let config = create_test_config(&temp_dir);
     let store = Arc::new(TransactionLogStoreImpl::new(config).unwrap());
 
-    let mut handles = vec![];
+    // With Raft-compliant index assignment, we need to append sequentially.
+    // In a real Raft scenario, the leader assigns indices sequentially.
+    // This test verifies that entries can be appended and retrieved correctly.
 
-    // Spawn 20 tasks, each appending 50 entries
-    for task_id in 0..20 {
-        let store_clone = Arc::clone(&store);
-        let handle = tokio::spawn(async move {
-            for i in 0..50 {
-                let data = format!("task {} entry {}", task_id, i).into_bytes();
-                store_clone.append(1, data).await.unwrap();
-            }
-        });
-        handles.push(handle);
-    }
-
-    // Wait for all tasks to complete
-    for handle in handles {
-        handle.await.unwrap();
+    for i in 1..=1000 {
+        let data = format!("entry {}", i).into_bytes();
+        store.append(i, 1, data).await.unwrap();
     }
 
     // Verify total count
@@ -209,26 +199,19 @@ async fn test_concurrent_reads_and_writes() {
     // Pre-populate with some entries
     for i in 1..=100 {
         store
-            .append(1, format!("initial {}", i).into_bytes())
+            .append(i, 1, format!("initial {}", i).into_bytes())
             .await
             .unwrap();
     }
 
-    let mut handles = vec![];
-
-    // Spawn writers
-    for task_id in 0..5 {
-        let store_clone = Arc::clone(&store);
-        let handle = tokio::spawn(async move {
-            for i in 0..20 {
-                let data = format!("writer {} entry {}", task_id, i).into_bytes();
-                store_clone.append(2, data).await.unwrap();
-            }
-        });
-        handles.push(handle);
+    // Append writers sequentially to avoid index gaps
+    for i in 101..=200 {
+        let data = format!("writer entry {}", i).into_bytes();
+        store.append(i, 2, data).await.unwrap();
     }
 
     // Spawn readers
+    let mut read_handles = vec![];
     for task_id in 0..10 {
         let store_clone = Arc::clone(&store);
         let handle = tokio::spawn(async move {
@@ -239,11 +222,11 @@ async fn test_concurrent_reads_and_writes() {
                 let _ = store_clone.get_last_entry().await;
             }
         });
-        handles.push(handle);
+        read_handles.push(handle);
     }
 
     // Wait for all tasks
-    for handle in handles {
+    for handle in read_handles {
         handle.await.unwrap();
     }
 
@@ -259,10 +242,10 @@ async fn test_large_entry_size() {
 
     // Create a 1MB entry
     let large_data = vec![0xABu8; 1024 * 1024];
-    let index = store.append(1, large_data.clone()).await.unwrap();
+    store.append(1, 1, large_data.clone()).await.unwrap();
 
     // Verify it can be retrieved
-    let entry = store.get_entry(index).await.unwrap();
+    let entry = store.get_entry(1).await.unwrap();
     assert_eq!(entry.operations.len(), 1024 * 1024);
     assert_eq!(entry.operations, large_data);
 }
@@ -309,7 +292,7 @@ async fn test_statistics() {
     // Add entries
     for i in 1..=50 {
         store
-            .append(i % 3 + 1, format!("entry {}", i).into_bytes())
+            .append(i, i % 3 + 1, format!("entry {}", i).into_bytes())
             .await
             .unwrap();
     }
@@ -338,7 +321,7 @@ async fn test_range_query_edge_cases() {
     // Populate with entries 1-10
     for i in 1..=10 {
         store
-            .append(1, format!("entry {}", i).into_bytes())
+            .append(i, 1, format!("entry {}", i).into_bytes())
             .await
             .unwrap();
     }
@@ -387,7 +370,8 @@ async fn test_checksum_integrity() {
     ];
 
     for (i, data) in test_data.iter().enumerate() {
-        let index = store.append((i + 1) as u64, data.clone()).await.unwrap();
+        let index = (i + 1) as u64;
+        store.append(index, 1, data.clone()).await.unwrap();
 
         // Immediately verify the entry
         let entry = store.get_entry(index).await.unwrap();
@@ -409,13 +393,13 @@ async fn test_stress_mixed_operations() {
 
     let mut handles = vec![];
 
-    // Writer: continuous appends
+    // Writer: continuous appends (wait for it to finish before batch)
     {
         let store_clone = Arc::clone(&store);
         let handle = tokio::spawn(async move {
             for i in 1..=500 {
                 store_clone
-                    .append(i % 10 + 1, format!("append {}", i).into_bytes())
+                    .append(i, i % 10 + 1, format!("append {}", i).into_bytes())
                     .await
                     .unwrap();
             }
@@ -423,13 +407,17 @@ async fn test_stress_mixed_operations() {
         handles.push(handle);
     }
 
-    // Batch writer
+    // Wait for first writer to complete before starting batch writer
+    for handle in handles.drain(..) {
+        handle.await.unwrap();
+    }
+
+    // Batch writer (runs after continuous appends complete)
     {
         let store_clone = Arc::clone(&store);
         let handle = tokio::spawn(async move {
-            sleep(Duration::from_millis(10)).await;
-            let batch: Vec<_> = (1..=100)
-                .map(|i| (1u64, format!("batch {}", i).into_bytes()))
+            let batch: Vec<_> = (501..=600)
+                .map(|i| (i, 1u64, format!("batch {}", i).into_bytes()))
                 .collect();
             store_clone.append_batch(batch).await.unwrap();
         });
