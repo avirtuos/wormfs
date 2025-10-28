@@ -227,6 +227,30 @@ pub trait TransactionLogStore: Send + Sync {
     /// ```
     async fn delete_from(&self, from_index: u64) -> Result<u64, LogError>;
 
+    /// Compact the transaction log database.
+    ///
+    /// This operation defragments the database file and reclaims space from
+    /// deleted entries. Compaction is recommended after significant trim()
+    /// or delete_from() operations, or when the database size exceeds the
+    /// compact_threshold_mb configuration.
+    ///
+    /// The operation is performed online (database remains accessible) and
+    /// updates the last_compaction timestamp in statistics.
+    ///
+    /// # Returns
+    ///
+    /// The amount of space reclaimed in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if compaction fails.
+    ///
+    /// # Note
+    ///
+    /// Compaction can be expensive for large databases. Consider running
+    /// it during low-traffic periods or when database size exceeds threshold.
+    async fn compact(&self) -> Result<u64, LogError>;
+
     /// Get transaction log statistics.
     ///
     /// # Returns
