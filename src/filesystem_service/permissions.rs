@@ -23,7 +23,7 @@
 //!
 //! # Examples
 //!
-//! ```rust,ignore
+//! ```rust
 //! use wormfs::filesystem_service::permissions::{check_permission, Permission};
 //!
 //! // File owned by uid=1000, gid=1000, mode=0o644 (rw-r--r--)
@@ -169,10 +169,12 @@ fn has_permission(mode: u32, class: PermissionClass, permission: Permission) -> 
 ///
 /// # Examples
 ///
-/// ```rust,ignore
+/// ```rust
+/// use wormfs::filesystem_service::permissions::{check_permission, Permission};
+///
 /// // Check if user 1001 in group 1000 can read a file owned by user 1000, group 1000, mode 0o644
-/// check_permission(1001, 1000, 1000, 1000, 0o644, Permission::Read)?; // OK - group can read
-/// check_permission(1001, 1000, 1000, 1000, 0o644, Permission::Write)?; // Error - group cannot write
+/// assert!(check_permission(1001, 1000, 1000, 1000, 0o644, Permission::Read).is_ok()); // OK - group can read
+/// assert!(check_permission(1001, 1000, 1000, 1000, 0o644, Permission::Write).is_err()); // Error - group cannot write
 /// ```
 pub fn check_permission(
     req_uid: u32,
