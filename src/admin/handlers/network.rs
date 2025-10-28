@@ -121,6 +121,88 @@ pub async fn peers_handler(State(network): State<Arc<StorageNetworkHandle>>) -> 
 
 #[cfg(test)]
 mod tests {
-    // Note: Tests removed because they require a real StorageNetworkHandle.
-    // Network handler tests should be done at the integration level with a real network.
+    use super::*;
+    use crate::storage_network::{ConnectionState, PeerInfo};
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
+
+    /// Test helper to create PeerInfo instances
+    fn create_test_peer_info(
+        node_id: &str,
+        peer_id_bytes: Vec<u8>,
+        ip: IpAddr,
+        state: ConnectionState,
+    ) -> PeerInfo {
+        PeerInfo {
+            peer_id: crate::storage_network::PeerId::new(peer_id_bytes),
+            node_id: Some(node_id.to_string()),
+            addresses: vec![ip],
+            state,
+            connected_since: Some(SystemTime::now()),
+            protocols: vec!["wormfs/1.0.0".to_string()],
+            last_heartbeat: Some(SystemTime::now()),
+            heartbeat_sequence: Some(42),
+            rtt: Some(Duration::from_millis(15)),
+            admin_url: Some(format!("http://{}:9090", ip)),
+        }
+    }
+
+    #[test]
+    fn test_peer_info_creation() {
+        // Test that we can create PeerInfo instances correctly
+        let peer = create_test_peer_info(
+            "test-node",
+            vec![1, 2, 3, 4],
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            ConnectionState::Connected,
+        );
+
+        // Verify peer has expected fields
+        assert_eq!(peer.node_id.unwrap(), "test-node");
+        assert_eq!(peer.state, ConnectionState::Connected);
+        assert!(peer.last_heartbeat.is_some());
+        assert_eq!(peer.heartbeat_sequence.unwrap(), 42);
+        assert_eq!(peer.rtt.unwrap(), Duration::from_millis(15));
+        assert_eq!(peer.admin_url.unwrap(), "http://192.168.1.10:9090");
+    }
+
+    #[test]
+    fn test_peer_info_with_different_states() {
+        let connected_peer = create_test_peer_info(
+            "node-1",
+            vec![1, 2],
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            ConnectionState::Connected,
+        );
+
+        let connecting_peer = create_test_peer_info(
+            "node-2",
+            vec![3, 4],
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            ConnectionState::Connecting,
+        );
+
+        assert_eq!(connected_peer.state, ConnectionState::Connected);
+        assert_eq!(connecting_peer.state, ConnectionState::Connecting);
+    }
+
+    #[test]
+    fn test_peer_info_address_formatting() {
+        let ipv4_peer = create_test_peer_info(
+            "ipv4-node",
+            vec![1],
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+            ConnectionState::Connected,
+        );
+
+        assert_eq!(ipv4_peer.addresses.len(), 1);
+        assert_eq!(ipv4_peer.addresses[0].to_string(), "192.168.1.100");
+
+        // Test admin URL is correctly formatted
+        assert_eq!(ipv4_peer.admin_url.unwrap(), "http://192.168.1.100:9090");
+    }
+
+    // Note: Handler tests with real StorageNetworkHandle are in
+    // tests/admin_network_integration.rs
+    // These unit tests verify the helper functions work correctly
 }
