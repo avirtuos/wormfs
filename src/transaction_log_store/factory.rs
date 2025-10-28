@@ -1,5 +1,6 @@
 //! Factory for creating TransactionLogStore instances.
 
+use super::implementation::TransactionLogStoreImpl;
 use super::types::{LogError, TransactionLogConfig};
 
 /// Factory for creating TransactionLogStore instances.
@@ -23,29 +24,34 @@ impl TransactionLogStoreFactory {
     /// - Configuration is invalid
     /// - I/O error occurs
     ///
-    /// # Note
-    ///
-    /// This is currently a placeholder that returns an error.
-    /// The actual redb-based implementation will be added later.
     pub fn new(
-        _config: TransactionLogConfig,
+        config: TransactionLogConfig,
     ) -> Result<Box<dyn super::TransactionLogStore>, LogError> {
-        // TODO: Implement actual redb-based TransactionLogStore
-        // For now, return a placeholder error
-        Err(LogError::DatabaseError(
-            "TransactionLogStore implementation not yet available".to_string(),
-        ))
+        let store = TransactionLogStoreImpl::new(config)?;
+        Ok(Box::new(store))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
-    fn test_factory_placeholder() {
-        let config = TransactionLogConfig::default();
+    fn test_factory_creates_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_log.redb");
+
+        let config = TransactionLogConfig {
+            db_path: db_path.clone(),
+            cache_size_mb: 8,
+            compact_threshold_mb: 100,
+            max_log_size_mb: 128,
+            max_log_age_days: 7,
+        };
+
         let result = TransactionLogStoreFactory::new(config);
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert!(db_path.exists());
     }
 }

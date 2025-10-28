@@ -52,10 +52,12 @@
 //! ```
 
 pub mod factory;
+pub mod implementation;
 pub mod types;
 
 use async_trait::async_trait;
 pub use factory::TransactionLogStoreFactory;
+pub use implementation::TransactionLogStoreImpl;
 pub use types::{IntegrityReport, LogEntry, LogError, LogStats, TransactionLogConfig};
 
 /// TransactionLogStore trait defines the interface for Raft log persistence.
