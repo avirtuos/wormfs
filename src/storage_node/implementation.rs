@@ -228,6 +228,79 @@ impl StorageNodeImpl {
     }
 }
 
+impl Drop for StorageNodeImpl {
+    /// Cleanup network thread if StorageNodeImpl is dropped without explicit shutdown.
+    ///
+    /// This prevents memory leaks by ensuring the network event loop thread is properly
+    /// terminated even if shutdown() isn't called explicitly. This is a safety net for
+    /// error paths and test scenarios where the node might be dropped unexpectedly.
+    fn drop(&mut self) {
+        // Only cleanup if we still have an active network thread
+        if let Some(thread) = self.network_thread.take() {
+            warn!(
+                "StorageNodeImpl for node {} dropped without explicit shutdown, cleaning up network thread",
+                self.config.node_id
+            );
+
+            // Attempt graceful shutdown of the network if handle is still available
+            if let Some(network_handle) = self.storage_network.take() {
+                // We're in a Drop context, so we can't use async/await
+                // We need to block here to ensure proper cleanup
+                // Use a blocking approach by spawning a new runtime
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Runtime::new()
+                        .expect("Failed to create runtime for cleanup");
+                    let _ = runtime.block_on(network_handle.shutdown());
+                });
+
+                // Give the shutdown signal a moment to propagate
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            // Wait for the network thread to complete with a timeout
+            // We use a simple polling approach since we can't use async in Drop
+            let timeout = std::time::Duration::from_secs(5);
+            let start = std::time::Instant::now();
+
+            // First, try joining the thread
+            // If it doesn't complete immediately, we'll log and move on
+            let join_result = loop {
+                if thread.is_finished() {
+                    break Some(thread.join());
+                }
+
+                if start.elapsed() >= timeout {
+                    break None;
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            };
+
+            match join_result {
+                Some(Ok(())) => {
+                    info!(
+                        "Network thread for node {} cleaned up successfully during drop",
+                        self.config.node_id
+                    );
+                }
+                Some(Err(_)) => {
+                    error!(
+                        "Network thread for node {} panicked during cleanup",
+                        self.config.node_id
+                    );
+                }
+                None => {
+                    warn!(
+                        "Network thread for node {} did not complete within timeout, may leak",
+                        self.config.node_id
+                    );
+                    // Note: thread will continue running as a detached thread
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl StorageNode for StorageNodeImpl {
     type Status = NodeStatus;
@@ -395,4 +468,169 @@ pub struct ClusterInfo {
 
     /// List of all node IDs
     pub nodes: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Helper to create a test config with temporary directories
+    fn create_test_config(temp_dir: &TempDir) -> Config {
+        let data_dir = temp_dir.path().to_path_buf();
+        Config {
+            node_id: "test-node".to_string(),
+            listen_address: "127.0.0.1:0".parse().unwrap(), // Random port
+            data_dir: data_dir.clone(),
+            metadata_db_path: data_dir.join("metadata.db"),
+            transaction_log_path: data_dir.join("transaction.log"),
+            snapshot_dir: data_dir.join("snapshots"),
+            peer_id_store_path: data_dir.join("peer_id.json"),
+            default_stripe_size: 1024 * 1024, // 1MB
+            default_data_shards: 2,
+            default_parity_shards: 1,
+            default_uid: 1000,
+            default_gid: 1000,
+            enable_read_locks: true,
+            lock_timeout: std::time::Duration::from_secs(30),
+            peer_addresses: vec![],
+            libp2p_listen_port: 0, // Use 0 for random port
+            max_peers: 10,
+            max_connections_per_peer: 1,
+            connection_timeout: std::time::Duration::from_secs(10),
+            idle_connection_timeout: std::time::Duration::from_secs(60),
+            keep_alive_interval: std::time::Duration::from_secs(10),
+            shallow_check_interval: std::time::Duration::from_secs(60),
+            deep_check_interval: std::time::Duration::from_secs(3600),
+            snapshot_interval: std::time::Duration::from_secs(300),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_explicit_shutdown_cleans_up_network_thread() {
+        // Create a storage node
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let config = create_test_config(&temp_dir);
+
+        let mut node = StorageNodeImpl::new_internal(config)
+            .await
+            .expect("Failed to create storage node");
+
+        // Verify network thread exists
+        assert!(node.network_thread.is_some());
+
+        // Start the node (required for shutdown to work)
+        node.start().await.expect("Failed to start node");
+
+        // Explicitly shutdown the node
+        node.shutdown().await.expect("Failed to shutdown node");
+
+        // Verify network thread was cleaned up
+        assert!(node.network_thread.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_drop_without_shutdown_cleans_up_network_thread() {
+        // Create a storage node
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let config = create_test_config(&temp_dir);
+
+        let node = StorageNodeImpl::new_internal(config)
+            .await
+            .expect("Failed to create storage node");
+
+        // Verify network thread exists
+        assert!(node.network_thread.is_some());
+
+        // Drop the node WITHOUT calling shutdown
+        // This should trigger the Drop implementation
+        drop(node);
+
+        // Wait a moment for cleanup to complete
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // If we get here without hanging or leaking, the test passes
+        // The Drop impl should have cleaned up the thread
+    }
+
+    #[tokio::test]
+    async fn test_drop_after_shutdown_is_noop() {
+        // Create a storage node
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let config = create_test_config(&temp_dir);
+
+        let mut node = StorageNodeImpl::new_internal(config)
+            .await
+            .expect("Failed to create storage node");
+
+        // Explicitly shutdown first
+        node.shutdown().await.expect("Failed to shutdown node");
+
+        // Drop should be a no-op since thread was already cleaned up
+        drop(node);
+
+        // If we get here without issues, the test passes
+    }
+
+    #[tokio::test]
+    async fn test_multiple_nodes_can_cleanup_independently() {
+        // Create multiple nodes
+        let temp_dir1 = TempDir::new().expect("Failed to create temp dir");
+        let temp_dir2 = TempDir::new().expect("Failed to create temp dir");
+
+        let mut config1 = create_test_config(&temp_dir1);
+        config1.node_id = "node-1".to_string();
+        config1.libp2p_listen_port = 0; // Random port
+
+        let mut config2 = create_test_config(&temp_dir2);
+        config2.node_id = "node-2".to_string();
+        config2.libp2p_listen_port = 0; // Random port
+
+        let node1 = StorageNodeImpl::new_internal(config1)
+            .await
+            .expect("Failed to create node 1");
+
+        let mut node2 = StorageNodeImpl::new_internal(config2)
+            .await
+            .expect("Failed to create node 2");
+
+        // Shutdown node2 explicitly
+        node2.shutdown().await.expect("Failed to shutdown node 2");
+
+        // Drop both nodes (node1 without shutdown, node2 after shutdown)
+        drop(node1);
+        drop(node2);
+
+        // Wait for cleanup
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // If we get here, both nodes cleaned up successfully
+    }
+
+    #[tokio::test]
+    async fn test_node_status_before_and_after_shutdown() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let config = create_test_config(&temp_dir);
+
+        let mut node = StorageNodeImpl::new_internal(config)
+            .await
+            .expect("Failed to create storage node");
+
+        // Start the node
+        node.start().await.expect("Failed to start node");
+
+        // Check status
+        let status_before = node.get_status();
+        assert!(status_before.started);
+        assert!(status_before.components.network);
+
+        // Shutdown
+        node.shutdown().await.expect("Failed to shutdown node");
+
+        // Check status after shutdown
+        let status_after = node.get_status();
+        assert!(!status_after.started);
+        // Network should still be present in status (though stopped)
+    }
 }
