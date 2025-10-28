@@ -79,44 +79,54 @@ pub trait TransactionLogStore: Send + Sync {
     where
         Self: Sized;
 
-    /// Append a log entry.
+    /// Append a log entry at a specific index.
     ///
     /// This method durably writes a log entry and fsyncs before returning.
-    /// The entry is assigned the next sequential index.
+    /// The caller (Raft leader) must specify the exact index. If an entry already
+    /// exists at this index with a different term, it will be overwritten.
     ///
     /// # Arguments
     ///
+    /// * `index` - Log index for this entry (must be specified by Raft leader)
     /// * `term` - Raft term
     /// * `data` - Entry data (serialized operation)
     ///
     /// # Returns
     ///
-    /// The index assigned to the appended entry.
+    /// Returns Ok(()) on success.
     ///
     /// # Errors
     ///
     /// Returns an error if:
+    /// - Index is 0 (invalid)
+    /// - Index creates unexpected gap in log
     /// - Write fails
     /// - Fsync fails
     /// - Disk is full
-    async fn append(&self, term: u64, data: Vec<u8>) -> Result<u64, LogError>;
+    async fn append(&self, index: u64, term: u64, data: Vec<u8>) -> Result<(), LogError>;
 
-    /// Append multiple log entries atomically.
+    /// Append multiple log entries atomically at specific indices.
     ///
     /// All entries are written in a single transaction and fsynced together.
+    /// The caller (Raft leader) must specify exact indices for each entry.
+    /// If entries already exist at these indices with different terms, they will be overwritten.
     ///
     /// # Arguments
     ///
-    /// * `entries` - Vector of (term, data) pairs
+    /// * `entries` - Vector of (index, term, data) tuples
     ///
     /// # Returns
     ///
-    /// The starting index of the appended entries.
+    /// Returns Ok(()) on success.
     ///
     /// # Errors
     ///
-    /// Returns an error if any write fails (all entries are rolled back).
-    async fn append_batch(&self, entries: Vec<(u64, Vec<u8>)>) -> Result<u64, LogError>;
+    /// Returns an error if:
+    /// - Batch is empty
+    /// - Any index is 0 (invalid)
+    /// - Indices create unexpected gaps
+    /// - Any write fails (all entries are rolled back)
+    async fn append_batch(&self, entries: Vec<(u64, u64, Vec<u8>)>) -> Result<(), LogError>;
 
     /// Get a log entry by index.
     ///
