@@ -84,9 +84,7 @@ async fn test_network_status_endpoint_no_network() {
     match result {
         Ok(response) => {
             // If we get a response, it should be valid HTTP
-            assert!(
-                response.status().is_success() || response.status().is_client_error()
-            );
+            assert!(response.status().is_success() || response.status().is_client_error());
         }
         Err(e) => {
             // Connection error is also acceptable for this test
@@ -141,9 +139,7 @@ async fn test_peers_endpoint_no_network() {
 
     match result {
         Ok(response) => {
-            assert!(
-                response.status().is_success() || response.status().is_client_error()
-            );
+            assert!(response.status().is_success() || response.status().is_client_error());
         }
         Err(e) => {
             println!("Expected potential error with no network: {}", e);
