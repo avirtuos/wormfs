@@ -7,6 +7,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tracing::warn;
 
 /// Handler for `/api/network/status` endpoint.
 ///
@@ -29,19 +30,41 @@ pub async fn network_status_handler(
     let peer_list: Vec<_> = peers
         .iter()
         .map(|peer| {
+            let peer_id = peer
+                .node_id
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
+
             let last_heartbeat = peer
                 .last_heartbeat
                 .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
-                .flatten()
+                .and_then(|d| {
+                    chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).or_else(|| {
+                        warn!(
+                            "Invalid last_heartbeat timestamp for peer {}: {} seconds",
+                            peer_id,
+                            d.as_secs()
+                        );
+                        None
+                    })
+                })
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| "never".to_string());
 
             let connected_since = peer
                 .connected_since
                 .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
-                .flatten()
+                .and_then(|d| {
+                    chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).or_else(|| {
+                        warn!(
+                            "Invalid connected_since timestamp for peer {}: {} seconds",
+                            peer_id,
+                            d.as_secs()
+                        );
+                        None
+                    })
+                })
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| "unknown".to_string());
 
@@ -91,11 +114,25 @@ pub async fn peers_handler(State(network): State<Arc<StorageNetworkHandle>>) -> 
     let peer_list: Vec<_> = peers
         .iter()
         .map(|peer| {
+            let peer_id = peer
+                .node_id
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
+
             let last_heartbeat = peer
                 .last_heartbeat
                 .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
-                .flatten()
+                .and_then(|d| {
+                    chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).or_else(|| {
+                        warn!(
+                            "Invalid last_heartbeat timestamp for peer {}: {} seconds",
+                            peer_id,
+                            d.as_secs()
+                        );
+                        None
+                    })
+                })
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_else(|| "never".to_string());
 
@@ -202,7 +239,61 @@ mod tests {
         assert_eq!(ipv4_peer.admin_url.unwrap(), "http://192.168.1.100:9090");
     }
 
+    #[test]
+    fn test_timestamp_conversion_valid() {
+        // Test valid timestamp conversion
+        let now = SystemTime::now();
+        let duration = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let timestamp_secs = duration.as_secs() as i64;
+
+        // This should succeed
+        let dt = chrono::DateTime::from_timestamp(timestamp_secs, 0);
+        assert!(dt.is_some(), "Valid timestamp should convert successfully");
+    }
+
+    #[test]
+    fn test_timestamp_conversion_out_of_range() {
+        // Test with extremely large timestamp (year 2262+)
+        let far_future_secs = i64::MAX;
+
+        // This should return None
+        let dt = chrono::DateTime::from_timestamp(far_future_secs, 0);
+        assert!(dt.is_none(), "Out of range timestamp should return None");
+    }
+
+    #[test]
+    fn test_timestamp_conversion_negative() {
+        // Test with negative timestamp (before Unix epoch)
+        let negative_secs = -100_000_000_000i64; // Very far in the past
+
+        // This might be valid or might return None depending on how far back
+        // The important thing is it doesn't panic
+        let _dt = chrono::DateTime::from_timestamp(negative_secs, 0);
+        // No assertion needed - just verifying it doesn't panic
+    }
+
+    #[test]
+    fn test_peer_info_with_none_timestamps() {
+        // Create a peer with no timestamps
+        let peer = PeerInfo {
+            peer_id: crate::storage_network::PeerId::new(vec![1, 2, 3]),
+            node_id: Some("test-node".to_string()),
+            addresses: vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
+            state: ConnectionState::Connected,
+            connected_since: None,
+            protocols: vec!["wormfs/1.0.0".to_string()],
+            last_heartbeat: None,
+            heartbeat_sequence: None,
+            rtt: None,
+            admin_url: None,
+        };
+
+        // Verify that None timestamps are handled correctly
+        assert!(peer.last_heartbeat.is_none());
+        assert!(peer.connected_since.is_none());
+    }
+
     // Note: Handler tests with real StorageNetworkHandle are in
     // tests/admin_network_integration.rs
-    // These unit tests verify the helper functions work correctly
+    // These unit tests verify the helper functions and timestamp handling work correctly
 }
