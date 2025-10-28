@@ -350,7 +350,9 @@ impl TransactionLogStoreImpl {
     /// Append multiple entries atomically (blocking operation)
     fn append_batch_blocking(&self, entries: Vec<(u64, Vec<u8>)>) -> Result<u64, LogError> {
         if entries.is_empty() {
-            return Err(LogError::InvalidIndex(0));
+            return Err(LogError::InvalidRange(
+                "Cannot append empty batch".to_string(),
+            ));
         }
 
         let start_time = std::time::Instant::now();
@@ -1029,6 +1031,28 @@ mod tests {
 
         let entry3 = store.get_entry(3).await.unwrap();
         assert_eq!(entry3.term, 2);
+    }
+
+    #[tokio::test]
+    async fn test_append_batch_empty() {
+        let (config, _temp_dir) = create_test_config();
+        let store = TransactionLogStoreImpl::new(config).unwrap();
+
+        // Attempting to append an empty batch should return InvalidRange error
+        let empty_entries: Vec<(u64, Vec<u8>)> = vec![];
+        let result = store.append_batch(empty_entries).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LogError::InvalidRange(msg) => {
+                assert_eq!(msg, "Cannot append empty batch");
+            }
+            other => panic!("Expected InvalidRange error, got: {:?}", other),
+        }
+
+        // Verify log state is unchanged
+        assert_eq!(store.get_first_index(), 0);
+        assert_eq!(store.get_last_index(), 0);
     }
 
     #[tokio::test]
