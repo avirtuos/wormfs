@@ -170,7 +170,11 @@ impl TransactionLogStoreImpl {
     }
 
     /// Update cached indices
-    fn update_cached_indices(&self, new_first: Option<u64>, new_last: Option<u64>) -> Result<(), LogError> {
+    fn update_cached_indices(
+        &self,
+        new_first: Option<u64>,
+        new_last: Option<u64>,
+    ) -> Result<(), LogError> {
         if let Some(first) = new_first {
             *self.inner.cached_first_index.write().map_err(|e| {
                 LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
@@ -186,9 +190,10 @@ impl TransactionLogStoreImpl {
 
     /// Get a log entry from the database (blocking operation)
     fn get_entry_blocking(&self, index: u64) -> Result<LogEntry, LogError> {
-        let db = self.inner.db.read().map_err(|e| {
-            LogError::DatabaseError(format!("Failed to acquire read lock: {}", e))
-        })?;
+        let db =
+            self.inner.db.read().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire read lock: {}", e))
+            })?;
         let read_txn = db.begin_read().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin read transaction: {}", e))
         })?;
@@ -231,9 +236,10 @@ impl TransactionLogStoreImpl {
             return Err(LogError::InvalidIndex(start_index));
         }
 
-        let db = self.inner.db.read().map_err(|e| {
-            LogError::DatabaseError(format!("Failed to acquire read lock: {}", e))
-        })?;
+        let db =
+            self.inner.db.read().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire read lock: {}", e))
+            })?;
         let read_txn = db.begin_read().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin read transaction: {}", e))
         })?;
@@ -274,9 +280,10 @@ impl TransactionLogStoreImpl {
 
     /// Append a single entry (blocking operation)
     fn append_blocking(&self, term: u64, data: Vec<u8>) -> Result<u64, LogError> {
-        let db = self.inner.db.write().map_err(|e| {
-            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
-        })?;
+        let db =
+            self.inner.db.write().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+            })?;
         let write_txn = db.begin_write().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin write transaction: {}", e))
         })?;
@@ -329,9 +336,10 @@ impl TransactionLogStoreImpl {
             return Err(LogError::InvalidIndex(0));
         }
 
-        let db = self.inner.db.write().map_err(|e| {
-            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
-        })?;
+        let db =
+            self.inner.db.write().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+            })?;
         let write_txn = db.begin_write().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin write transaction: {}", e))
         })?;
@@ -386,9 +394,10 @@ impl TransactionLogStoreImpl {
 
     /// Trim entries before the specified index (blocking operation)
     fn trim_blocking(&self, up_to_index: u64) -> Result<u64, LogError> {
-        let db = self.inner.db.write().map_err(|e| {
-            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
-        })?;
+        let db =
+            self.inner.db.write().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+            })?;
         let write_txn = db.begin_write().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin write transaction: {}", e))
         })?;
@@ -455,9 +464,10 @@ impl TransactionLogStoreImpl {
         }
 
         // Get database handle (write lock needed for write transaction)
-        let db = self.inner.db.write().map_err(|e| {
-            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
-        })?;
+        let db =
+            self.inner.db.write().map_err(|e| {
+                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+            })?;
         let write_txn = db
             .begin_write()
             .map_err(|e| LogError::DatabaseError(format!("Failed to begin transaction: {}", e)))?;
@@ -669,14 +679,18 @@ impl TransactionLogStore for TransactionLogStoreImpl {
     }
 
     fn get_last_index(&self) -> u64 {
-        self.inner.cached_last_index.read()
+        self.inner
+            .cached_last_index
+            .read()
             .ok()
             .and_then(|guard| *guard)
             .unwrap_or(0)
     }
 
     fn get_first_index(&self) -> u64 {
-        self.inner.cached_first_index.read()
+        self.inner
+            .cached_first_index
+            .read()
             .ok()
             .and_then(|guard| *guard)
             .unwrap_or(0)
@@ -711,10 +725,16 @@ impl TransactionLogStore for TransactionLogStoreImpl {
     }
 
     fn get_stats(&self) -> LogStats {
-        let first_index = self.inner.cached_first_index.read()
+        let first_index = self
+            .inner
+            .cached_first_index
+            .read()
             .ok()
             .and_then(|guard| *guard);
-        let last_index = self.inner.cached_last_index.read()
+        let last_index = self
+            .inner
+            .cached_last_index
+            .read()
             .ok()
             .and_then(|guard| *guard);
 
@@ -728,7 +748,10 @@ impl TransactionLogStore for TransactionLogStoreImpl {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        let last_compaction = self.inner.last_compaction.read()
+        let last_compaction = self
+            .inner
+            .last_compaction
+            .read()
             .ok()
             .and_then(|guard| *guard);
 
