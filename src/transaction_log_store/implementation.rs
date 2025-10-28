@@ -8,6 +8,7 @@ use redb::{Database, ReadableTable, TableDefinition};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 use tokio::task;
+use tracing::{debug, error, info, warn};
 
 /// Table definition for log entries
 /// Key: u64 (log index), Value: serialized LogEntryData
@@ -88,6 +89,8 @@ struct TransactionLogStoreInner {
     cached_last_index: RwLock<Option<u64>>,
     // Last compaction timestamp
     last_compaction: RwLock<Option<SystemTime>>,
+    // Optional metrics service (deferred dependency injection)
+    metrics: RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>,
 }
 
 /// TransactionLogStore implementation using redb
@@ -133,6 +136,11 @@ impl TransactionLogStoreImpl {
         // Load cached indices
         let (first_index, last_index) = Self::load_indices_from_db(&db)?;
 
+        info!(
+            "TransactionLogStore initialized at {:?}, first_index={:?}, last_index={:?}",
+            config.db_path, first_index, last_index
+        );
+
         Ok(Self {
             inner: Arc::new(TransactionLogStoreInner {
                 db: RwLock::new(db),
@@ -140,6 +148,7 @@ impl TransactionLogStoreImpl {
                 cached_first_index: RwLock::new(first_index),
                 cached_last_index: RwLock::new(last_index),
                 last_compaction: RwLock::new(None),
+                metrics: RwLock::new(None),
             }),
         })
     }
@@ -280,14 +289,18 @@ impl TransactionLogStoreImpl {
 
     /// Append a single entry (blocking operation)
     fn append_blocking(&self, term: u64, data: Vec<u8>) -> Result<u64, LogError> {
-        let db =
-            self.inner.db.write().map_err(|e| {
-                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
-            })?;
+        let start_time = std::time::Instant::now();
+
+        let db = self.inner.db.write().map_err(|e| {
+            error!("Failed to acquire write lock for append: {}", e);
+            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        })?;
         let write_txn = db.begin_write().map_err(|e| {
+            error!("Failed to begin write transaction for append: {}", e);
             LogError::DatabaseError(format!("Failed to begin write transaction: {}", e))
         })?;
 
+        let data_len = data.len();
         let next_index = {
             let mut table = write_txn.open_table(LOG_ENTRIES_TABLE).map_err(|e| {
                 LogError::DatabaseError(format!("Failed to open log_entries table: {}", e))
@@ -327,6 +340,16 @@ impl TransactionLogStoreImpl {
             Some(next_index),
         )?;
 
+        // Record metrics and logging
+        let elapsed = start_time.elapsed().as_secs_f64();
+        self.record_histogram("transaction_log.append.latency", elapsed);
+        self.record_counter("transaction_log.append.total", 1);
+        self.update_state_gauges();
+        debug!(
+            "Appended log entry at index {} (term={}, size={} bytes) in {:.4}s",
+            next_index, term, data_len, elapsed
+        );
+
         Ok(next_index)
     }
 
@@ -336,11 +359,15 @@ impl TransactionLogStoreImpl {
             return Err(LogError::InvalidIndex(0));
         }
 
-        let db =
-            self.inner.db.write().map_err(|e| {
-                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
-            })?;
+        let start_time = std::time::Instant::now();
+        let batch_size = entries.len();
+
+        let db = self.inner.db.write().map_err(|e| {
+            error!("Failed to acquire write lock for append_batch: {}", e);
+            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        })?;
         let write_txn = db.begin_write().map_err(|e| {
+            error!("Failed to begin write transaction for append_batch: {}", e);
             LogError::DatabaseError(format!("Failed to begin write transaction: {}", e))
         })?;
 
@@ -389,16 +416,30 @@ impl TransactionLogStoreImpl {
             Some(last_index),
         )?;
 
+        // Record metrics and logging
+        let elapsed = start_time.elapsed().as_secs_f64();
+        self.record_histogram("transaction_log.append_batch.latency", elapsed);
+        self.record_counter("transaction_log.append_batch.total", 1);
+        self.record_counter("transaction_log.append_batch.entries", batch_size as u64);
+        self.update_state_gauges();
+        info!(
+            "Appended batch of {} entries (indices {}-{}) in {:.4}s",
+            batch_size, start_index, last_index, elapsed
+        );
+
         Ok(start_index)
     }
 
     /// Trim entries before the specified index (blocking operation)
     fn trim_blocking(&self, up_to_index: u64) -> Result<u64, LogError> {
-        let db =
-            self.inner.db.write().map_err(|e| {
-                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
-            })?;
+        let start_time = std::time::Instant::now();
+
+        let db = self.inner.db.write().map_err(|e| {
+            error!("Failed to acquire write lock for trim: {}", e);
+            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        })?;
         let write_txn = db.begin_write().map_err(|e| {
+            error!("Failed to begin write transaction for trim: {}", e);
             LogError::DatabaseError(format!("Failed to begin write transaction: {}", e))
         })?;
 
@@ -449,6 +490,17 @@ impl TransactionLogStoreImpl {
             LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
         })? = new_first_index;
 
+        // Record metrics and logging
+        let elapsed = start_time.elapsed().as_secs_f64();
+        self.record_histogram("transaction_log.trim.latency", elapsed);
+        self.record_counter("transaction_log.trim.total", 1);
+        self.record_counter("transaction_log.trim.entries_removed", count);
+        self.update_state_gauges();
+        info!(
+            "Trimmed {} entries before index {} in {:.4}s, new first index: {:?}",
+            count, up_to_index, elapsed, new_first_index
+        );
+
         Ok(count)
     }
 
@@ -463,14 +515,17 @@ impl TransactionLogStoreImpl {
             ));
         }
 
+        let start_time = std::time::Instant::now();
+
         // Get database handle (write lock needed for write transaction)
-        let db =
-            self.inner.db.write().map_err(|e| {
-                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
-            })?;
-        let write_txn = db
-            .begin_write()
-            .map_err(|e| LogError::DatabaseError(format!("Failed to begin transaction: {}", e)))?;
+        let db = self.inner.db.write().map_err(|e| {
+            error!("Failed to acquire write lock for delete_from: {}", e);
+            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        })?;
+        let write_txn = db.begin_write().map_err(|e| {
+            error!("Failed to begin write transaction for delete_from: {}", e);
+            LogError::DatabaseError(format!("Failed to begin transaction: {}", e))
+        })?;
 
         let (count, new_last_index) = {
             let mut table = write_txn
@@ -540,6 +595,17 @@ impl TransactionLogStoreImpl {
             })? = None;
         }
 
+        // Record metrics and logging
+        let elapsed = start_time.elapsed().as_secs_f64();
+        self.record_histogram("transaction_log.delete_from.latency", elapsed);
+        self.record_counter("transaction_log.delete_from.total", 1);
+        self.record_counter("transaction_log.delete_from.entries_removed", count);
+        self.update_state_gauges();
+        warn!(
+            "Deleted {} entries from index {} onwards in {:.4}s, new last index: {:?}",
+            count, from_index, elapsed, new_last_index
+        );
+
         Ok(count)
     }
 
@@ -547,6 +613,9 @@ impl TransactionLogStoreImpl {
     ///
     /// This defragments the database and reclaims space from deleted entries.
     fn compact_blocking(&self) -> Result<u64, LogError> {
+        let start_time = std::time::Instant::now();
+        info!("Starting database compaction...");
+
         // Get the database file size before compaction
         let size_before = std::fs::metadata(&self.inner.config.db_path)
             .map(|m| m.len())
@@ -555,9 +624,11 @@ impl TransactionLogStoreImpl {
         // Perform compaction (requires mutable access)
         {
             let mut db = self.inner.db.write().map_err(|e| {
+                error!("Failed to acquire write lock for compaction: {}", e);
                 LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
             })?;
             db.compact().map_err(|e| {
+                error!("Failed to compact database: {}", e);
                 LogError::DatabaseError(format!("Failed to compact database: {}", e))
             })?;
         }
@@ -575,6 +646,21 @@ impl TransactionLogStoreImpl {
             LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
         })? = Some(SystemTime::now());
 
+        // Record metrics and logging
+        let elapsed = start_time.elapsed().as_secs_f64();
+        self.record_histogram("transaction_log.compact.latency", elapsed);
+        self.record_counter("transaction_log.compact.total", 1);
+        self.record_gauge(
+            "transaction_log.compact.space_reclaimed",
+            space_reclaimed as f64,
+        );
+        info!(
+            "Database compaction completed in {:.4}s, reclaimed {} bytes ({:.2} MB)",
+            elapsed,
+            space_reclaimed,
+            space_reclaimed as f64 / 1024.0 / 1024.0
+        );
+
         Ok(space_reclaimed)
     }
 
@@ -582,10 +668,14 @@ impl TransactionLogStoreImpl {
     ///
     /// Scans all entries to check for gaps and validate checksums.
     fn verify_integrity_blocking(&self) -> Result<IntegrityReport, LogError> {
+        let start_time = std::time::Instant::now();
         let last_index = self.get_last_index();
+
+        info!("Starting integrity verification, last_index={}", last_index);
 
         // Empty log is valid
         if last_index == 0 {
+            info!("Empty log, verification complete");
             return Ok(IntegrityReport {
                 total_entries: 0,
                 missing_indices: Vec::new(),
@@ -621,11 +711,103 @@ impl TransactionLogStoreImpl {
             }
         }
 
+        // Record metrics and logging
+        let elapsed = start_time.elapsed().as_secs_f64();
+        self.record_histogram("transaction_log.verify_integrity.latency", elapsed);
+        self.record_counter("transaction_log.verify_integrity.total", 1);
+
+        if is_valid {
+            info!(
+                "Integrity verification completed in {:.4}s: {} entries verified, {} gaps found",
+                elapsed,
+                total_entries,
+                missing_indices.len()
+            );
+        } else {
+            error!(
+                "Integrity verification FAILED in {:.4}s: {} entries, {} gaps/corrupted",
+                elapsed,
+                total_entries,
+                missing_indices.len()
+            );
+        }
+
         Ok(IntegrityReport {
             total_entries,
             missing_indices,
             is_valid,
         })
+    }
+
+    /// Set the metrics service for tracking transaction log operations.
+    ///
+    /// This uses deferred dependency injection to avoid circular dependencies.
+    ///
+    /// # Arguments
+    ///
+    /// * `metrics` - MetricService implementation for recording metrics
+    pub fn set_metrics(&self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
+        if let Ok(mut metrics_guard) = self.inner.metrics.write() {
+            *metrics_guard = Some(metrics);
+            info!("MetricsService attached to TransactionLogStore");
+        } else {
+            error!("Failed to acquire write lock to set metrics service");
+        }
+    }
+
+    /// Record a histogram metric if metrics service is available
+    fn record_histogram(&self, name: &str, value: f64) {
+        if let Ok(metrics_guard) = self.inner.metrics.read() {
+            if let Some(metrics) = metrics_guard.as_ref() {
+                use crate::metric_service::{MetricService, UnitType};
+                let _ = metrics.publish_histogram(name, value, UnitType::Seconds);
+            }
+        }
+    }
+
+    /// Record a counter metric if metrics service is available
+    fn record_counter(&self, name: &str, value: u64) {
+        if let Ok(metrics_guard) = self.inner.metrics.read() {
+            if let Some(metrics) = metrics_guard.as_ref() {
+                use crate::metric_service::{MetricService, UnitType};
+                let _ = metrics.publish_counter(name, value, UnitType::Operations);
+            }
+        }
+    }
+
+    /// Record a gauge metric if metrics service is available
+    fn record_gauge(&self, name: &str, value: f64) {
+        if let Ok(metrics_guard) = self.inner.metrics.read() {
+            if let Some(metrics) = metrics_guard.as_ref() {
+                use crate::metric_service::{MetricService, UnitType};
+                let _ = metrics.publish_gauge(name, value, UnitType::Bytes);
+            }
+        }
+    }
+
+    /// Update state gauges for log size and entry count
+    fn update_state_gauges(&self) {
+        // Record database file size
+        if let Ok(metadata) = std::fs::metadata(&self.inner.config.db_path) {
+            self.record_gauge("transaction_log.db_size_bytes", metadata.len() as f64);
+        }
+
+        // Record entry count (approximate based on first/last indices)
+        let first = self.get_first_index();
+        let last = self.get_last_index();
+        if first > 0 && last > 0 {
+            let approx_count = last - first + 1;
+            let _ = self.inner.metrics.read().ok().and_then(|guard| {
+                guard.as_ref().map(|metrics| {
+                    use crate::metric_service::{MetricService, UnitType};
+                    let _ = metrics.publish_gauge(
+                        "transaction_log.entry_count",
+                        approx_count as f64,
+                        UnitType::Operations,
+                    );
+                })
+            });
+        }
     }
 }
 
