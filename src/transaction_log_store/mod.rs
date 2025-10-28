@@ -196,6 +196,37 @@ pub trait TransactionLogStore: Send + Sync {
     /// Returns an error if trim fails.
     async fn trim(&self, up_to_index: u64) -> Result<u64, LogError>;
 
+    /// Delete log entries from the specified index onwards.
+    ///
+    /// This method is critical for Raft consensus correctness. When a follower
+    /// receives log entries from a leader that conflict with its own log, it must
+    /// delete all entries from the conflict point onwards before appending the
+    /// leader's entries.
+    ///
+    /// This handles split-brain scenarios where a follower may have uncommitted
+    /// entries from a previous leader that are now invalid.
+    ///
+    /// # Arguments
+    ///
+    /// * `from_index` - Delete entries from this index onwards (inclusive)
+    ///
+    /// # Returns
+    ///
+    /// Number of entries deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deletion fails.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// Log state: [1, 2, 3, 4, 5]
+    /// delete_from(3) => [1, 2]
+    /// Returns: 3 (deleted entries 3, 4, 5)
+    /// ```
+    async fn delete_from(&self, from_index: u64) -> Result<u64, LogError>;
+
     /// Get transaction log statistics.
     ///
     /// # Returns
