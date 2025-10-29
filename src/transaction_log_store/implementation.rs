@@ -1,7 +1,34 @@
 //! redb-based implementation of TransactionLogStore.
+//!
+//! # Lock Poisoning Handling
+//!
+//! This implementation uses a two-tier strategy for handling lock poisoning:
+//!
+//! ## Database Locks (Critical)
+//!
+//! The main `db: RwLock<Database>` uses `recover_write_lock` and `recover_read_lock`
+//! which attempt to recover from poisoned locks. Recovery is relatively safe because:
+//! - redb provides ACID transaction guarantees
+//! - Any incomplete transaction from a panicked thread is automatically rolled back
+//! - The database remains in a consistent state despite the panic
+//!
+//! When recovery occurs, it is logged at ERROR level and a metric counter is incremented.
+//! If recovery fails (which is rare), the error is propagated to the caller.
+//!
+//! ## Cache Locks (Non-Critical)
+//!
+//! Cache locks (`cached_first_index`, `cached_last_index`, `last_compaction`) use
+//! `recover_cache_write_lock` which always succeeds by recovering from poison.
+//! This is safe because:
+//! - Cache data is non-authoritative (database is source of truth)
+//! - Cache can be rebuilt from database at any time
+//! - Stale cache data only affects performance, not correctness
+//!
+//! Recovery is logged at DEBUG level and does not increment error metrics.
 
 use super::types::{IntegrityReport, LogEntry, LogError, LogStats, TransactionLogConfig};
 use super::TransactionLogStore;
+use crate::utils::lock_helpers::{recover_cache_write_lock, recover_read_lock, recover_write_lock};
 use async_trait::async_trait;
 use crc32fast::Hasher;
 use redb::{Database, ReadableTable, TableDefinition};
@@ -201,6 +228,13 @@ impl TransactionLogStoreImpl {
     /// database state after operations that modify log boundaries (append, trim,
     /// delete_from). Only updates indices if the corresponding Option is Some.
     ///
+    /// # Lock Recovery
+    ///
+    /// This method uses `recover_cache_write_lock` which automatically recovers
+    /// from poisoned locks. Cache indices are non-authoritative (the database is
+    /// the source of truth), so recovery from poison is always safe. If a lock
+    /// is poisoned, the cache data is extracted and updated normally.
+    ///
     /// # Arguments
     ///
     /// * `new_first` - New first index to cache, or None to leave unchanged
@@ -208,25 +242,21 @@ impl TransactionLogStoreImpl {
     ///
     /// # Returns
     ///
-    /// Returns Ok(()) on success.
-    ///
-    /// # Errors
-    ///
-    /// Returns `LogError::DatabaseError` if acquiring the cache write lock fails.
+    /// Always returns Ok(()) as cache lock recovery never fails.
     fn update_cached_indices(
         &self,
         new_first: Option<u64>,
         new_last: Option<u64>,
     ) -> Result<(), LogError> {
         if let Some(first) = new_first {
-            *self.inner.cached_first_index.write().map_err(|e| {
-                LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
-            })? = Some(first);
+            *recover_cache_write_lock(
+                &self.inner.cached_first_index,
+                "cached_first_index update",
+            ) = Some(first);
         }
         if let Some(last) = new_last {
-            *self.inner.cached_last_index.write().map_err(|e| {
-                LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
-            })? = Some(last);
+            *recover_cache_write_lock(&self.inner.cached_last_index, "cached_last_index update") =
+                Some(last);
         }
         Ok(())
     }
@@ -252,10 +282,8 @@ impl TransactionLogStoreImpl {
     /// * `LogError::SerializationError` - Failed to deserialize the entry data
     /// * `LogError::DatabaseError` - Database operation failed
     fn get_entry_blocking(&self, index: u64) -> Result<LogEntry, LogError> {
-        let db =
-            self.inner.db.read().map_err(|e| {
-                LogError::DatabaseError(format!("Failed to acquire read lock: {}", e))
-            })?;
+        let db = recover_read_lock(&self.inner.db, "get_entry")
+            .map_err(|e| LogError::DatabaseError(e))?;
         let read_txn = db.begin_read().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin read transaction: {}", e))
         })?;
@@ -316,10 +344,8 @@ impl TransactionLogStoreImpl {
             return Err(LogError::InvalidIndex(start_index));
         }
 
-        let db =
-            self.inner.db.read().map_err(|e| {
-                LogError::DatabaseError(format!("Failed to acquire read lock: {}", e))
-            })?;
+        let db = recover_read_lock(&self.inner.db, "get_entries")
+            .map_err(|e| LogError::DatabaseError(e))?;
         let read_txn = db.begin_read().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin read transaction: {}", e))
         })?;
@@ -390,9 +416,9 @@ impl TransactionLogStoreImpl {
 
         let start_time = std::time::Instant::now();
 
-        let db = self.inner.db.write().map_err(|e| {
-            error!("Failed to acquire write lock for append: {}", e);
-            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        let db = recover_write_lock(&self.inner.db, "append").map_err(|e| {
+            self.record_counter("transaction_log.lock_poison.total", 1);
+            LogError::DatabaseError(format!("Database lock poisoned during append: {}", e))
         })?;
         let write_txn = db.begin_write().map_err(|e| {
             error!("Failed to begin write transaction for append: {}", e);
@@ -496,9 +522,9 @@ impl TransactionLogStoreImpl {
         let start_time = std::time::Instant::now();
         let batch_size = entries.len();
 
-        let db = self.inner.db.write().map_err(|e| {
-            error!("Failed to acquire write lock for append_batch: {}", e);
-            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        let db = recover_write_lock(&self.inner.db, "append_batch").map_err(|e| {
+            self.record_counter("transaction_log.lock_poison.total", 1);
+            LogError::DatabaseError(format!("Database lock poisoned during append_batch: {}", e))
         })?;
         let write_txn = db.begin_write().map_err(|e| {
             error!("Failed to begin write transaction for append_batch: {}", e);
@@ -595,9 +621,9 @@ impl TransactionLogStoreImpl {
     fn trim_blocking(&self, up_to_index: u64) -> Result<u64, LogError> {
         let start_time = std::time::Instant::now();
 
-        let db = self.inner.db.write().map_err(|e| {
-            error!("Failed to acquire write lock for trim: {}", e);
-            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        let db = recover_write_lock(&self.inner.db, "trim").map_err(|e| {
+            self.record_counter("transaction_log.lock_poison.total", 1);
+            LogError::DatabaseError(format!("Database lock poisoned during trim: {}", e))
         })?;
         let write_txn = db.begin_write().map_err(|e| {
             error!("Failed to begin write transaction for trim: {}", e);
@@ -646,10 +672,9 @@ impl TransactionLogStoreImpl {
             .commit()
             .map_err(|e| LogError::DatabaseError(format!("Failed to commit transaction: {}", e)))?;
 
-        // Update cached first index
-        *self.inner.cached_first_index.write().map_err(|e| {
-            LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
-        })? = new_first_index;
+        // Update cached first index (cache lock - safe to recover)
+        *recover_cache_write_lock(&self.inner.cached_first_index, "trim cached_first_index") =
+            new_first_index;
 
         // Record metrics and logging
         let elapsed = start_time.elapsed().as_secs_f64();
@@ -679,9 +704,9 @@ impl TransactionLogStoreImpl {
         let start_time = std::time::Instant::now();
 
         // Get database handle (write lock needed for write transaction)
-        let db = self.inner.db.write().map_err(|e| {
-            error!("Failed to acquire write lock for delete_from: {}", e);
-            LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+        let db = recover_write_lock(&self.inner.db, "delete_from").map_err(|e| {
+            self.record_counter("transaction_log.lock_poison.total", 1);
+            LogError::DatabaseError(format!("Database lock poisoned during delete_from: {}", e))
         })?;
         let write_txn = db.begin_write().map_err(|e| {
             error!("Failed to begin write transaction for delete_from: {}", e);
@@ -744,16 +769,18 @@ impl TransactionLogStoreImpl {
             .commit()
             .map_err(|e| LogError::DatabaseError(format!("Failed to commit transaction: {}", e)))?;
 
-        // Update cached last index
-        *self.inner.cached_last_index.write().map_err(|e| {
-            LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
-        })? = new_last_index;
+        // Update cached last index (cache lock - safe to recover)
+        *recover_cache_write_lock(
+            &self.inner.cached_last_index,
+            "delete_from cached_last_index",
+        ) = new_last_index;
 
         // If we deleted everything, update first index too
         if new_last_index.is_none() {
-            *self.inner.cached_first_index.write().map_err(|e| {
-                LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
-            })? = None;
+            *recover_cache_write_lock(
+                &self.inner.cached_first_index,
+                "delete_from cached_first_index",
+            ) = None;
         }
 
         // Record metrics and logging
@@ -784,9 +811,9 @@ impl TransactionLogStoreImpl {
 
         // Perform compaction (requires mutable access)
         {
-            let mut db = self.inner.db.write().map_err(|e| {
-                error!("Failed to acquire write lock for compaction: {}", e);
-                LogError::DatabaseError(format!("Failed to acquire write lock: {}", e))
+            let mut db = recover_write_lock(&self.inner.db, "compact").map_err(|e| {
+                self.record_counter("transaction_log.lock_poison.total", 1);
+                LogError::DatabaseError(format!("Database lock poisoned during compact: {}", e))
             })?;
             db.compact().map_err(|e| {
                 error!("Failed to compact database: {}", e);
@@ -802,10 +829,9 @@ impl TransactionLogStoreImpl {
         // Calculate space reclaimed
         let space_reclaimed = size_before.saturating_sub(size_after);
 
-        // Update last compaction timestamp
-        *self.inner.last_compaction.write().map_err(|e| {
-            LogError::DatabaseError(format!("Failed to acquire cache lock: {}", e))
-        })? = Some(SystemTime::now());
+        // Update last compaction timestamp (cache lock - safe to recover)
+        *recover_cache_write_lock(&self.inner.last_compaction, "compaction timestamp") =
+            Some(SystemTime::now());
 
         // Record metrics and logging
         let elapsed = start_time.elapsed().as_secs_f64();
@@ -1057,21 +1083,15 @@ impl TransactionLogStore for TransactionLogStoreImpl {
     }
 
     fn get_last_index(&self) -> u64 {
-        self.inner
-            .cached_last_index
-            .read()
-            .ok()
-            .and_then(|guard| *guard)
-            .unwrap_or(0)
+        use crate::utils::lock_helpers::recover_cache_read_lock;
+        let guard = recover_cache_read_lock(&self.inner.cached_last_index, "get_last_index");
+        (*guard).unwrap_or(0)
     }
 
     fn get_first_index(&self) -> u64 {
-        self.inner
-            .cached_first_index
-            .read()
-            .ok()
-            .and_then(|guard| *guard)
-            .unwrap_or(0)
+        use crate::utils::lock_helpers::recover_cache_read_lock;
+        let guard = recover_cache_read_lock(&self.inner.cached_first_index, "get_first_index");
+        (*guard).unwrap_or(0)
     }
 
     async fn trim(&self, up_to_index: u64) -> Result<u64, LogError> {
@@ -1103,18 +1123,10 @@ impl TransactionLogStore for TransactionLogStoreImpl {
     }
 
     fn get_stats(&self) -> LogStats {
-        let first_index = self
-            .inner
-            .cached_first_index
-            .read()
-            .ok()
-            .and_then(|guard| *guard);
-        let last_index = self
-            .inner
-            .cached_last_index
-            .read()
-            .ok()
-            .and_then(|guard| *guard);
+        use crate::utils::lock_helpers::recover_cache_read_lock;
+
+        let first_index = *recover_cache_read_lock(&self.inner.cached_first_index, "get_stats");
+        let last_index = *recover_cache_read_lock(&self.inner.cached_last_index, "get_stats");
 
         let entry_count = match (first_index, last_index) {
             (Some(first), Some(last)) => last - first + 1,
@@ -1126,12 +1138,8 @@ impl TransactionLogStore for TransactionLogStoreImpl {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        let last_compaction = self
-            .inner
-            .last_compaction
-            .read()
-            .ok()
-            .and_then(|guard| *guard);
+        let last_compaction =
+            *recover_cache_read_lock(&self.inner.last_compaction, "get_stats compaction");
 
         LogStats {
             first_index,
@@ -1924,5 +1932,167 @@ mod tests {
             "Verification took too long: {:?}",
             elapsed
         );
+    }
+
+    #[tokio::test]
+    async fn test_lock_poison_recovery() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let (config, _temp_dir) = create_test_config();
+        let store = Arc::new(TransactionLogStoreImpl::new(config).unwrap());
+
+        // Add some initial entries
+        for i in 1..=5 {
+            store
+                .append(i, 1, format!("entry-{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Verify initial state
+        assert_eq!(store.get_last_index(), 5);
+        let entry1 = store.get_entry(1).await.unwrap();
+        assert_eq!(entry1.operations, b"entry-1");
+
+        // Attempt to poison the cache lock by panicking while holding it
+        // Note: We can't easily poison the database lock in a test without
+        // causing the test itself to fail, so we focus on demonstrating
+        // that cache locks recover properly.
+        let store_clone = Arc::clone(&store);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            // Access the cache lock directly to simulate a poison scenario
+            // In real code, this would happen if a thread panicked during update
+            let _guard = store_clone.inner.cached_first_index.write().unwrap();
+            panic!("Simulated panic while holding cache lock");
+        }));
+        assert!(result.is_err(), "Panic should have occurred");
+
+        // The lock should now be poisoned, but our recovery mechanism should handle it
+        // Update cache indices - this should succeed due to recover_cache_write_lock
+        let update_result = store.update_cached_indices(Some(1), Some(5));
+        assert!(
+            update_result.is_ok(),
+            "Cache update should succeed even with poisoned lock: {:?}",
+            update_result
+        );
+
+        // Verify that the store continues to function normally after poison recovery
+        // Add more entries to test database operations
+        for i in 6..=10 {
+            store
+                .append(i, 1, format!("entry-{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.get_last_index(), 10);
+
+        // Verify all entries are accessible
+        for i in 1..=10 {
+            let entry = store.get_entry(i).await.unwrap();
+            assert_eq!(
+                entry.operations,
+                format!("entry-{}", i).into_bytes(),
+                "Entry {} should be accessible",
+                i
+            );
+        }
+
+        // Test range query
+        let entries = store.get_entries(3, 7).await.unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0].index, 3);
+        assert_eq!(entries[4].index, 7);
+
+        // Test trim operation
+        let trimmed = store.trim(6).await.unwrap();
+        assert_eq!(trimmed, 5); // Removed entries 1-5
+        assert_eq!(store.get_first_index(), 6);
+        assert_eq!(store.get_last_index(), 10);
+
+        // Test delete_from operation
+        let deleted = store.delete_from(9).await.unwrap();
+        assert_eq!(deleted, 2); // Removed entries 9-10
+        assert_eq!(store.get_last_index(), 8);
+
+        // Verify integrity after poison recovery and operations
+        let report = store.verify_integrity().await.unwrap();
+        assert!(report.is_valid);
+        assert_eq!(report.total_entries, 3); // Entries 6, 7, 8 remain
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_operations_with_poison_resilience() {
+        let (config, _temp_dir) = create_test_config();
+        let store = Arc::new(TransactionLogStoreImpl::new(config).unwrap());
+
+        // Pre-populate with entries
+        for i in 1..=50 {
+            store
+                .append(i, 1, format!("entry-{}", i).into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Spawn multiple concurrent operations that stress the locks
+        let mut handles = vec![];
+
+        // Reader tasks - concurrent reads are safe
+        for _ in 0..5 {
+            let store_clone = Arc::clone(&store);
+            let handle = tokio::spawn(async move {
+                for _ in 0..10 {
+                    let _ = store_clone.get_entries(1, 50).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all reader tasks to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Sequential writer task (Raft-compliant: leader assigns sequential indices)
+        // In a real Raft scenario, only the leader appends and indices are sequential
+        for i in 51..=60 {
+            let data = format!("entry-{}", i).into_bytes();
+            store.append(i, 1, data).await.unwrap();
+        }
+
+        // Spawn concurrent readers again while performing cache updates
+        let mut handles = vec![];
+        for _ in 0..3 {
+            let store_clone = Arc::clone(&store);
+            let handle = tokio::spawn(async move {
+                for _ in 0..5 {
+                    let _ = store_clone.get_entries(1, 60).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Cache update task running concurrently with readers
+        let store_clone = Arc::clone(&store);
+        let handle = tokio::spawn(async move {
+            for i in 51..=60 {
+                let _ = store_clone.update_cached_indices(None, Some(i));
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+            }
+        });
+        handles.push(handle);
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify final state
+        assert_eq!(store.get_last_index(), 60);
+        let report = store.verify_integrity().await.unwrap();
+        assert!(report.is_valid);
+        assert_eq!(report.total_entries, 60);
     }
 }

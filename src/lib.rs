@@ -42,6 +42,7 @@ pub mod storage_node;
 pub mod storage_raft_member;
 pub mod storage_watchdog;
 pub mod transaction_log_store;
+pub mod utils;
 pub mod worm_validator;
 
 // Re-export commonly used traits
