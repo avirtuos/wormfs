@@ -3,8 +3,11 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
+
+use crate::storage_network::StorageNetworkHandle;
 
 /// Unique identifier for a node in the Raft cluster.
 ///
@@ -47,7 +50,7 @@ impl std::fmt::Display for NodeId {
 ///
 /// These parameters control Raft's behavior for elections, log replication,
 /// snapshot management, and transaction coordination.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     // === Election Configuration ===
     /// Interval between heartbeats from leader to followers
@@ -104,6 +107,69 @@ pub struct Config {
 
     /// Timeout for new leader to recover in-flight transactions after election
     pub transaction_recovery_timeout: Duration,
+
+    // === Storage Dependencies ===
+    /// Path to the transaction log database
+    pub transaction_log_path: PathBuf,
+
+    /// Path to the metadata database
+    pub metadata_db_path: PathBuf,
+
+    /// Network address for this node (for peer communication)
+    pub network_address: SocketAddr,
+
+    /// Handle to the storage network for peer-to-peer communication
+    /// This must be set before calling new() - there's no default
+    pub storage_network: Option<StorageNetworkHandle>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("election_timeout_min", &self.election_timeout_min)
+            .field("election_timeout_max", &self.election_timeout_max)
+            .field("max_payload_entries", &self.max_payload_entries)
+            .field(
+                "max_in_flight_append_entries",
+                &self.max_in_flight_append_entries,
+            )
+            .field("replication_lag_threshold", &self.replication_lag_threshold)
+            .field("max_uncommitted_entries", &self.max_uncommitted_entries)
+            .field("snapshot_time_threshold", &self.snapshot_time_threshold)
+            .field(
+                "snapshot_log_size_threshold",
+                &self.snapshot_log_size_threshold,
+            )
+            .field(
+                "enable_snapshot_compression",
+                &self.enable_snapshot_compression,
+            )
+            .field(
+                "snapshot_compression_level",
+                &self.snapshot_compression_level,
+            )
+            .field("enable_lease_based_reads", &self.enable_lease_based_reads)
+            .field("lease_duration", &self.lease_duration)
+            .field("max_read_staleness", &self.max_read_staleness)
+            .field(
+                "default_transaction_timeout",
+                &self.default_transaction_timeout,
+            )
+            .field(
+                "max_concurrent_transactions",
+                &self.max_concurrent_transactions,
+            )
+            .field(
+                "transaction_recovery_timeout",
+                &self.transaction_recovery_timeout,
+            )
+            .field("transaction_log_path", &self.transaction_log_path)
+            .field("metadata_db_path", &self.metadata_db_path)
+            .field("network_address", &self.network_address)
+            .field("storage_network", &self.storage_network.is_some())
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -142,6 +208,12 @@ impl Default for Config {
             default_transaction_timeout: Duration::from_secs(300), // 5 minutes
             max_concurrent_transactions: 100,
             transaction_recovery_timeout: Duration::from_secs(60),
+
+            // Storage Dependencies - placeholders that must be overridden
+            transaction_log_path: PathBuf::from("/tmp/wormfs/tx_log.db"),
+            metadata_db_path: PathBuf::from("/tmp/wormfs/metadata.db"),
+            network_address: SocketAddr::from(([127, 0, 0, 1], 5000)),
+            storage_network: None, // Must be set before calling new()
         }
     }
 }
@@ -192,6 +264,14 @@ pub enum Error {
     /// Configuration error
     #[error("Configuration error: {0}")]
     ConfigError(String),
+
+    /// Storage error
+    #[error("Storage error: {0}")]
+    StorageError(String),
+
+    /// Raft internal error
+    #[error("Raft error: {0}")]
+    RaftError(String),
 
     /// I/O error
     #[error("I/O error: {0}")]
