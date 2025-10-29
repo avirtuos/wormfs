@@ -64,6 +64,10 @@ struct StateMachineInner {
 
     /// Directory where snapshots are stored
     snapshot_directory: std::path::PathBuf,
+
+    /// Path to the temporary snapshot file being received
+    /// Set by begin_receiving_snapshot(), used by install_snapshot()
+    incoming_snapshot_path: Option<std::path::PathBuf>,
 }
 
 /// Raft state machine that applies operations to MetadataStore.
@@ -94,6 +98,7 @@ impl WormFsStateMachine {
                 last_membership: StoredMembership::default(),
                 transactions: HashMap::new(),
                 snapshot_directory,
+                incoming_snapshot_path: None,
             })),
         }
     }
@@ -721,14 +726,34 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
     }
 
     /// Begin receiving a snapshot from the leader.
+    ///
+    /// Creates a temporary file in the snapshot directory for receiving snapshot data.
+    /// The file will be moved to its final location after successful installation.
     async fn begin_receiving_snapshot(
         &mut self,
     ) -> Result<Box<<WormFsTypeConfig as RaftTypeConfig>::SnapshotData>, StorageError<NodeId>> {
-        // Create a temporary file for receiving the snapshot
-        // In production, this would use SnapshotStore
-        let temp_file = tokio::fs::File::create("/tmp/wormfs-snapshot-incoming.db")
+        let (snapshot_dir, temp_path) = {
+            let inner = self.inner.read().await;
+
+            // Create a unique temporary filename using timestamp and random suffix
+            let temp_filename = format!(
+                "snapshot-incoming-{}-{}.db.tmp",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                rand::random::<u32>()
+            );
+            let temp_path = inner.snapshot_directory.join(&temp_filename);
+
+            (inner.snapshot_directory.clone(), temp_path)
+        };
+
+        // Create snapshot directory if it doesn't exist
+        tokio::fs::create_dir_all(&snapshot_dir)
             .await
             .map_err(|e| {
+                error!("Failed to create snapshot directory: {:?}", e);
                 let io_error = openraft::StorageIOError::new(
                     openraft::ErrorSubject::Snapshot(None),
                     openraft::ErrorVerb::Write,
@@ -737,46 +762,266 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
                 StorageError::IO { source: io_error }
             })?;
 
+        info!("Creating temporary snapshot file: {}", temp_path.display());
+
+        // Create the temporary file for receiving snapshot data
+        let temp_file = tokio::fs::File::create(&temp_path).await.map_err(|e| {
+            error!("Failed to create temporary snapshot file: {:?}", e);
+            let io_error = openraft::StorageIOError::new(
+                openraft::ErrorSubject::Snapshot(None),
+                openraft::ErrorVerb::Write,
+                openraft::AnyError::new(&e),
+            );
+            StorageError::IO { source: io_error }
+        })?;
+
+        // Store the temp path for use in install_snapshot()
+        {
+            let mut inner = self.inner.write().await;
+            inner.incoming_snapshot_path = Some(temp_path.clone());
+        }
+
+        // Return a buffered reader wrapping the file
+        // OpenRaft will write snapshot data to this handle
         Ok(Box::new(tokio::io::BufReader::new(temp_file)))
     }
 
     /// Install a snapshot, replacing the current state.
+    ///
+    /// This is called by OpenRaft after receiving a snapshot from the leader.
+    /// The snapshot data has been written to the temp file created by begin_receiving_snapshot().
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta<NodeId, super::raft_config::WormFsNode>,
         snapshot: Box<<WormFsTypeConfig as RaftTypeConfig>::SnapshotData>,
     ) -> Result<(), StorageError<NodeId>> {
+        let last_log_id = meta.last_log_id.as_ref();
+        let (last_included_index, last_included_term) = if let Some(log_id) = last_log_id {
+            (log_id.index, log_id.leader_id.term)
+        } else {
+            (0, 0)
+        };
+
         info!(
-            "Installing snapshot at index {:?}",
-            meta.last_log_id.as_ref().map(|l| l.index)
+            "Installing snapshot at index {} term {}",
+            last_included_index, last_included_term
         );
 
-        // TODO: Actually restore from snapshot
-        // For now, just update the state to reflect the snapshot
-        let mut inner = self.inner.write().await;
-
-        if let Some(last_log_id) = &meta.last_log_id {
-            inner.last_applied_index = last_log_id.index;
-            inner.last_applied_term = last_log_id.leader_id.term;
-        }
-
-        inner.last_membership = meta.last_membership.clone();
-        inner.transactions.clear();
-
-        // Drop the snapshot handle
+        // Drop the snapshot handle to ensure data is flushed
         drop(snapshot);
 
-        info!("Snapshot installed successfully");
+        // Get the temp file path from state
+        let temp_path = {
+            let mut inner = self.inner.write().await;
+            inner.incoming_snapshot_path.take().ok_or_else(|| {
+                error!("No incoming snapshot path found");
+                let io_error = openraft::StorageIOError::new(
+                    openraft::ErrorSubject::Snapshot(None),
+                    openraft::ErrorVerb::Read,
+                    openraft::AnyError::error("No incoming snapshot path"),
+                );
+                StorageError::IO { source: io_error }
+            })?
+        };
+
+        // Verify the temp file exists
+        if !tokio::fs::try_exists(&temp_path).await.map_err(|e| {
+            error!("Failed to check temp snapshot existence: {:?}", e);
+            let io_error = openraft::StorageIOError::new(
+                openraft::ErrorSubject::Snapshot(None),
+                openraft::ErrorVerb::Read,
+                openraft::AnyError::new(&e),
+            );
+            StorageError::IO { source: io_error }
+        })? {
+            error!("Temp snapshot file not found: {}", temp_path.display());
+            let io_error = openraft::StorageIOError::new(
+                openraft::ErrorSubject::Snapshot(None),
+                openraft::ErrorVerb::Read,
+                openraft::AnyError::error("Temp snapshot file not found"),
+            );
+            return Err(StorageError::IO { source: io_error });
+        }
+
+        // Calculate the final snapshot filename
+        let final_filename = format!("snapshot-{}-{}.db", last_included_index, last_included_term);
+        let final_path = {
+            let inner = self.inner.read().await;
+            inner.snapshot_directory.join(&final_filename)
+        };
+
+        // Move temp file to final location
+        info!(
+            "Moving snapshot from {} to {}",
+            temp_path.display(),
+            final_path.display()
+        );
+        tokio::fs::rename(&temp_path, &final_path)
+            .await
+            .map_err(|e| {
+                error!("Failed to move snapshot to final location: {:?}", e);
+                let io_error = openraft::StorageIOError::new(
+                    openraft::ErrorSubject::Snapshot(None),
+                    openraft::ErrorVerb::Write,
+                    openraft::AnyError::new(&e),
+                );
+                StorageError::IO { source: io_error }
+            })?;
+
+        // Restore from snapshot using MetadataStore
+        info!("Restoring MetadataStore from snapshot...");
+        {
+            let inner = self.inner.read().await;
+            inner
+                .metadata_store
+                .restore_from_snapshot(&final_path)
+                .await
+                .map_err(|e| {
+                    error!("Failed to restore from snapshot: {:?}", e);
+                    let io_error = openraft::StorageIOError::new(
+                        openraft::ErrorSubject::Store,
+                        openraft::ErrorVerb::Write,
+                        openraft::AnyError::error(format!("MetadataStore restore failed: {:?}", e)),
+                    );
+                    StorageError::IO { source: io_error }
+                })?;
+        }
+
+        // Update state machine state
+        let mut inner = self.inner.write().await;
+        inner.last_applied_index = last_included_index;
+        inner.last_applied_term = last_included_term;
+        inner.last_membership = meta.last_membership.clone();
+
+        // Clear all transaction state - obsolete after snapshot
+        let old_tx_count = inner.transactions.len();
+        inner.transactions.clear();
+
+        info!(
+            "Snapshot installed successfully: cleared {} transactions, last_applied_index={}",
+            old_tx_count, last_included_index
+        );
+
         Ok(())
     }
 
     /// Get the current snapshot.
+    ///
+    /// Returns the most recent snapshot file for transfer to followers.
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<WormFsTypeConfig>>, StorageError<NodeId>> {
-        // For now, we don't persist snapshots
-        // TODO: Integrate with SnapshotStore
-        Ok(None)
+        let snapshot_directory = {
+            let inner = self.inner.read().await;
+            inner.snapshot_directory.clone()
+        };
+
+        // Check if snapshot directory exists
+        if !tokio::fs::try_exists(&snapshot_directory)
+            .await
+            .unwrap_or(false)
+        {
+            debug!("Snapshot directory does not exist yet");
+            return Ok(None);
+        }
+
+        // Read directory entries
+        let mut entries = tokio::fs::read_dir(&snapshot_directory)
+            .await
+            .map_err(|e| {
+                error!("Failed to read snapshot directory: {:?}", e);
+                let io_error = openraft::StorageIOError::new(
+                    openraft::ErrorSubject::Snapshot(None),
+                    openraft::ErrorVerb::Read,
+                    openraft::AnyError::new(&e),
+                );
+                StorageError::IO { source: io_error }
+            })?;
+
+        // Find all snapshot files and parse their indices/terms
+        let mut snapshots: Vec<(u64, u64, std::path::PathBuf)> = Vec::new();
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            let io_error = openraft::StorageIOError::new(
+                openraft::ErrorSubject::Snapshot(None),
+                openraft::ErrorVerb::Read,
+                openraft::AnyError::new(&e),
+            );
+            StorageError::IO { source: io_error }
+        })? {
+            let path = entry.path();
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                // Parse filename: snapshot-{index}-{term}.db
+                if filename.starts_with("snapshot-") && filename.ends_with(".db") {
+                    let parts: Vec<&str> = filename
+                        .trim_start_matches("snapshot-")
+                        .trim_end_matches(".db")
+                        .split('-')
+                        .collect();
+
+                    if parts.len() == 2 {
+                        if let (Ok(index), Ok(term)) =
+                            (parts[0].parse::<u64>(), parts[1].parse::<u64>())
+                        {
+                            snapshots.push((index, term, path));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Return None if no snapshots found
+        if snapshots.is_empty() {
+            debug!("No snapshots found in directory");
+            return Ok(None);
+        }
+
+        // Sort by index (descending) to get the most recent
+        snapshots.sort_by(|a, b| b.0.cmp(&a.0));
+        let (last_index, last_term, snapshot_path) = &snapshots[0];
+
+        info!(
+            "Found most recent snapshot: index={}, term={}, path={}",
+            last_index,
+            last_term,
+            snapshot_path.display()
+        );
+
+        // Open the snapshot file
+        let snapshot_file = tokio::fs::File::open(snapshot_path).await.map_err(|e| {
+            error!("Failed to open snapshot file: {:?}", e);
+            let io_error = openraft::StorageIOError::new(
+                openraft::ErrorSubject::Snapshot(None),
+                openraft::ErrorVerb::Read,
+                openraft::AnyError::new(&e),
+            );
+            StorageError::IO { source: io_error }
+        })?;
+
+        // Get current membership and create snapshot metadata
+        let (last_membership, snapshot_id) = {
+            let inner = self.inner.read().await;
+            let snapshot_id = format!("snapshot-{}-{}.db", last_index, last_term);
+            (inner.last_membership.clone(), snapshot_id)
+        };
+
+        let last_log_id = Some(openraft::LogId::new(
+            openraft::CommittedLeaderId::new(*last_term, NodeId(0)),
+            *last_index,
+        ));
+
+        let meta = SnapshotMeta {
+            last_log_id,
+            last_membership,
+            snapshot_id,
+        };
+
+        let snapshot_data = Box::new(tokio::io::BufReader::new(snapshot_file));
+
+        Ok(Some(Snapshot {
+            meta,
+            snapshot: snapshot_data,
+        }))
     }
 }
 
