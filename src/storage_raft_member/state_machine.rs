@@ -22,7 +22,10 @@ use openraft::{
 use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
 
 use super::raft_config::{WormFsResponse, WormFsSnapshotData, WormFsTypeConfig};
-use super::types::{ChunkId, FileId, MetadataOperation, NodeId, StripeId, TxId, WormFsOperation};
+use super::types::{
+    ChunkId, FileId, MetadataChangeEvent, MetadataChangeType, MetadataOperation, NodeId, StripeId,
+    TxId, WormFsOperation,
+};
 
 /// State of a transaction during two-phase commit.
 #[derive(Debug, Clone)]
@@ -43,6 +46,16 @@ enum TransactionPhase {
     Committed,
     /// Transaction has been aborted
     Aborted { reason: Option<String> },
+}
+
+/// Subscription handle for metadata change events.
+///
+/// Each subscriber receives events via a broadcast channel with optional filtering.
+struct Subscription {
+    /// Channel for sending events to subscriber
+    sender: tokio::sync::broadcast::Sender<MetadataChangeEvent>,
+    /// Optional filter for specific event types
+    filter: Option<Vec<MetadataChangeType>>,
 }
 
 /// Inner state for the Raft state machine.
@@ -68,6 +81,9 @@ struct StateMachineInner {
     /// Path to the temporary snapshot file being received
     /// Set by begin_receiving_snapshot(), used by install_snapshot()
     incoming_snapshot_path: Option<std::path::PathBuf>,
+
+    /// Active metadata change subscriptions
+    subscriptions: Vec<Subscription>,
 }
 
 /// Raft state machine that applies operations to MetadataStore.
@@ -99,6 +115,7 @@ impl WormFsStateMachine {
                 transactions: HashMap::new(),
                 snapshot_directory,
                 incoming_snapshot_path: None,
+                subscriptions: Vec::new(),
             })),
         }
     }
@@ -107,6 +124,42 @@ impl WormFsStateMachine {
     pub async fn last_applied_index(&self) -> u64 {
         let inner = self.inner.read().await;
         inner.last_applied_index
+    }
+
+    /// Subscribe to metadata change events.
+    ///
+    /// Returns a receiver channel for metadata change notifications.
+    /// Events are sent when metadata operations are committed through Raft.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Optional list of event types to receive. If None, all events are sent.
+    /// * `capacity` - Channel buffer capacity (default: 100)
+    ///
+    /// # Returns
+    ///
+    /// A receiver that will receive MetadataChangeEvent notifications
+    pub async fn subscribe_metadata_changes(
+        &self,
+        filter: Option<Vec<MetadataChangeType>>,
+        capacity: Option<usize>,
+    ) -> tokio::sync::broadcast::Receiver<MetadataChangeEvent> {
+        let mut inner = self.inner.write().await;
+
+        // Create a new broadcast channel for this subscription
+        let capacity = capacity.unwrap_or(100);
+        let (sender, receiver) = tokio::sync::broadcast::channel(capacity);
+
+        debug!(
+            "Added metadata change subscription (filter: {:?}, capacity: {})",
+            filter.as_ref().map(|f| f.len()),
+            capacity
+        );
+
+        // Add to subscriptions list
+        inner.subscriptions.push(Subscription { sender, filter });
+
+        receiver
     }
 
     /// Apply a WormFsOperation to the state machine.
@@ -206,6 +259,22 @@ impl WormFsStateMachine {
                             // Continue with other operations even if one fails
                             // In production, we might want to mark the transaction as partially failed
                         }
+                    }
+
+                    // Convert operations to metadata change events
+                    let changes: Vec<super::types::MetadataChange> = operations
+                        .iter()
+                        .filter_map(|op| Self::operation_to_change(op))
+                        .collect();
+
+                    // Emit change event if there are any changes
+                    if !changes.is_empty() {
+                        let event = MetadataChangeEvent {
+                            committed_at: SystemTime::now(),
+                            log_index,
+                            changes,
+                        };
+                        Self::emit_metadata_change(&mut inner, log_index, event);
                     }
 
                     inner
@@ -603,6 +672,167 @@ impl WormFsStateMachine {
                 before_count - after_count,
                 before_count,
                 after_count
+            );
+        }
+    }
+
+    /// Convert a metadata operation into a metadata change event.
+    ///
+    /// Returns None if the operation doesn't produce a change event.
+    fn operation_to_change(operation: &MetadataOperation) -> Option<super::types::MetadataChange> {
+        use super::types::{ChunkLocation, FileAttributeChanges, MetadataChange};
+
+        match operation {
+            MetadataOperation::FileCreate { inode, path, .. } => {
+                // TODO: FileCreate doesn't have file_id - we can't emit this event without querying MetadataStore
+                // Skip for now
+                None
+            }
+            MetadataOperation::FileUpdate {
+                file_id, metadata, ..
+            } => {
+                // TODO: Track which fields actually changed
+                // For now, assume size and modified time changed
+                Some(MetadataChange::FileUpdated {
+                    file_id: *file_id,
+                    inode: 0, // TODO: Get inode from metadata
+                    changed_attrs: FileAttributeChanges {
+                        size: Some(metadata.size),
+                        mtime: Some(metadata.modified),
+                        atime: None,
+                        mode: Some(metadata.mode),
+                        uid: None,
+                        gid: None,
+                    },
+                })
+            }
+            MetadataOperation::FileDelete { file_id } => Some(MetadataChange::FileDeleted {
+                file_id: *file_id,
+                inode: 0, // TODO: Get inode from metadata
+            }),
+            MetadataOperation::CreateStripe {
+                file_id,
+                stripe_id,
+                offset,
+                size,
+                ..
+            } => Some(MetadataChange::StripeCreated {
+                file_id: *file_id,
+                stripe_id: *stripe_id,
+                offset: *offset,
+                size: *size,
+            }),
+            MetadataOperation::DeleteStripe { stripe_id } => {
+                // TODO: Query MetadataStore for file_id
+                // For now, we skip emitting events for stripe deletion
+                // since we don't have the file_id available
+                None
+            }
+            MetadataOperation::MoveChunk {
+                chunk_id,
+                old_node,
+                new_node,
+                old_disk,
+                new_disk,
+            } => Some(MetadataChange::ChunkMoved {
+                chunk_id: *chunk_id,
+                old_location: ChunkLocation {
+                    node_id: *old_node,
+                    disk_id: *old_disk,
+                },
+                new_location: ChunkLocation {
+                    node_id: *new_node,
+                    disk_id: *new_disk,
+                },
+            }),
+            // CreateChunk and DeleteChunk don't produce change events
+            _ => None,
+        }
+    }
+
+    /// Emit a metadata change event to all subscribers.
+    ///
+    /// Events are filtered based on each subscription's filter list.
+    /// Slow or disconnected subscribers may miss events (at-most-once delivery).
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - Mutable reference to state machine inner (must hold write lock)
+    /// * `log_index` - The log index where this change was committed
+    /// * `event` - The metadata change event to emit
+    fn emit_metadata_change(
+        inner: &mut StateMachineInner,
+        log_index: u64,
+        event: MetadataChangeEvent,
+    ) {
+        // Remove subscriptions with no receivers
+        inner
+            .subscriptions
+            .retain(|sub| sub.sender.receiver_count() > 0);
+
+        let mut sent_count = 0;
+        let mut filtered_count = 0;
+
+        for subscription in &inner.subscriptions {
+            // Check if this event matches the subscription filter
+            let should_send = if let Some(filter) = &subscription.filter {
+                event.changes.iter().any(|change| {
+                    let change_type = match change {
+                        super::types::MetadataChange::FileCreated { .. } => {
+                            MetadataChangeType::FileCreated
+                        }
+                        super::types::MetadataChange::FileUpdated { .. } => {
+                            MetadataChangeType::FileUpdated
+                        }
+                        super::types::MetadataChange::FileDeleted { .. } => {
+                            MetadataChangeType::FileDeleted
+                        }
+                        super::types::MetadataChange::DirectoryCreated { .. } => {
+                            MetadataChangeType::DirectoryCreated
+                        }
+                        super::types::MetadataChange::DirectoryDeleted { .. } => {
+                            MetadataChangeType::DirectoryDeleted
+                        }
+                        super::types::MetadataChange::StripeCreated { .. } => {
+                            MetadataChangeType::StripeCreated
+                        }
+                        super::types::MetadataChange::StripeDeleted { .. } => {
+                            MetadataChangeType::StripeDeleted
+                        }
+                        super::types::MetadataChange::ChunkMoved { .. } => {
+                            MetadataChangeType::ChunkMoved
+                        }
+                        super::types::MetadataChange::LockReleased { .. } => {
+                            MetadataChangeType::LockReleased
+                        }
+                    };
+                    filter.contains(&change_type)
+                })
+            } else {
+                true // No filter means send all events
+            };
+
+            if should_send {
+                // Try to send, but don't block if channel is full
+                match subscription.sender.send(event.clone()) {
+                    Ok(_) => sent_count += 1,
+                    Err(_) => {
+                        // Channel is full or has no receivers - subscriber is too slow
+                        warn!(
+                            "Failed to send metadata change event at index {} - subscriber channel full or closed",
+                            log_index
+                        );
+                    }
+                }
+            } else {
+                filtered_count += 1;
+            }
+        }
+
+        if sent_count > 0 {
+            debug!(
+                "Emitted metadata change event at index {} to {} subscribers ({} filtered)",
+                log_index, sent_count, filtered_count
             );
         }
     }
@@ -1250,5 +1480,82 @@ mod tests {
 
         // Can't directly verify since transactions is private, but we can
         // verify the operation doesn't error
+    }
+
+    #[tokio::test]
+    async fn test_metadata_subscriptions() {
+        use crate::file_store::types::FileId;
+        use crate::storage_raft_member::types::{FileMetadata, MetadataChange, StoragePolicy};
+        use uuid::Uuid;
+
+        let (state_machine, _temp_dir) = create_test_state_machine().await;
+
+        // Subscribe to metadata changes (no filter = all events)
+        let mut receiver = state_machine
+            .subscribe_metadata_changes(None, Some(10))
+            .await;
+
+        // Subscribe with filter for only file updates
+        let mut filtered_receiver = state_machine
+            .subscribe_metadata_changes(Some(vec![MetadataChangeType::FileUpdated]), Some(10))
+            .await;
+
+        let tx_id = TxId(400);
+
+        // Create a transaction with file update operation
+        let file_update_op = MetadataOperation::FileUpdate {
+            file_id: FileId::new(Uuid::new_v4()),
+            metadata: FileMetadata {
+                size: 1024,
+                created: SystemTime::now(),
+                modified: SystemTime::now(),
+                mode: 0o644,
+            },
+            policy: StoragePolicy {
+                data_chunks: 2,
+                parity_chunks: 1,
+                replication_factor: 1,
+            },
+        };
+
+        let prepare_op = WormFsOperation::TransactionPrepare {
+            tx_id,
+            metadata_ops: Some(vec![file_update_op]),
+            command_ops: None,
+            timeout: SystemTime::now(),
+        };
+
+        // Prepare the transaction
+        state_machine.apply_operation(1, &prepare_op).await.unwrap();
+
+        // Commit the transaction (this should emit the event)
+        let commit_op = WormFsOperation::TransactionCommit { tx_id };
+        state_machine.apply_operation(2, &commit_op).await.unwrap();
+
+        // Check that the unfiltered subscriber received the event
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("Timeout waiting for event")
+            .expect("Channel closed");
+
+        assert_eq!(event.log_index, 2);
+        assert_eq!(event.changes.len(), 1);
+        assert!(matches!(
+            event.changes[0],
+            MetadataChange::FileUpdated { .. }
+        ));
+
+        // Check that the filtered subscriber also received it
+        let filtered_event =
+            tokio::time::timeout(std::time::Duration::from_secs(1), filtered_receiver.recv())
+                .await
+                .expect("Timeout waiting for filtered event")
+                .expect("Filtered channel closed");
+
+        assert_eq!(filtered_event.log_index, 2);
+        assert!(matches!(
+            filtered_event.changes[0],
+            MetadataChange::FileUpdated { .. }
+        ));
     }
 }
