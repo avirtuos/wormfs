@@ -8,6 +8,7 @@ use crate::storage_network::{
     behaviour::{BehaviourConfig, WormFsBehaviour, WormFsCodec},
     types::*,
 };
+use crate::storage_raft_member::StorageRaftMember;
 use futures::StreamExt;
 use libp2p::{
     gossipsub, identify, identity, noise, ping, request_response, swarm::SwarmEvent, tcp, yamux,
@@ -195,6 +196,7 @@ impl super::StorageNetworkFactory {
             metrics: RwLock::new(None),
             peer_id_store,
             heartbeat_sequence: RwLock::new(0),
+            raft_handler: RwLock::new(None),
         };
 
         // Create cloneable handle (no reference to inner state)
@@ -250,6 +252,9 @@ pub struct InnerState {
 
     /// Heartbeat sequence counter
     pub(crate) heartbeat_sequence: RwLock<u64>,
+
+    /// Optional Raft handler for processing incoming Raft RPCs
+    pub(crate) raft_handler: RwLock<Option<Arc<crate::storage_raft_member::StorageRaftMemberImpl>>>,
 }
 
 // InnerState is no longer shared via Arc, so no need for unsafe impl Sync.
@@ -1092,6 +1097,11 @@ impl super::StorageNetworkInner {
                 *self.state.metrics.write().await = Some(metrics);
                 true
             }
+            NetworkCommand::RegisterRaftHandler { handler } => {
+                *self.state.raft_handler.write().await = Some(handler);
+                info!("Raft handler registered successfully");
+                true
+            }
         }
     }
 
@@ -1473,28 +1483,33 @@ impl super::StorageNetworkInner {
         };
         debug!("Received Raft {} RPC", rpc_type);
 
-        // TODO: Forward to registered Raft instance via handle_raft_rpc()
-        //
-        // StorageRaftMember now has a handle_raft_rpc() method that can process these RPCs.
-        // To complete the wiring:
-        //
-        // 1. Add a field to InnerState:
-        //    `raft_handler: Arc<RwLock<Option<Arc<dyn StorageRaftMember<...>>>>>`
-        //
-        // 2. Add a registration method to StorageNetworkHandle:
-        //    `register_raft_handler(&self, handler: Arc<dyn StorageRaftMember<...>>)`
-        //
-        // 3. In this function, call:
-        //    `if let Some(handler) = self.state.raft_handler.read().await.as_ref() {`
-        //    `    return Ok(handler.handle_raft_rpc(request_bytes).await?);`
-        //    `}`
-        //
-        // 4. Update initialization flow to call register_raft_handler() after creating
-        //    both StorageNetwork and StorageRaftMember.
-        //
-        // For now, return "not implemented" error until wiring is completed.
+        // Forward to registered Raft handler if available
+        if let Some(handler) = self.state.raft_handler.read().await.as_ref() {
+            debug!("Forwarding Raft {} RPC to handler", rpc_type);
+
+            match handler.handle_raft_rpc(request).await {
+                Ok(response) => {
+                    debug!("Raft {} RPC handled successfully", rpc_type);
+                    return Ok(response);
+                }
+                Err(e) => {
+                    error!("Raft {} RPC handler failed: {:?}", rpc_type, e);
+                    self.record_metric_counter(
+                        "storage_network.request_response.handler_errors",
+                        1,
+                    )
+                    .await;
+                    return Err(Error::SendFailed(format!(
+                        "Raft {} RPC handler failed: {:?}",
+                        rpc_type, e
+                    )));
+                }
+            }
+        }
+
+        // Handler not registered yet
         warn!(
-            "Raft {} RPC handler not yet wired up - need to call register_raft_handler()",
+            "Raft {} RPC received but handler not registered - call register_raft_handler()",
             rpc_type
         );
 
@@ -1502,7 +1517,7 @@ impl super::StorageNetworkInner {
             .await;
 
         Err(Error::ProtocolNotSupported(format!(
-            "Raft {} RPC handling not yet wired up",
+            "Raft {} RPC handler not registered",
             rpc_type
         )))
     }

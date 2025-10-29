@@ -380,6 +380,34 @@ impl StorageNetworkHandle {
             .await
             .map_err(|_| Error::EventLoopFailed("Event loop dropped response".to_string()))?
     }
+
+    /// Register a Raft handler for processing incoming Raft RPCs.
+    ///
+    /// This method wires up the StorageRaftMember to handle incoming Raft RPCs
+    /// received over the network. Must be called after both StorageNetwork and
+    /// StorageRaftMember are created.
+    ///
+    /// # Arguments
+    ///
+    /// * `handler` - The StorageRaftMember instance to handle Raft RPCs
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the handler was successfully registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event loop is not running.
+    pub async fn register_raft_handler(
+        &self,
+        handler: std::sync::Arc<crate::storage_raft_member::StorageRaftMemberImpl>,
+    ) -> Result<(), Error> {
+        self.event_tx
+            .send(NetworkCommand::RegisterRaftHandler { handler })
+            .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+
+        Ok(())
+    }
 }
 
 /// Implementation of the StorageNetwork trait for StorageNetworkHandle.
