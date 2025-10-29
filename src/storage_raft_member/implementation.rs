@@ -11,8 +11,15 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+use tracing::{error, info};
 
+use crate::metadata_store::{MetadataStoreFactory, MetadataStoreImpl};
+use crate::transaction_log_store::{TransactionLogConfig, TransactionLogStoreImpl};
+
+use super::log_storage::RaftLogStorageAdapter;
+use super::network_factory::WormFsNetworkFactory;
 use super::raft_config::{WormFsNode, WormFsTypeConfig};
+use super::state_machine::WormFsStateMachine;
 use super::types::{
     Config, Error, MetadataChangeEvent, MetadataChangeType, NodeId, RaftMetrics, RaftRole, TxId,
     WormFsOperation,
@@ -242,18 +249,184 @@ impl StorageRaftMember for StorageRaftMemberImpl {
     type Operation = WormFsOperation;
     type OperationResult = ();
 
-    async fn new(_node_id: NodeId, _config: Config) -> Result<Self, Error>
+    async fn new(node_id: NodeId, config: Config) -> Result<Self, Error>
     where
         Self: Sized,
     {
-        // This will be implemented once we have the storage adapters ready
-        // For now, this is a placeholder
-        todo!("StorageRaftMemberImpl::new requires storage adapters to be implemented first")
+        info!("Creating StorageRaftMember for node {:?}", node_id);
+
+        // Get the storage network handle
+        let storage_network = config.storage_network.clone().ok_or_else(|| {
+            Error::ConfigError("storage_network must be set in Config".to_string())
+        })?;
+
+        // Create the TransactionLogStore
+        info!(
+            "Opening transaction log at {:?}",
+            config.transaction_log_path
+        );
+        let log_config = TransactionLogConfig {
+            db_path: config.transaction_log_path.clone(),
+            cache_size_mb: 64,
+            compact_threshold_mb: 100,
+            max_log_size_mb: 1000,
+            max_log_age_days: 7,
+        };
+        let log_store = TransactionLogStoreImpl::new(log_config)
+            .map_err(|e| Error::StorageError(format!("Failed to open transaction log: {:?}", e)))?;
+
+        // Create the MetadataStore
+        info!("Opening metadata store at {:?}", config.metadata_db_path);
+        let metadata_config = crate::metadata_store::Config {
+            database_path: config.metadata_db_path.clone(),
+            read_pool_size: 8,
+            enable_wal: true,
+            cache_size_mb: 10,
+            enable_foreign_keys: true,
+            synchronous: crate::metadata_store::types::SynchronousMode::Normal,
+            transaction_isolation: crate::metadata_store::types::IsolationLevel::Serializable,
+            enable_prepared_statements: true,
+            read_pool_timeout_secs: 30,
+            stripe_cache_size_mb: 64,
+            stripe_cache_ttl_secs: 10,
+            stripe_cache_tti_secs: 5,
+            chunk_cache_size_mb: 64,
+            chunk_cache_ttl_secs: 10,
+            chunk_cache_tti_secs: 5,
+        };
+        let metadata_store = MetadataStoreFactory::create_concrete(metadata_config)
+            .await
+            .map_err(|e| Error::StorageError(format!("Failed to open metadata store: {:?}", e)))?;
+
+        // Create the adapters
+        let log_storage = RaftLogStorageAdapter::new(log_store);
+        let state_machine = WormFsStateMachine::new(metadata_store);
+        let network_factory = WormFsNetworkFactory::new(storage_network);
+
+        // Convert our Config to OpenRaft's config
+        let raft_config = openraft::Config {
+            heartbeat_interval: config.heartbeat_interval.as_millis() as u64,
+            election_timeout_min: config.election_timeout_min.as_millis() as u64,
+            election_timeout_max: config.election_timeout_max.as_millis() as u64,
+            max_payload_entries: config.max_payload_entries,
+            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(
+                config.snapshot_log_size_threshold / 1000, // Convert to entry count estimate
+            ),
+            ..Default::default()
+        };
+
+        // Validate the config (validate() consumes self and returns the validated config)
+        let validated_config = raft_config
+            .validate()
+            .map_err(|e| Error::ConfigError(format!("Invalid Raft config: {:?}", e)))?;
+
+        // Create the Raft instance
+        info!("Creating Raft instance with node_id {:?}", node_id);
+        let raft = Raft::new(
+            node_id,
+            Arc::new(validated_config),
+            network_factory,
+            log_storage,
+            state_machine,
+        )
+        .await
+        .map_err(|e| Error::RaftError(format!("Failed to create Raft instance: {:?}", e)))?;
+
+        let raft = Arc::new(raft);
+
+        // Create the implementation
+        let impl_instance = Self::new_with_raft(node_id, config, raft.clone());
+
+        // Start a background task to monitor Raft metrics and update leadership state
+        let impl_clone = impl_instance.clone();
+        tokio::spawn(async move {
+            let mut metrics_rx = impl_clone.inner.raft.metrics();
+            loop {
+                tokio::select! {
+                    _ = metrics_rx.changed() => {
+                        let metrics = metrics_rx.borrow_and_update().clone();
+                        impl_clone.update_leadership(&metrics).await;
+                    }
+                }
+            }
+        });
+
+        info!(
+            "StorageRaftMember created successfully for node {:?}",
+            node_id
+        );
+        Ok(impl_instance)
     }
 
-    async fn initialize(&mut self, _peers: Vec<NodeId>) -> Result<(), Error> {
-        // This will be implemented in the next phase
-        todo!("StorageRaftMemberImpl::initialize will be implemented with cluster initialization")
+    async fn initialize(&mut self, peers: Vec<NodeId>) -> Result<(), Error> {
+        info!(
+            "Initializing Raft for node {:?} with peers: {:?}",
+            self.inner.node_id, peers
+        );
+
+        // Check if already initialized
+        let is_initialized =
+            self.inner.raft.is_initialized().await.map_err(|e| {
+                Error::RaftError(format!("Failed to check initialization: {:?}", e))
+            })?;
+
+        if is_initialized {
+            info!("Node {:?} is already initialized", self.inner.node_id);
+            return Ok(());
+        }
+
+        if peers.is_empty() {
+            // Single-node cluster: initialize with just this node
+            info!(
+                "Creating single-node cluster for node {:?}",
+                self.inner.node_id
+            );
+
+            // Create a WormFsNode for this node
+            // We use a placeholder peer_id based on the node_id since we don't have
+            // the actual libp2p PeerId yet. This will work for single-node clusters.
+            let this_node = super::raft_config::WormFsNode {
+                peer_id: format!("node-{}", self.inner.node_id.as_u64()),
+                metadata: Some(super::raft_config::NodeMetadata {
+                    name: Some(format!("node-{}", self.inner.node_id.as_u64())),
+                    version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                }),
+            };
+
+            // Initialize as a single-node cluster
+            let mut members = std::collections::BTreeMap::new();
+            members.insert(self.inner.node_id, this_node);
+
+            self.inner
+                .raft
+                .initialize(members)
+                .await
+                .map_err(|e| Error::RaftError(format!("Failed to initialize Raft: {:?}", e)))?;
+
+            info!(
+                "Successfully initialized single-node cluster for node {:?}",
+                self.inner.node_id
+            );
+            Ok(())
+        } else {
+            // Multi-node cluster: joining an existing cluster
+            //
+            // NOTE: This requires more design work. The current interface only provides NodeIds,
+            // but we need WormFsNode information (peer_ids) to construct the membership.
+            //
+            // Possible approaches:
+            // 1. Change the interface to pass full node information (NodeId + PeerId)
+            // 2. Have the new node wait to be added via add_node() by the leader
+            // 3. Add a separate method for querying node information from peers
+            //
+            // For now, we return an error indicating this is not yet implemented.
+            Err(Error::ConfigError(
+                "Multi-node cluster initialization not yet implemented. \
+                 Please initialize as a single-node cluster first, then use \
+                 add_node() to add additional nodes."
+                    .to_string(),
+            ))
+        }
     }
 
     async fn propose_operation(
