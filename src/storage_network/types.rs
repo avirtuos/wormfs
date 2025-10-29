@@ -285,6 +285,12 @@ pub enum NetworkCommand {
         /// Metrics service implementation
         metrics: std::sync::Arc<crate::metric_service::MetricServiceImpl>,
     },
+
+    /// Register a Raft handler for processing incoming Raft RPCs
+    RegisterRaftHandler {
+        /// The Raft handler to register
+        handler: std::sync::Arc<crate::storage_raft_member::StorageRaftMemberImpl>,
+    },
 }
 
 impl std::fmt::Debug for NetworkCommand {
@@ -343,6 +349,10 @@ impl std::fmt::Debug for NetworkCommand {
             Self::SetMetrics { .. } => f
                 .debug_struct("SetMetrics")
                 .field("metrics", &"<metrics>")
+                .finish(),
+            Self::RegisterRaftHandler { .. } => f
+                .debug_struct("RegisterRaftHandler")
+                .field("handler", &"<raft_handler>")
                 .finish(),
         }
     }
