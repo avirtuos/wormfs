@@ -1430,37 +1430,69 @@ impl super::StorageNetworkInner {
     ///
     /// Protocol: `/wormfs/raft/1.0.0`
     ///
-    /// This is a placeholder handler for Raft consensus protocol messages.
-    /// Currently returns `ProtocolNotSupported` as the actual Raft RPC
-    /// handling is not yet implemented.
+    /// This handler receives Raft RPC messages (Vote, AppendEntries, InstallSnapshot)
+    /// and routes them to the appropriate Raft instance for processing.
+    ///
+    /// # Architecture Note
+    ///
+    /// The actual Raft processing happens in StorageRaftMember. This handler
+    /// deserializes the RPC message to determine the type, then forwards it
+    /// to the Raft instance. The integration between StorageNetwork and
+    /// StorageRaftMember needs to be completed for full functionality.
     ///
     /// # Arguments
     ///
-    /// * `request` - The request data bytes
+    /// * `request` - The serialized RaftRpcMessage bytes
     ///
     /// # Returns
     ///
-    /// Currently returns an error. Will return Raft RPC response when implemented.
+    /// Serialized RaftRpcResponse bytes
     ///
     /// # Errors
     ///
-    /// Returns `Error::ProtocolNotSupported` until Raft RPC handler is implemented
+    /// Returns errors for deserialization failures or if Raft instance is not registered
     async fn handle_raft_request(&self, request: Vec<u8>) -> Result<Vec<u8>, Error> {
-        warn!(
-            "Raft request handler not yet implemented (received {} bytes)",
-            request.len()
-        );
+        use crate::storage_raft_member::raft_member::{RaftRpcMessage, RaftRpcResponse};
 
         // Record metric
         self.record_metric_counter("storage_network.request_response.raft_requests", 1)
             .await;
+
+        // Deserialize the RPC message to determine type
+        let rpc_message: RaftRpcMessage = bincode::deserialize(&request).map_err(|e| {
+            error!("Failed to deserialize Raft RPC message: {:?}", e);
+            self.record_metric_counter("storage_network.request_response.handler_errors", 1);
+            Error::SendFailed(format!("Failed to deserialize Raft RPC: {:?}", e))
+        })?;
+
+        // Log the RPC type
+        let rpc_type = match &rpc_message {
+            RaftRpcMessage::Vote(_) => "Vote",
+            RaftRpcMessage::AppendEntries(_) => "AppendEntries",
+            RaftRpcMessage::InstallSnapshot(_) => "InstallSnapshot",
+        };
+        debug!("Received Raft {} RPC", rpc_type);
+
+        // TODO: Forward to registered Raft instance
+        // The wiring between StorageNetwork and StorageRaftMember needs to be completed.
+        // Options:
+        // 1. Add a RaftRequestHandler trait object to InnerState that can be registered
+        // 2. Use a callback/closure mechanism
+        // 3. Use a channel to send requests to StorageRaftMember
+        //
+        // For now, return "not implemented" error
+        warn!(
+            "Raft {} RPC handler not yet wired up - need to integrate StorageRaftMember",
+            rpc_type
+        );
+
         self.record_metric_counter("storage_network.request_response.handler_errors", 1)
             .await;
 
-        // TODO: Route to actual Raft RPC handler when implemented
-        Err(Error::ProtocolNotSupported(
-            "/wormfs/raft/1.0.0".to_string(),
-        ))
+        Err(Error::ProtocolNotSupported(format!(
+            "Raft {} RPC handling not yet wired up",
+            rpc_type
+        )))
     }
 
     /// Helper method to record a counter metric if metrics service is available.
@@ -3021,32 +3053,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_raft_handler_not_implemented() {
-        // Test that raft handler returns ProtocolNotSupported error
+    async fn test_raft_handler_deserialization_error() {
+        // Test that raft handler returns error for invalid RPC data
         let config = test_config("raft_handler");
 
         let (inner, _handle) = super::super::StorageNetworkFactory::create(config)
             .await
             .expect("create() should succeed");
 
-        let request = b"Raft RPC data".to_vec();
+        let request = b"Invalid Raft RPC data".to_vec();
         let result = inner.handle_raft_request(request).await;
 
-        // Should return error since not implemented
+        // Should return error for invalid data
         assert!(
             result.is_err(),
-            "Raft handler should return error (not implemented)"
+            "Raft handler should return error for invalid data"
         );
 
-        // Verify it's the right error type
+        // Verify it's a deserialization error
         match result {
-            Err(Error::ProtocolNotSupported(protocol)) => {
-                assert_eq!(
-                    protocol, "/wormfs/raft/1.0.0",
-                    "Should indicate raft protocol not supported"
+            Err(Error::SendFailed(msg)) => {
+                assert!(
+                    msg.contains("Failed to deserialize Raft RPC"),
+                    "Error should indicate deserialization failure, got: {}",
+                    msg
                 );
             }
-            _ => panic!("Expected ProtocolNotSupported error"),
+            _ => panic!("Expected SendFailed error with deserialization message"),
         }
     }
 

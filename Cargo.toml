@@ -60,7 +60,7 @@ libp2p = { version = "0.56", features = [
 ] }
 
 # Raft consensus (OpenRaft)
-openraft = { version = "0.9", optional = true, features = ["storage-v2"] }
+openraft = { version = "0.9", optional = true, features = ["storage-v2", "serde"] }
 
 # Storage
 # Note: sqlx removed due to libsqlite3-sys conflict with rusqlite
