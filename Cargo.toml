@@ -60,7 +60,7 @@ libp2p = { version = "0.56", features = [
 ] }
 
 # Raft consensus (OpenRaft)
-openraft = { version = "0.9", optional = true }
+openraft = { version = "0.9", optional = true, features = ["storage-v2"] }
 
 # Storage
 # Note: sqlx removed due to libsqlite3-sys conflict with rusqlite
@@ -127,7 +127,7 @@ walkdir = "2"
 reqwest = { version = "0.11", features = ["json"] }
 
 [features]
-default = ["rusqlite", "tokio-rusqlite", "redb", "reed-solomon-erasure", "fuser"]
+default = ["openraft", "rusqlite", "tokio-rusqlite", "redb", "reed-solomon-erasure", "fuser"]
 test-utils = ["mockall"]
 # Note: sqlx and rusqlite cannot be used together due to libsqlite3-sys version conflicts
 # Note: libp2p is now always enabled (no longer optional)

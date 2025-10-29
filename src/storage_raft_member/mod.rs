@@ -82,9 +82,18 @@
 //! - **Lock Expiration**: Leader detects expired locks and issues Raft transaction
 //! - **Concurrent Transaction Limits**: Configurable maximum for resource management
 
+pub mod implementation;
+pub mod log_storage;
+pub mod network_adapter;
+pub mod raft_config;
+pub mod state_machine;
 pub mod types;
 
 use async_trait::async_trait;
+pub use implementation::StorageRaftMemberImpl;
+pub use log_storage::RaftLogStorageAdapter;
+pub use network_adapter::{NetworkAdapterConfig, RaftNetworkAdapter};
+pub use state_machine::WormFsStateMachine;
 use std::net::SocketAddr;
 pub use types::{
     Config, Error, MetadataChangeEvent, MetadataChangeType, NodeId, RaftMetrics, RaftRole,
@@ -259,70 +268,4 @@ pub trait StorageRaftMember: Send + Sync {
         &self,
         filter: Option<Vec<MetadataChangeType>>,
     ) -> tokio::sync::mpsc::UnboundedReceiver<MetadataChangeEvent>;
-}
-
-// =============================================================================
-// Concrete Implementation (Placeholder)
-// =============================================================================
-
-/// Placeholder concrete implementation of StorageRaftMember.
-///
-/// This is a stub type that will be properly implemented in the future.
-pub struct StorageRaftMemberImpl {
-    _private: (),
-}
-
-#[async_trait]
-impl StorageRaftMember for StorageRaftMemberImpl {
-    type Operation = types::WormFsOperation;
-    type OperationResult = ();
-
-    async fn new(_node_id: NodeId, _config: Config) -> Result<Self, Error>
-    where
-        Self: Sized,
-    {
-        unimplemented!("StorageRaftMemberImpl::new will be implemented")
-    }
-
-    async fn initialize(&mut self, _peers: Vec<NodeId>) -> Result<(), Error> {
-        unimplemented!("StorageRaftMemberImpl::initialize will be implemented")
-    }
-
-    async fn propose_operation(
-        &self,
-        _operation: Self::Operation,
-    ) -> Result<Self::OperationResult, Error> {
-        unimplemented!("StorageRaftMemberImpl::propose_operation will be implemented")
-    }
-
-    fn is_leader(&self) -> bool {
-        unimplemented!("StorageRaftMemberImpl::is_leader will be implemented")
-    }
-
-    fn get_metrics(&self) -> RaftMetrics {
-        unimplemented!("StorageRaftMemberImpl::get_metrics will be implemented")
-    }
-
-    async fn trigger_snapshot(&self) -> Result<(), Error> {
-        unimplemented!("StorageRaftMemberImpl::trigger_snapshot will be implemented")
-    }
-
-    async fn add_node(&self, _node_id: NodeId, _address: SocketAddr) -> Result<(), Error> {
-        unimplemented!("StorageRaftMemberImpl::add_node will be implemented")
-    }
-
-    async fn remove_node(&self, _node_id: NodeId) -> Result<(), Error> {
-        unimplemented!("StorageRaftMemberImpl::remove_node will be implemented")
-    }
-
-    async fn step_down(&self) -> Result<(), Error> {
-        unimplemented!("StorageRaftMemberImpl::step_down will be implemented")
-    }
-
-    async fn subscribe_metadata_changes(
-        &self,
-        _filter: Option<Vec<MetadataChangeType>>,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<MetadataChangeEvent> {
-        unimplemented!("StorageRaftMemberImpl::subscribe_metadata_changes will be implemented")
-    }
 }

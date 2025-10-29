@@ -16,6 +16,7 @@ WormFS, short for write-once-read-many file system, is intended to be user-space
 8. Maintain clear documentation, add doc comments (`///`) to public items (structs, enums, functions, etc.) explaining their purpose, arguments, and return values.
 9. Ask for clarification, if any task or requirement is unclear, ask for clarification before proceeding with implementation.
 10. Do not remove or mark tests as ignored without explaining why the change is needed and asking for approval before doing so.
+11. Do not create new documents (e.g. design docs) without asking first.
 
 ## Specific Instructions for Claude
 
