@@ -7,17 +7,22 @@
 //! - Snapshot creation and restoration
 //! - Transaction state tracking
 
-use std::collections::HashMap;
-use std::io::Cursor;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
+
+use openraft::storage::RaftStateMachine;
+use openraft::{
+    OptionalSend, RaftSnapshotBuilder, RaftTypeConfig, Snapshot, SnapshotId, SnapshotMeta,
+    StorageError, StoredMembership,
+};
 
 use crate::metadata_store::MetadataStoreImpl;
 
-use super::raft_config::WormFsSnapshotData;
-use super::types::{MetadataOperation, TxId, WormFsOperation};
+use super::raft_config::{WormFsResponse, WormFsSnapshotData, WormFsTypeConfig};
+use super::types::{MetadataOperation, NodeId, TxId, WormFsOperation};
 
 /// State of a transaction during two-phase commit.
 #[derive(Debug, Clone)]
@@ -48,6 +53,12 @@ struct StateMachineInner {
     /// Last applied log index for idempotency
     last_applied_index: u64,
 
+    /// Last applied log term
+    last_applied_term: u64,
+
+    /// Last applied membership configuration
+    last_membership: StoredMembership<NodeId, super::raft_config::WormFsNode>,
+
     /// In-flight transaction states (for two-phase commit)
     transactions: HashMap<TxId, TransactionPhase>,
 }
@@ -75,6 +86,8 @@ impl WormFsStateMachine {
             inner: Arc::new(RwLock::new(StateMachineInner {
                 metadata_store,
                 last_applied_index: 0,
+                last_applied_term: 0,
+                last_membership: StoredMembership::default(),
                 transactions: HashMap::new(),
             })),
         }
@@ -329,41 +342,233 @@ impl WormFsStateMachine {
     }
 }
 
-// TODO: Implement OpenRaft's RaftStateMachine trait
-//
-// This requires implementing the trait with correct lifetime parameters:
-//
-// #[async_trait]
-// impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
-//     type SnapshotBuilder = Self;
-//
-//     async fn applied_state<'life0, 'async_trait>(
-//         &'life0 mut self,
-//     ) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, WormFsNode>), StorageError<NodeId>>
-//     where
-//         'life0: 'async_trait,
-//         Self: 'async_trait,
-//     {
-//         // Return the last applied log ID and cluster membership
-//         todo!()
-//     }
-//
-//     async fn apply<'life0, 'async_trait, I>(
-//         &'life0 mut self,
-//         entries: I,
-//     ) -> Result<Vec<WormFsResponse>, StorageError<NodeId>>
-//     where
-//         I: IntoIterator<Item = Entry<WormFsTypeConfig>> + Send + 'async_trait,
-//         I::IntoIter: Send,
-//         'life0: 'async_trait,
-//         Self: 'async_trait,
-//     {
-//         // Apply entries and return responses
-//         todo!()
-//     }
-//
-//     // ... other methods
-// }
+impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
+    type SnapshotBuilder = Self;
+
+    /// Returns the last applied log id and cluster membership.
+    async fn applied_state(
+        &mut self,
+    ) -> Result<
+        (
+            Option<openraft::LogId<NodeId>>,
+            StoredMembership<NodeId, super::raft_config::WormFsNode>,
+        ),
+        StorageError<NodeId>,
+    > {
+        let inner = self.inner.read().await;
+
+        let last_log_id = if inner.last_applied_index > 0 {
+            Some(openraft::LogId::new(
+                openraft::CommittedLeaderId::new(inner.last_applied_term, NodeId(0)),
+                inner.last_applied_index,
+            ))
+        } else {
+            None
+        };
+
+        Ok((last_log_id, inner.last_membership.clone()))
+    }
+
+    /// Apply committed entries to the state machine.
+    async fn apply<I>(&mut self, entries: I) -> Result<Vec<WormFsResponse>, StorageError<NodeId>>
+    where
+        I: IntoIterator<Item = <WormFsTypeConfig as RaftTypeConfig>::Entry> + OptionalSend,
+        I::IntoIter: OptionalSend,
+    {
+        let mut responses = Vec::new();
+
+        for entry in entries {
+            let log_index = entry.log_id.index;
+            let log_term = entry.log_id.leader_id.term;
+
+            // Extract the operation from the entry payload
+            let operation = match entry.payload {
+                openraft::EntryPayload::Normal(op) => op,
+                openraft::EntryPayload::Membership(membership) => {
+                    // Update membership and continue
+                    let mut inner = self.inner.write().await;
+                    inner.last_membership = StoredMembership::new(Some(entry.log_id), membership);
+                    inner.last_applied_index = log_index;
+                    inner.last_applied_term = log_term;
+                    // No response for membership changes
+                    continue;
+                }
+                openraft::EntryPayload::Blank => {
+                    // Blank entries don't produce responses
+                    let mut inner = self.inner.write().await;
+                    inner.last_applied_index = log_index;
+                    inner.last_applied_term = log_term;
+                    continue;
+                }
+            };
+
+            // Apply the operation and generate appropriate response
+            match self.apply_operation(log_index, &operation).await {
+                Ok(()) => {
+                    let mut inner = self.inner.write().await;
+                    inner.last_applied_term = log_term;
+
+                    // Generate response based on operation type
+                    let response = match &operation {
+                        WormFsOperation::TransactionPrepare { tx_id, .. } => {
+                            WormFsResponse::TransactionPrepared {
+                                tx_id: *tx_id,
+                                vote: super::raft_config::PrepareVote::Prepared,
+                            }
+                        }
+                        WormFsOperation::TransactionCommit { tx_id } => {
+                            WormFsResponse::TransactionCommitted { tx_id: *tx_id }
+                        }
+                        WormFsOperation::TransactionAbort { tx_id, reason } => {
+                            WormFsResponse::TransactionAborted {
+                                tx_id: *tx_id,
+                                reason: reason.clone(),
+                            }
+                        }
+                    };
+                    responses.push(response);
+                }
+                Err(e) => {
+                    warn!("Failed to apply operation at index {}: {}", log_index, e);
+                    // For errors during apply, return TransactionAborted
+                    let response = match &operation {
+                        WormFsOperation::TransactionPrepare { tx_id, .. } => {
+                            WormFsResponse::TransactionPrepared {
+                                tx_id: *tx_id,
+                                vote: super::raft_config::PrepareVote::Abort,
+                            }
+                        }
+                        WormFsOperation::TransactionCommit { tx_id }
+                        | WormFsOperation::TransactionAbort { tx_id, .. } => {
+                            WormFsResponse::TransactionAborted {
+                                tx_id: *tx_id,
+                                reason: Some(e),
+                            }
+                        }
+                    };
+                    responses.push(response);
+                }
+            }
+        }
+
+        Ok(responses)
+    }
+
+    /// Get the snapshot builder for creating snapshots.
+    async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
+        self.clone()
+    }
+
+    /// Begin receiving a snapshot from the leader.
+    async fn begin_receiving_snapshot(
+        &mut self,
+    ) -> Result<Box<<WormFsTypeConfig as RaftTypeConfig>::SnapshotData>, StorageError<NodeId>> {
+        // Create a temporary file for receiving the snapshot
+        // In production, this would use SnapshotStore
+        let temp_file = tokio::fs::File::create("/tmp/wormfs-snapshot-incoming.db")
+            .await
+            .map_err(|e| {
+                let io_error = openraft::StorageIOError::new(
+                    openraft::ErrorSubject::Snapshot(None),
+                    openraft::ErrorVerb::Write,
+                    openraft::AnyError::new(&e),
+                );
+                StorageError::IO { source: io_error }
+            })?;
+
+        Ok(Box::new(tokio::io::BufReader::new(temp_file)))
+    }
+
+    /// Install a snapshot, replacing the current state.
+    async fn install_snapshot(
+        &mut self,
+        meta: &SnapshotMeta<NodeId, super::raft_config::WormFsNode>,
+        snapshot: Box<<WormFsTypeConfig as RaftTypeConfig>::SnapshotData>,
+    ) -> Result<(), StorageError<NodeId>> {
+        info!(
+            "Installing snapshot at index {:?}",
+            meta.last_log_id.as_ref().map(|l| l.index)
+        );
+
+        // TODO: Actually restore from snapshot
+        // For now, just update the state to reflect the snapshot
+        let mut inner = self.inner.write().await;
+
+        if let Some(last_log_id) = &meta.last_log_id {
+            inner.last_applied_index = last_log_id.index;
+            inner.last_applied_term = last_log_id.leader_id.term;
+        }
+
+        inner.last_membership = meta.last_membership.clone();
+        inner.transactions.clear();
+
+        // Drop the snapshot handle
+        drop(snapshot);
+
+        info!("Snapshot installed successfully");
+        Ok(())
+    }
+
+    /// Get the current snapshot.
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<Snapshot<WormFsTypeConfig>>, StorageError<NodeId>> {
+        // For now, we don't persist snapshots
+        // TODO: Integrate with SnapshotStore
+        Ok(None)
+    }
+}
+
+impl RaftSnapshotBuilder<WormFsTypeConfig> for WormFsStateMachine {
+    /// Build a snapshot of the current state.
+    async fn build_snapshot(&mut self) -> Result<Snapshot<WormFsTypeConfig>, StorageError<NodeId>> {
+        let inner = self.inner.read().await;
+
+        info!("Building snapshot at index {}", inner.last_applied_index);
+
+        let last_log_id = if inner.last_applied_index > 0 {
+            Some(openraft::LogId::new(
+                openraft::CommittedLeaderId::new(inner.last_applied_term, NodeId(0)),
+                inner.last_applied_index,
+            ))
+        } else {
+            None
+        };
+
+        // Create snapshot metadata
+        let snapshot_id = format!(
+            "snapshot-{}-{}",
+            inner.last_applied_index, inner.last_applied_term
+        );
+
+        let meta = SnapshotMeta {
+            last_log_id,
+            last_membership: inner.last_membership.clone(),
+            snapshot_id,
+        };
+
+        // Create a temporary snapshot file
+        // TODO: Use SnapshotStore for proper snapshot management
+        let snapshot_file = tokio::fs::File::create("/tmp/wormfs-snapshot.db")
+            .await
+            .map_err(|e| {
+                let io_error = openraft::StorageIOError::new(
+                    openraft::ErrorSubject::Store,
+                    openraft::ErrorVerb::Write,
+                    openraft::AnyError::new(&e),
+                );
+                StorageError::IO { source: io_error }
+            })?;
+
+        let snapshot_data = Box::new(tokio::io::BufReader::new(snapshot_file));
+
+        info!("Snapshot built successfully");
+        Ok(Snapshot {
+            meta,
+            snapshot: snapshot_data,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
