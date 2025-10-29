@@ -623,6 +623,52 @@ impl StorageRaftMember for StorageRaftMemberImpl {
 
         receiver
     }
+
+    async fn handle_raft_rpc(&self, request: Vec<u8>) -> Result<Vec<u8>, Error> {
+        use super::raft_member::{RaftRpcMessage, RaftRpcResponse};
+
+        // Deserialize the incoming RPC request
+        let rpc_message: RaftRpcMessage = bincode::deserialize(&request)
+            .map_err(|e| Error::RaftError(format!("Failed to deserialize Raft RPC: {:?}", e)))?;
+
+        // Handle the RPC based on its type by calling the appropriate Raft method
+        let response = match rpc_message {
+            RaftRpcMessage::Vote(vote_req) => {
+                let resp = self
+                    .inner
+                    .raft
+                    .vote(vote_req)
+                    .await
+                    .map_err(|e| Error::RaftError(format!("Vote RPC failed: {:?}", e)))?;
+                RaftRpcResponse::Vote(resp)
+            }
+            RaftRpcMessage::AppendEntries(append_req) => {
+                let resp = self
+                    .inner
+                    .raft
+                    .append_entries(append_req)
+                    .await
+                    .map_err(|e| Error::RaftError(format!("AppendEntries RPC failed: {:?}", e)))?;
+                RaftRpcResponse::AppendEntries(resp)
+            }
+            RaftRpcMessage::InstallSnapshot(snapshot_req) => {
+                let resp = self
+                    .inner
+                    .raft
+                    .install_snapshot(snapshot_req)
+                    .await
+                    .map_err(|e| {
+                        Error::RaftError(format!("InstallSnapshot RPC failed: {:?}", e))
+                    })?;
+                RaftRpcResponse::InstallSnapshot(resp)
+            }
+        };
+
+        // Serialize the response
+        bincode::serialize(&response).map_err(|e| {
+            Error::RaftError(format!("Failed to serialize Raft RPC response: {:?}", e))
+        })
+    }
 }
 
 #[cfg(test)]

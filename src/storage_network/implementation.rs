@@ -1473,16 +1473,28 @@ impl super::StorageNetworkInner {
         };
         debug!("Received Raft {} RPC", rpc_type);
 
-        // TODO: Forward to registered Raft instance
-        // The wiring between StorageNetwork and StorageRaftMember needs to be completed.
-        // Options:
-        // 1. Add a RaftRequestHandler trait object to InnerState that can be registered
-        // 2. Use a callback/closure mechanism
-        // 3. Use a channel to send requests to StorageRaftMember
+        // TODO: Forward to registered Raft instance via handle_raft_rpc()
         //
-        // For now, return "not implemented" error
+        // StorageRaftMember now has a handle_raft_rpc() method that can process these RPCs.
+        // To complete the wiring:
+        //
+        // 1. Add a field to InnerState:
+        //    `raft_handler: Arc<RwLock<Option<Arc<dyn StorageRaftMember<...>>>>>`
+        //
+        // 2. Add a registration method to StorageNetworkHandle:
+        //    `register_raft_handler(&self, handler: Arc<dyn StorageRaftMember<...>>)`
+        //
+        // 3. In this function, call:
+        //    `if let Some(handler) = self.state.raft_handler.read().await.as_ref() {`
+        //    `    return Ok(handler.handle_raft_rpc(request_bytes).await?);`
+        //    `}`
+        //
+        // 4. Update initialization flow to call register_raft_handler() after creating
+        //    both StorageNetwork and StorageRaftMember.
+        //
+        // For now, return "not implemented" error until wiring is completed.
         warn!(
-            "Raft {} RPC handler not yet wired up - need to integrate StorageRaftMember",
+            "Raft {} RPC handler not yet wired up - need to call register_raft_handler()",
             rpc_type
         );
 

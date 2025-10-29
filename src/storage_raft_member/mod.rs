@@ -270,4 +270,25 @@ pub trait StorageRaftMember: Send + Sync {
         &self,
         filter: Option<Vec<MetadataChangeType>>,
     ) -> tokio::sync::mpsc::UnboundedReceiver<MetadataChangeEvent>;
+
+    /// Handle an incoming Raft RPC from a remote node.
+    ///
+    /// This method is called by StorageNetwork when it receives a Raft RPC over libp2p.
+    /// It forwards the RPC to the underlying OpenRaft instance for processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The Raft RPC request (Vote, AppendEntries, or InstallSnapshot)
+    ///
+    /// # Returns
+    ///
+    /// The Raft RPC response to send back to the requesting node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The RPC cannot be deserialized
+    /// - The Raft instance rejects the RPC
+    /// - Internal processing fails
+    async fn handle_raft_rpc(&self, request: Vec<u8>) -> Result<Vec<u8>, Error>;
 }
