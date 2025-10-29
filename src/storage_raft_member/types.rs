@@ -10,7 +10,19 @@ use thiserror::Error;
 ///
 /// NodeId is used to identify members of the Raft cluster and track
 /// cluster membership changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct NodeId(pub u64);
 
 impl NodeId {
@@ -22,6 +34,12 @@ impl NodeId {
     /// Get the inner u64 value.
     pub fn as_u64(&self) -> u64 {
         self.0
+    }
+}
+
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Node({})", self.0)
     }
 }
 
@@ -86,6 +104,46 @@ pub struct Config {
 
     /// Timeout for new leader to recover in-flight transactions after election
     pub transaction_recovery_timeout: Duration,
+}
+
+impl Default for Config {
+    /// Create a default Raft configuration with values optimized for LAN deployments.
+    ///
+    /// These defaults are based on the design document (Section 2.4) and provide:
+    /// - Fast leader election (<3 seconds)
+    /// - Low-latency replication (<50ms)
+    /// - Reasonable snapshot thresholds
+    /// - Conservative transaction settings
+    fn default() -> Self {
+        Self {
+            // Election Configuration (LAN-optimized)
+            heartbeat_interval: Duration::from_millis(250),
+            election_timeout_min: Duration::from_millis(1000),
+            election_timeout_max: Duration::from_millis(2000),
+
+            // Log Replication Configuration
+            max_payload_entries: 1000,
+            max_in_flight_append_entries: 10,
+            replication_lag_threshold: 100,
+            max_uncommitted_entries: 10000,
+
+            // Snapshot Configuration
+            snapshot_time_threshold: Duration::from_secs(24 * 3600), // 24 hours
+            snapshot_log_size_threshold: 10 * 1024 * 1024,           // 10 MB
+            enable_snapshot_compression: true,
+            snapshot_compression_level: 3,
+
+            // Read Consistency Configuration
+            enable_lease_based_reads: false, // Not yet implemented
+            lease_duration: Duration::from_secs(10),
+            max_read_staleness: Duration::from_secs(120),
+
+            // Transaction Configuration
+            default_transaction_timeout: Duration::from_secs(300), // 5 minutes
+            max_concurrent_transactions: 100,
+            transaction_recovery_timeout: Duration::from_secs(60),
+        }
+    }
 }
 
 /// Errors that can occur during Raft operations.
@@ -187,11 +245,11 @@ pub struct RaftMetrics {
 // ============================================================================
 
 /// Transaction ID for two-phase commit coordination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TxId(pub u64);
 
 /// Operations that can be proposed through Raft consensus.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum WormFsOperation {
     /// Prepare phase of two-phase commit transaction
     TransactionPrepare {
@@ -207,7 +265,7 @@ pub enum WormFsOperation {
 }
 
 /// Metadata operations that can be proposed through Raft.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum MetadataOperation {
     /// Create a new file
     FileCreate {
@@ -259,7 +317,7 @@ pub enum MetadataOperation {
 }
 
 /// Command operations that can be proposed through Raft.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CommandOperation {
     /// Create a snapshot
     CreateSnapshot { snapshot_id: u64, index: u64 },
@@ -278,6 +336,7 @@ pub enum CommandOperation {
 // Metadata Change Subscription Types
 // ============================================================================
 
+#[derive(Debug, Clone)]
 pub struct MetadataChangeEvent {
     pub committed_at: SystemTime,
     pub log_index: u64,
@@ -375,27 +434,27 @@ pub trait MetadataChangeSubscriber: Send + Sync {
 // ============================================================================
 
 /// File identifier (placeholder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FileId(pub u64);
 
 /// Stripe identifier (placeholder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct StripeId(pub u64);
 
 /// Chunk identifier (placeholder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ChunkId(pub u64);
 
 /// Disk identifier (placeholder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct DiskId(pub u64);
 
 /// Chunk index within a stripe (placeholder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChunkIndex(pub u32);
 
 /// File metadata (placeholder).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileMetadata {
     /// File size in bytes
     pub size: u64,
@@ -408,7 +467,7 @@ pub struct FileMetadata {
 }
 
 /// Storage policy for erasure coding and replication (placeholder).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoragePolicy {
     /// Data chunks per stripe
     pub data_chunks: u32,
