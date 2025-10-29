@@ -510,30 +510,20 @@ pub trait MetadataChangeSubscriber: Send + Sync {
 }
 
 // ============================================================================
-// Placeholder types (to be defined in appropriate modules)
+// Re-export types from other modules
 // ============================================================================
 
-/// File identifier (placeholder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct FileId(pub u64);
+// Re-export ID types from file_store
+pub use crate::file_store::types::{ChunkId, DiskId, FileId, NodeId as FileStoreNodeId, StripeId};
 
-/// Stripe identifier (placeholder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct StripeId(pub u64);
-
-/// Chunk identifier (placeholder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct ChunkId(pub u64);
-
-/// Disk identifier (placeholder).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct DiskId(pub u64);
-
-/// Chunk index within a stripe (placeholder).
+/// Chunk index within a stripe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChunkIndex(pub u32);
 
-/// File metadata (placeholder).
+/// File metadata (simplified for Raft operations).
+///
+/// This is a serializable subset of metadata_store::FileMetadata
+/// used for Raft log entries.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileMetadata {
     /// File size in bytes
@@ -546,7 +536,23 @@ pub struct FileMetadata {
     pub mode: u32,
 }
 
-/// Storage policy for erasure coding and replication (placeholder).
+impl From<FileMetadata> for crate::metadata_store::FileMetadata {
+    fn from(fm: FileMetadata) -> Self {
+        crate::metadata_store::FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
+            size: fm.size,
+            permissions: fm.mode,
+            uid: 0, // Default values
+            gid: 0,
+            created_at: fm.created,
+            modified_at: fm.modified,
+            accessed_at: fm.modified,
+            target: None,
+        }
+    }
+}
+
+/// Storage policy for erasure coding and replication.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoragePolicy {
     /// Data chunks per stripe
