@@ -300,7 +300,8 @@ impl StorageRaftMember for StorageRaftMemberImpl {
 
         // Create the adapters
         let log_storage = RaftLogStorageAdapter::new(log_store);
-        let state_machine = WormFsStateMachine::new(metadata_store);
+        let state_machine =
+            WormFsStateMachine::new(metadata_store, config.snapshot_directory.clone());
         let network_factory = WormFsNetworkFactory::new(storage_network);
 
         // Convert our Config to OpenRaft's config

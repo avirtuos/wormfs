@@ -115,6 +115,9 @@ pub struct Config {
     /// Path to the metadata database
     pub metadata_db_path: PathBuf,
 
+    /// Directory for storing Raft snapshots
+    pub snapshot_directory: PathBuf,
+
     /// Network address for this node (for peer communication)
     pub network_address: SocketAddr,
 
@@ -166,6 +169,7 @@ impl std::fmt::Debug for Config {
             )
             .field("transaction_log_path", &self.transaction_log_path)
             .field("metadata_db_path", &self.metadata_db_path)
+            .field("snapshot_directory", &self.snapshot_directory)
             .field("network_address", &self.network_address)
             .field("storage_network", &self.storage_network.is_some())
             .finish()
@@ -212,6 +216,7 @@ impl Default for Config {
             // Storage Dependencies - placeholders that must be overridden
             transaction_log_path: PathBuf::from("/tmp/wormfs/tx_log.db"),
             metadata_db_path: PathBuf::from("/tmp/wormfs/metadata.db"),
+            snapshot_directory: PathBuf::from("/tmp/wormfs/snapshots"),
             network_address: SocketAddr::from(([127, 0, 0, 1], 5000)),
             storage_network: None, // Must be set before calling new()
         }
