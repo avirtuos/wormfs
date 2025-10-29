@@ -84,15 +84,17 @@
 
 pub mod implementation;
 pub mod log_storage;
-pub mod network_adapter;
+pub mod network_factory;
 pub mod raft_config;
+pub mod raft_member;
 pub mod state_machine;
 pub mod types;
 
 use async_trait::async_trait;
 pub use implementation::StorageRaftMemberImpl;
 pub use log_storage::RaftLogStorageAdapter;
-pub use network_adapter::{NetworkAdapterConfig, RaftNetworkAdapter};
+pub use network_factory::WormFsNetworkFactory;
+pub use raft_member::RaftMember;
 pub use state_machine::WormFsStateMachine;
 use std::net::SocketAddr;
 pub use types::{
