@@ -431,16 +431,43 @@ impl StorageRaftMember for StorageRaftMemberImpl {
 
     async fn propose_operation(
         &self,
-        _operation: Self::Operation,
+        operation: Self::Operation,
     ) -> Result<Self::OperationResult, Error> {
-        // Check if this node is the leader
-        if !self.is_leader() {
-            let leader = self.inner.current_leader.read().await;
-            return Err(Error::NotLeader { leader: *leader });
-        }
+        info!(
+            "Proposing operation through Raft for node {:?}",
+            self.inner.node_id
+        );
 
-        // This will be implemented in the next phase with full 2PC logic
-        todo!("StorageRaftMemberImpl::propose_operation will be implemented with 2PC logic")
+        // Submit the operation to Raft for replication and consensus
+        let response = self.inner.raft.client_write(operation).await.map_err(|e| {
+            // Convert OpenRaft errors to our Error type
+            match e {
+                openraft::error::RaftError::APIError(api_err) => {
+                    use openraft::error::ClientWriteError;
+                    match api_err {
+                        ClientWriteError::ForwardToLeader(forward) => Error::NotLeader {
+                            leader: forward.leader_id,
+                        },
+                        ClientWriteError::ChangeMembershipError(err) => {
+                            Error::MembershipChangeFailed(format!("{:?}", err))
+                        }
+                    }
+                }
+                openraft::error::RaftError::Fatal(fatal) => {
+                    Error::RaftError(format!("Fatal Raft error: {:?}", fatal))
+                }
+            }
+        })?;
+
+        info!(
+            "Operation committed at log_id: {:?} for node {:?}",
+            response.log_id, self.inner.node_id
+        );
+
+        // The operation has been committed through Raft consensus and applied to the state machine
+        // For now, we just return success. In the future, we could return more detailed information
+        // from the response.data field if needed.
+        Ok(())
     }
 
     fn is_leader(&self) -> bool {
@@ -454,36 +481,114 @@ impl StorageRaftMember for StorageRaftMemberImpl {
     }
 
     async fn trigger_snapshot(&self) -> Result<(), Error> {
-        // Check if this node is the leader
-        if !self.is_leader() {
-            let leader = self.inner.current_leader.read().await;
-            return Err(Error::NotLeader { leader: *leader });
-        }
+        info!("Triggering snapshot for node {:?}", self.inner.node_id);
 
-        // This will be implemented in the next phase
-        todo!("StorageRaftMemberImpl::trigger_snapshot will be implemented with snapshot coordination")
+        // Trigger OpenRaft to create a snapshot
+        // Note: OpenRaft handles the snapshot creation through the state machine's
+        // build_snapshot() method, which we've already implemented
+        self.inner
+            .raft
+            .trigger()
+            .snapshot()
+            .await
+            .map_err(|e| Error::SnapshotFailed(format!("Failed to trigger snapshot: {:?}", e)))?;
+
+        info!(
+            "Snapshot trigger completed for node {:?}",
+            self.inner.node_id
+        );
+        Ok(())
     }
 
-    async fn add_node(&self, _node_id: NodeId, _address: SocketAddr) -> Result<(), Error> {
+    async fn add_node(&self, node_id: NodeId, address: SocketAddr) -> Result<(), Error> {
+        info!(
+            "Adding node {:?} with address {:?} to cluster",
+            node_id, address
+        );
+
         // Check if this node is the leader
         if !self.is_leader() {
             let leader = self.inner.current_leader.read().await;
             return Err(Error::NotLeader { leader: *leader });
         }
 
-        // This will be implemented in the next phase
-        todo!("StorageRaftMemberImpl::add_node will be implemented with membership changes")
+        // Create node information
+        let node = super::raft_config::WormFsNode {
+            peer_id: address.to_string(), // Use address as peer_id for now
+            metadata: Some(super::raft_config::NodeMetadata {
+                name: Some(format!("node-{}", node_id.as_u64())),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            }),
+        };
+
+        // Add the node as a learner first, then promote to voter
+        // Step 1: Add as learner
+        let mut nodes = std::collections::BTreeMap::new();
+        nodes.insert(node_id, node);
+
+        self.inner
+            .raft
+            .change_membership(openraft::ChangeMembers::AddNodes(nodes.clone()), false)
+            .await
+            .map_err(|e| {
+                Error::MembershipChangeFailed(format!("Failed to add node as learner: {:?}", e))
+            })?;
+
+        // Step 2: Promote to voter
+        let mut voter_ids = std::collections::BTreeSet::new();
+        voter_ids.insert(node_id);
+
+        self.inner
+            .raft
+            .change_membership(openraft::ChangeMembers::AddVoterIds(voter_ids), true)
+            .await
+            .map_err(|e| {
+                Error::MembershipChangeFailed(format!("Failed to promote node to voter: {:?}", e))
+            })?;
+
+        info!("Successfully added node {:?} to cluster", node_id);
+        Ok(())
     }
 
-    async fn remove_node(&self, _node_id: NodeId) -> Result<(), Error> {
+    async fn remove_node(&self, node_id: NodeId) -> Result<(), Error> {
+        info!("Removing node {:?} from cluster", node_id);
+
         // Check if this node is the leader
         if !self.is_leader() {
             let leader = self.inner.current_leader.read().await;
             return Err(Error::NotLeader { leader: *leader });
         }
 
-        // This will be implemented in the next phase
-        todo!("StorageRaftMemberImpl::remove_node will be implemented with membership changes")
+        // Remove the node from voters first, then from learners
+        // Step 1: Remove from voters
+        let mut voter_ids = std::collections::BTreeSet::new();
+        voter_ids.insert(node_id);
+
+        self.inner
+            .raft
+            .change_membership(openraft::ChangeMembers::RemoveVoters(voter_ids), true)
+            .await
+            .map_err(|e| {
+                Error::MembershipChangeFailed(format!("Failed to remove node from voters: {:?}", e))
+            })?;
+
+        // Step 2: Remove from nodes
+        let mut node_ids = std::collections::BTreeSet::new();
+        node_ids.insert(node_id);
+
+        self.inner
+            .raft
+            .change_membership(openraft::ChangeMembers::RemoveNodes(node_ids), true)
+            .await
+            .map_err(|e| {
+                Error::MembershipChangeFailed(format!(
+                    "Failed to remove node from cluster: {:?}",
+                    e
+                ))
+            })?;
+
+        info!("Successfully removed node {:?} from cluster", node_id);
+        Ok(())
     }
 
     async fn step_down(&self) -> Result<(), Error> {
