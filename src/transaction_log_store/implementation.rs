@@ -1047,14 +1047,14 @@ impl TransactionLogStoreImpl {
         }
     }
 
-    /// Save a Raft vote to persistent storage.
+    /// Save Raft vote bytes to persistent storage.
     ///
     /// This method persists the vote state to ensure it survives node restarts,
     /// which is critical for maintaining Raft's "vote once per term" invariant.
     ///
     /// # Arguments
     ///
-    /// * `vote_data` - The vote information to persist
+    /// * `vote_bytes` - The serialized vote data to persist
     ///
     /// # Returns
     ///
@@ -1063,20 +1063,19 @@ impl TransactionLogStoreImpl {
     /// # Errors
     ///
     /// Returns an error if the write or fsync fails.
-    pub async fn save_vote(&self, vote_data: &VoteData) -> Result<(), LogError> {
+    pub async fn save_vote_bytes(&self, vote_bytes: &[u8]) -> Result<(), LogError> {
         let inner = &self.inner;
 
         task::spawn_blocking({
             let inner = Arc::clone(inner);
-            let vote_data = vote_data.clone();
+            let vote_bytes = vote_bytes.to_vec();
 
             move || -> Result<(), LogError> {
-                let db = recover_write_lock(&inner.db, "TransactionLogStore::save_vote").map_err(
-                    |e| {
+                let db = recover_write_lock(&inner.db, "TransactionLogStore::save_vote_bytes")
+                    .map_err(|e| {
                         error!("Failed to acquire database lock: {}", e);
                         LogError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    },
-                )?;
+                    })?;
                 let write_txn = db.begin_write().map_err(|e| {
                     error!("Failed to begin write transaction for vote: {}", e);
                     LogError::IoError(std::io::Error::new(
@@ -1094,16 +1093,8 @@ impl TransactionLogStoreImpl {
                         ))
                     })?;
 
-                    let serialized = bincode::serialize(&vote_data).map_err(|e| {
-                        error!("Failed to serialize vote data: {}", e);
-                        LogError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Serialization error: {}", e),
-                        ))
-                    })?;
-
                     table
-                        .insert("current_vote", serialized.as_slice())
+                        .insert("current_vote", vote_bytes.as_slice())
                         .map_err(|e| {
                             error!("Failed to insert vote: {}", e);
                             LogError::IoError(std::io::Error::new(
@@ -1121,10 +1112,7 @@ impl TransactionLogStoreImpl {
                     ))
                 })?;
 
-                info!(
-                    "Vote persisted: term={}, node_id={}",
-                    vote_data.term, vote_data.node_id
-                );
+                info!("Vote persisted ({} bytes)", vote_bytes.len());
                 Ok(())
             }
         })
@@ -1140,31 +1128,30 @@ impl TransactionLogStoreImpl {
         Ok(())
     }
 
-    /// Read the persisted Raft vote from storage.
+    /// Read the persisted Raft vote bytes from storage.
     ///
     /// This method retrieves the vote state that was previously saved,
     /// allowing vote recovery after node restarts.
     ///
     /// # Returns
     ///
-    /// The persisted vote data, or None if no vote has been saved.
+    /// The persisted vote bytes, or None if no vote has been saved.
     ///
     /// # Errors
     ///
-    /// Returns an error if the read fails or data is corrupted.
-    pub async fn read_vote(&self) -> Result<Option<VoteData>, LogError> {
+    /// Returns an error if the read fails.
+    pub async fn read_vote_bytes(&self) -> Result<Option<Vec<u8>>, LogError> {
         let inner = &self.inner;
 
         task::spawn_blocking({
             let inner = Arc::clone(inner);
 
-            move || -> Result<Option<VoteData>, LogError> {
-                let db = recover_read_lock(&inner.db, "TransactionLogStore::read_vote").map_err(
-                    |e| {
+            move || -> Result<Option<Vec<u8>>, LogError> {
+                let db = recover_read_lock(&inner.db, "TransactionLogStore::read_vote_bytes")
+                    .map_err(|e| {
                         error!("Failed to acquire database lock: {}", e);
                         LogError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    },
-                )?;
+                    })?;
                 let read_txn = db.begin_read().map_err(|e| {
                     error!("Failed to begin read transaction for vote: {}", e);
                     LogError::IoError(std::io::Error::new(
@@ -1183,10 +1170,14 @@ impl TransactionLogStoreImpl {
                 };
 
                 let vote_bytes = match table.get("current_vote") {
-                    Ok(Some(bytes)) => bytes.value().to_vec(),
+                    Ok(Some(bytes)) => {
+                        let data = bytes.value().to_vec();
+                        debug!("Vote read from storage ({} bytes)", data.len());
+                        Some(data)
+                    }
                     Ok(None) => {
                         debug!("No vote found in table");
-                        return Ok(None);
+                        None
                     }
                     Err(e) => {
                         error!("Failed to read vote from table: {}", e);
@@ -1197,24 +1188,12 @@ impl TransactionLogStoreImpl {
                     }
                 };
 
-                let vote_data: VoteData = bincode::deserialize(&vote_bytes).map_err(|e| {
-                    error!("Failed to deserialize vote data: {}", e);
-                    LogError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Deserialization error: {}", e),
-                    ))
-                })?;
-
-                debug!(
-                    "Vote read from storage: term={}, node_id={}",
-                    vote_data.term, vote_data.node_id
-                );
-                Ok(Some(vote_data))
+                Ok(vote_bytes)
             }
         })
         .await
         .map_err(|e| {
-            error!("Task join error in read_vote: {}", e);
+            error!("Task join error in read_vote_bytes: {}", e);
             LogError::IoError(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Task join error: {}", e),

@@ -15,8 +15,8 @@
 //! - A node doesn't vote twice in the same term
 //! - Vote survives node restarts
 //!
-//! Currently, votes are stored in memory. A future enhancement will persist votes to a
-//! separate redb table within the TransactionLogStore database for true durability.
+//! Votes are persisted to the VOTE_TABLE in TransactionLogStore's redb database,
+//! providing true durability across node restarts and maintaining Raft's safety guarantees.
 
 use openraft::storage::{LogFlushed, RaftLogReader, RaftLogStorage};
 use openraft::{
@@ -27,18 +27,13 @@ use std::fmt::Debug;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::transaction_log_store::{LogError, TransactionLogStore, TransactionLogStoreImpl};
 
 use super::raft_config::WormFsTypeConfig;
 use super::types::{NodeId, WormFsOperation};
-
-/// Vote storage (in-memory for now, will be persisted to redb in future enhancement)
-#[derive(Debug, Clone)]
-struct VoteState {
-    vote: Option<Vote<NodeId>>,
-}
+use crate::transaction_log_store::VoteData;
 
 /// Adapter that implements OpenRaft's RaftLogStorage trait using TransactionLogStore.
 ///
@@ -48,8 +43,6 @@ struct VoteState {
 pub struct RaftLogStorageAdapter {
     /// The underlying transaction log store
     log_store: TransactionLogStoreImpl,
-    /// Current vote state (in-memory for now)
-    vote_state: Arc<RwLock<VoteState>>,
 }
 
 impl RaftLogStorageAdapter {
@@ -59,10 +52,34 @@ impl RaftLogStorageAdapter {
     ///
     /// * `log_store` - The transaction log store to adapt
     pub fn new(log_store: TransactionLogStoreImpl) -> Self {
-        Self {
-            log_store,
-            vote_state: Arc::new(RwLock::new(VoteState { vote: None })),
-        }
+        Self { log_store }
+    }
+
+    /// Convert OpenRaft's Vote to VoteData for persistence.
+    ///
+    /// We serialize the entire Vote object as it contains all necessary state
+    /// and OpenRaft's Vote type implements Serialize/Deserialize.
+    fn vote_to_bytes(vote: &Vote<NodeId>) -> Result<Vec<u8>, StorageError<NodeId>> {
+        bincode::serialize(vote).map_err(|e| {
+            error!("Failed to serialize vote: {:?}", e);
+            StorageError::IO {
+                source: StorageIOError::new(
+                    ErrorSubject::Vote,
+                    ErrorVerb::Write,
+                    AnyError::new(&e),
+                ),
+            }
+        })
+    }
+
+    /// Convert bytes back to OpenRaft's Vote.
+    fn bytes_to_vote(bytes: &[u8]) -> Result<Vote<NodeId>, StorageError<NodeId>> {
+        bincode::deserialize(bytes).map_err(|e| {
+            error!("Failed to deserialize vote: {:?}", e);
+            StorageError::IO {
+                source: StorageIOError::new(ErrorSubject::Vote, ErrorVerb::Read, AnyError::new(&e)),
+            }
+        })
     }
 
     /// Convert a WormFS LogEntry to an OpenRaft Entry.
@@ -323,20 +340,57 @@ impl RaftLogStorage<WormFsTypeConfig> for RaftLogStorageAdapter {
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
         info!("Saving vote: {:?}", vote);
 
-        let mut vote_state = self.vote_state.write().await;
-        vote_state.vote = Some(vote.clone());
+        let vote_bytes = Self::vote_to_bytes(vote)?;
 
-        // TODO: Persist to redb table for true durability
-        // For now, storing in memory is sufficient for testing
+        // Create VoteData wrapper for storage
+        let vote_data = VoteData {
+            term: 0, // These fields are unused when we store raw bytes
+            node_id: 0,
+            committed: false,
+        };
 
+        // Actually, let me store the bytes directly in the VOTE_TABLE
+        // by modifying how we call save_vote
+        self.log_store
+            .save_vote_bytes(&vote_bytes)
+            .await
+            .map_err(|e| {
+                error!("Failed to persist vote: {:?}", e);
+                StorageError::IO {
+                    source: StorageIOError::new(
+                        ErrorSubject::Vote,
+                        ErrorVerb::Write,
+                        AnyError::new(&e),
+                    ),
+                }
+            })?;
+
+        info!("Vote persisted successfully");
         Ok(())
     }
 
     /// Read the hard state (vote) from persistent storage.
     async fn read_vote(&mut self) -> Result<Option<Vote<NodeId>>, StorageError<NodeId>> {
-        let vote_state = self.vote_state.read().await;
-        debug!("Reading vote: {:?}", vote_state.vote);
-        Ok(vote_state.vote.clone())
+        let vote_bytes = self.log_store.read_vote_bytes().await.map_err(|e| {
+            error!("Failed to read persisted vote: {:?}", e);
+            StorageError::IO {
+                source: StorageIOError::new(ErrorSubject::Vote, ErrorVerb::Read, AnyError::new(&e)),
+            }
+        })?;
+
+        let vote = match vote_bytes {
+            Some(bytes) => {
+                let v = Self::bytes_to_vote(&bytes)?;
+                debug!("Loaded vote from storage: {:?}", v);
+                Some(v)
+            }
+            None => {
+                debug!("No vote found in storage");
+                None
+            }
+        };
+
+        Ok(vote)
     }
 
     /// Append log entries to the log.
