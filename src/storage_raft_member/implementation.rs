@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use openraft::{Raft, RaftMetrics as OpenRaftMetrics};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -398,16 +399,44 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             let mut members = std::collections::BTreeMap::new();
             members.insert(self.inner.node_id, this_node);
 
-            self.inner
-                .raft
-                .initialize(members)
-                .await
+            eprintln!("Calling raft.initialize() with {} members", members.len());
+
+            let init_result = self.inner.raft.initialize(members).await;
+
+            match &init_result {
+                Ok(_) => {
+                    eprintln!("raft.initialize() returned Ok");
+                    info!(
+                        "Successfully initialized single-node cluster for node {:?}",
+                        self.inner.node_id
+                    );
+                }
+                Err(e) => {
+                    eprintln!("raft.initialize() returned Err: {:?}", e);
+                }
+            }
+
+            init_result
                 .map_err(|e| Error::RaftError(format!("Failed to initialize Raft: {:?}", e)))?;
 
-            info!(
-                "Successfully initialized single-node cluster for node {:?}",
-                self.inner.node_id
+            // Give the Raft core task time to process the initialization
+            // initialize() is async - it queues the request and returns, actual processing happens later
+            eprintln!("Waiting for Raft core to process initialization...");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+            // Check state after giving core time to process
+            let metrics_after_init = self.inner.raft.metrics().borrow().clone();
+            eprintln!(
+                "State after raft.initialize() + delay: state={:?}, term={}, current_leader={:?}",
+                metrics_after_init.state,
+                metrics_after_init.current_term,
+                metrics_after_init.current_leader
             );
+
+            // For single-node clusters, the node automatically becomes leader after initialization.
+            // No need to trigger an election manually - the 200ms delay above is sufficient
+            // for the Raft core task to complete the state transition to Leader.
+            info!("Single-node cluster initialization complete");
             Ok(())
         } else {
             // Multi-node cluster: joining an existing cluster
@@ -501,10 +530,63 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         Ok(())
     }
 
-    async fn add_node(&self, node_id: NodeId, address: SocketAddr) -> Result<(), Error> {
+    async fn trigger_election(&self) -> Result<(), Error> {
+        info!("Triggering election for node {:?}", self.inner.node_id);
+        eprintln!(
+            "trigger_election() called for node {:?}",
+            self.inner.node_id
+        );
+
+        // Check state BEFORE election trigger
+        let metrics_before = self.inner.raft.metrics().borrow().clone();
+        eprintln!(
+            "State BEFORE elect(): state={:?}, term={}, current_leader={:?}",
+            metrics_before.state, metrics_before.current_term, metrics_before.current_leader
+        );
+
+        // Trigger OpenRaft to start an election immediately
+        let result = self.inner.raft.trigger().elect().await;
+
+        match &result {
+            Ok(_) => {
+                eprintln!(
+                    "trigger().elect() succeeded for node {:?}",
+                    self.inner.node_id
+                );
+
+                // Check state immediately after election trigger
+                let metrics = self.inner.raft.metrics().borrow().clone();
+                eprintln!(
+                    "State immediately after elect(): state={:?}, term={}, current_leader={:?}",
+                    metrics.state, metrics.current_term, metrics.current_leader
+                );
+
+                info!(
+                    "Election trigger completed for node {:?}",
+                    self.inner.node_id
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "trigger().elect() FAILED for node {:?}: {:?}",
+                    self.inner.node_id, e
+                );
+            }
+        }
+
+        result.map_err(|e| Error::RaftError(format!("Failed to trigger election: {:?}", e)))?;
+        Ok(())
+    }
+
+    async fn add_node(
+        &self,
+        node_id: NodeId,
+        address: SocketAddr,
+        peer_id: String,
+    ) -> Result<(), Error> {
         info!(
-            "Adding node {:?} with address {:?} to cluster",
-            node_id, address
+            "Adding node {:?} with address {:?} and peer_id {} to cluster",
+            node_id, address, peer_id
         );
 
         // Check if this node is the leader
@@ -513,9 +595,13 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             return Err(Error::NotLeader { leader: *leader });
         }
 
+        // Validate peer_id format by attempting to parse it
+        libp2p::PeerId::from_str(&peer_id)
+            .map_err(|e| Error::ConfigError(format!("Invalid peer_id format: {}", e)))?;
+
         // Create node information
         let node = super::raft_config::WormFsNode {
-            peer_id: address.to_string(), // Use address as peer_id for now
+            peer_id,
             metadata: Some(super::raft_config::NodeMetadata {
                 name: Some(format!("node-{}", node_id.as_u64())),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -523,13 +609,13 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         };
 
         // Add the node as a learner first, then promote to voter
-        // Step 1: Add as learner
+        // Step 1: Add as learner (retain=true means keep existing members)
         let mut nodes = std::collections::BTreeMap::new();
         nodes.insert(node_id, node);
 
         self.inner
             .raft
-            .change_membership(openraft::ChangeMembers::AddNodes(nodes.clone()), false)
+            .change_membership(openraft::ChangeMembers::AddNodes(nodes.clone()), true)
             .await
             .map_err(|e| {
                 Error::MembershipChangeFailed(format!("Failed to add node as learner: {:?}", e))

@@ -203,6 +203,16 @@ pub trait StorageRaftMember: Send + Sync {
     /// - Coordination timeout expires
     async fn trigger_snapshot(&self) -> Result<(), Error>;
 
+    /// Manually trigger a leader election.
+    ///
+    /// This forces the node to start an election immediately, rather than waiting
+    /// for an election timeout. Useful after single-node cluster initialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the election trigger fails
+    async fn trigger_election(&self) -> Result<(), Error>;
+
     /// Add a new node to the Raft cluster.
     ///
     /// This method proposes a cluster membership change to add a new node.
@@ -212,6 +222,7 @@ pub trait StorageRaftMember: Send + Sync {
     ///
     /// * `node_id` - Identifier for the new node
     /// * `address` - Network address of the new node
+    /// * `peer_id` - libp2p PeerId of the new node (as a string)
     ///
     /// # Errors
     ///
@@ -219,7 +230,13 @@ pub trait StorageRaftMember: Send + Sync {
     /// - This node is not the leader
     /// - Node is already a member
     /// - Membership change cannot achieve consensus
-    async fn add_node(&self, node_id: NodeId, address: SocketAddr) -> Result<(), Error>;
+    /// - Invalid peer_id format
+    async fn add_node(
+        &self,
+        node_id: NodeId,
+        address: SocketAddr,
+        peer_id: String,
+    ) -> Result<(), Error>;
 
     /// Remove a node from the Raft cluster.
     ///

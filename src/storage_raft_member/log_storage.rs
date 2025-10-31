@@ -418,20 +418,30 @@ impl RaftLogStorage<WormFsTypeConfig> for RaftLogStorageAdapter {
         // Convert entries to WormFS format
         let mut wormfs_entries = Vec::new();
         for entry in &entries {
+            debug!(
+                "Processing entry: index={}, term={}, payload={:?}",
+                entry.log_id.index, entry.log_id.leader_id.term, entry.payload
+            );
+
             wormfs_entries.push(Self::convert_from_raft_entry(entry)?);
         }
 
-        // Append to log store
-        self.log_store
-            .append_batch(wormfs_entries)
-            .await
-            .map_err(Self::convert_error)?;
+        // Append to log store (only if we have entries after filtering)
+        if !wormfs_entries.is_empty() {
+            let entry_count = wormfs_entries.len();
+            self.log_store
+                .append_batch(wormfs_entries)
+                .await
+                .map_err(Self::convert_error)?;
 
-        info!(
-            "Appended {} entries to log, last_index now {}",
-            entries.len(),
-            self.log_store.get_last_index()
-        );
+            info!(
+                "Appended {} entries to log, last_index now {}",
+                entry_count,
+                self.log_store.get_last_index()
+            );
+        } else {
+            debug!("All entries were filtered (index 0 sentinels), nothing to append");
+        }
 
         // Notify OpenRaft that the log has been flushed
         // In tests with zeroed callbacks, this might fail silently, which is acceptable

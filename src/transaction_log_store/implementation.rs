@@ -527,12 +527,7 @@ impl TransactionLogStoreImpl {
             ));
         }
 
-        // Validate all indices
-        for (index, _, _) in &entries {
-            if *index == 0 {
-                return Err(LogError::InvalidIndex(*index));
-            }
-        }
+        // No validation needed - index 0 is valid in Raft (it's the initial membership entry)
 
         let start_time = std::time::Instant::now();
         let batch_size = entries.len();
