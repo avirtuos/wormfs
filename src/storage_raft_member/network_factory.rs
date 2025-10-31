@@ -69,11 +69,23 @@ impl RaftNetworkFactory<WormFsTypeConfig> for WormFsNetworkFactory {
     /// Panics if the PeerId cannot be parsed. This should not happen in practice as
     /// PeerIds are validated when nodes join the cluster.
     async fn new_client(&mut self, target: NodeId, node: &WormFsNode) -> Self::Network {
+        eprintln!(
+            "NetworkFactory::new_client called for target {:?}, peer_id={}",
+            target, node.peer_id
+        );
+
         // Parse the PeerId
-        let target_peer_id = node
-            .peer_id
-            .parse::<PeerId>()
-            .expect("Invalid PeerId in node metadata");
+        // NOTE: For single-node clusters with placeholder peer_ids, this will fail!
+        let target_peer_id = match node.peer_id.parse::<PeerId>() {
+            Ok(pid) => {
+                eprintln!("Successfully parsed PeerId: {}", pid);
+                pid
+            }
+            Err(e) => {
+                eprintln!("FATAL: Failed to parse peer_id '{}': {:?}", node.peer_id, e);
+                panic!("Invalid PeerId in node metadata: {}", e);
+            }
+        };
 
         debug!(
             "Created RaftMember for target {:?} with PeerId {}",
