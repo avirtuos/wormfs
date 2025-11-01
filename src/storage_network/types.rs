@@ -288,8 +288,8 @@ pub enum NetworkCommand {
 
     /// Register a Raft handler for processing incoming Raft RPCs
     RegisterRaftHandler {
-        /// The Raft handler to register
-        handler: std::sync::Arc<crate::storage_raft_member::StorageRaftMemberImpl>,
+        /// The Raft handler to register (trait object for flexibility)
+        handler: std::sync::Arc<dyn crate::storage_raft_member::RaftRpcHandler>,
     },
 }
 

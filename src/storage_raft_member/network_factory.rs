@@ -15,9 +15,10 @@
 
 use libp2p::PeerId;
 use openraft::network::RaftNetworkFactory;
+use std::sync::Arc;
 use tracing::debug;
 
-use crate::storage_network::StorageNetworkHandle;
+use crate::storage_network::NetworkHandleTrait;
 
 use super::raft_config::{WormFsNode, WormFsTypeConfig};
 use super::raft_member::RaftMember;
@@ -30,13 +31,13 @@ use super::types::NodeId;
 ///
 /// # Design
 ///
-/// The factory holds a shared `StorageNetworkHandle` and creates `RaftMember`
+/// The factory holds a shared network handle (via trait object) and creates `RaftMember`
 /// instances that each know their target node. All instances share the same
-/// underlying libp2p network, making this a very lightweight operation.
+/// underlying network (libp2p or stub), making this a very lightweight operation.
 #[derive(Clone)]
 pub struct WormFsNetworkFactory {
-    /// Shared handle to the storage network
-    network: StorageNetworkHandle,
+    /// Shared handle to the storage network (trait object for flexibility)
+    network: Arc<dyn NetworkHandleTrait>,
 }
 
 impl WormFsNetworkFactory {
@@ -44,8 +45,8 @@ impl WormFsNetworkFactory {
     ///
     /// # Arguments
     ///
-    /// * `network` - The storage network handle to use for all network operations
-    pub fn new(network: StorageNetworkHandle) -> Self {
+    /// * `network` - The storage network handle (trait object) to use for all network operations
+    pub fn new(network: Arc<dyn NetworkHandleTrait>) -> Self {
         Self { network }
     }
 }
