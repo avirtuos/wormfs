@@ -3,52 +3,27 @@
 //! These tests verify that StorageRaftMember works correctly in multi-node
 //! scenarios, including leader election, log replication, and failure recovery.
 //!
-//! ## Implementation Status
+//! ## Implementation Strategy
 //!
-//! **Current State**: Tests documented but awaiting network infrastructure
-//! **All tests**: Marked as `#[ignore]` pending StorageNetwork test infrastructure
+//! These tests use a stub StorageNetwork implementation (stub_storage_network.rs)
+//! that routes Raft RPCs via in-memory channels instead of real libp2p networking.
+//! This provides:
+//! - Instant, deterministic connectivity
+//! - Fast test execution
+//! - Easy simulation of network failures
+//! - No port allocation or timing issues
 //!
-//! **Blockers for tests**:
-//! - StorageRaftMember now requires valid StorageNetworkHandle in Config
-//! - StorageNetwork setup requires:
-//!   - Event loop spawn in separate thread (libp2p Swarm is !Send)
-//!   - Keypair generation for peer identity
-//!   - Port allocation and multiaddr configuration
-//!   - Peer discovery and connection coordination
-//! - For multi-node tests specifically:
-//!   - Network address resolution for add_node() calls
-//!   - Coordination of node startup sequence
-//!   - Test harness to manage multiple event loops
-//!
-//! **Test Coverage** (all pending infrastructure):
-//! - ⏳ Single-node initialization and leader election
-//! - ⏳ Vote persistence across restarts
-//! - ⏳ Multi-node cluster formation
-//! - ⏳ Leader election after failure
-//! - ⏳ Log replication verification
-//! - ⏳ Concurrent client requests
-//! - ⏳ Network partition handling
-//! - ⏳ Node restart and recovery
+//! Real network integration is tested separately in network-specific tests.
 
-use libp2p::identity;
-use std::sync::atomic::{AtomicU16, Ordering};
+mod stub_storage_network;
+
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::sleep;
 
-use wormfs::storage_network::types::{Config as NetworkConfig, PeerConfig};
-use wormfs::storage_network::{StorageNetworkFactory, StorageNetworkHandle};
+use stub_storage_network::{StubNetworkHub, StubStorageNetworkHandle};
 use wormfs::storage_raft_member::{NodeId, StorageRaftMember, StorageRaftMemberImpl};
-
-/// Global atomic counter for allocating unique port ranges for parallel test execution.
-/// Each test gets a unique base port to avoid conflicts when running in parallel.
-static PORT_ALLOCATOR: AtomicU16 = AtomicU16::new(49000);
-
-/// Allocate a unique base port for a test.
-fn allocate_test_port() -> u16 {
-    PORT_ALLOCATOR.fetch_add(1, Ordering::SeqCst)
-}
 
 /// Get timeout multiplier for CI environments.
 fn get_timeout_multiplier() -> f64 {
@@ -65,67 +40,20 @@ fn apply_timeout_multiplier(duration: Duration) -> Duration {
     duration.mul_f64(multiplier)
 }
 
-/// Helper: Create a single-node Raft instance for testing with full network infrastructure
+/// Helper: Create a single-node Raft instance for testing with stub network
 async fn create_single_node(
     node_id: u64,
-) -> Result<
-    (
-        StorageRaftMemberImpl,
-        TempDir,
-        StorageNetworkHandle,
-        std::thread::JoinHandle<()>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<(StorageRaftMemberImpl, TempDir, StubStorageNetworkHandle), Box<dyn std::error::Error>>
+{
     let temp_dir = TempDir::new()?;
     let data_dir = temp_dir.path().to_path_buf();
 
-    // Generate stable keypair from node_id seed
-    let mut seed = [0u8; 32];
-    seed[0] = node_id as u8;
-    let keypair = identity::Keypair::ed25519_from_bytes(seed)?;
+    // Create stub network hub and handle for this node
+    let hub = StubNetworkHub::new();
+    let network_handle = hub.create_handle(node_id);
+    network_handle.register().await;
 
-    // Allocate unique port for this node
-    let listen_port = allocate_test_port();
-
-    // Create minimal StorageNetwork configuration (no peers for single-node)
-    let network_config = NetworkConfig {
-        node_id: format!("raft-node-{}", node_id),
-        listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", listen_port)],
-        peers: vec![], // No peers for single-node tests
-        peer_id_store_path: data_dir.join("peer_ids.json"),
-        max_peers: 10,
-        max_connections_per_peer: 3,
-        connection_timeout: Duration::from_secs(10),
-        idle_connection_timeout: Duration::from_secs(60),
-        keep_alive_interval: Duration::from_secs(5),
-        admin_url: None,
-    };
-
-    // Create StorageNetwork instance
-    let (network_inner, network_handle) =
-        StorageNetworkFactory::create_with_keypair(network_config, keypair).await?;
-
-    // Spawn network event loop in dedicated thread
-    let network_node_id = format!("raft-node-{}", node_id);
-    let event_loop_thread = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create runtime for network event loop");
-
-        let local = tokio::task::LocalSet::new();
-        runtime.block_on(local.run_until(async move {
-            if let Err(e) = network_inner.run().await {
-                eprintln!("Network event loop error for {}: {}", network_node_id, e);
-            }
-        }));
-    });
-
-    // Give network time to start listening
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Create Raft configuration with network handle
+    // Create Raft configuration with stub network
     let raft_config = wormfs::storage_raft_member::Config {
         heartbeat_interval: Duration::from_millis(500),
         election_timeout_min: Duration::from_millis(1500),
@@ -147,100 +75,66 @@ async fn create_single_node(
         transaction_log_path: data_dir.join("raft_log.redb"),
         metadata_db_path: data_dir.join("metadata.redb"),
         snapshot_directory: data_dir.join("snapshots"),
-        network_address: format!("127.0.0.1:{}", listen_port).parse().unwrap(),
-        storage_network: Some(network_handle.clone()),
+        network_address: format!("127.0.0.1:{}", 50000 + node_id).parse().unwrap(),
+        storage_network: Some(Arc::new(network_handle.clone())),
     };
 
     // Create Raft instance
     let raft_node =
         <StorageRaftMemberImpl as StorageRaftMember>::new(NodeId(node_id), raft_config).await?;
 
-    // Register Raft handler with network
+    // Register Raft handler with stub network
     network_handle
-        .register_raft_handler(Arc::new(raft_node.clone()))
-        .await?;
+        .register_raft_handler_internal(Arc::new(raft_node.clone()))
+        .await;
 
-    Ok((raft_node, temp_dir, network_handle, event_loop_thread))
+    Ok((raft_node, temp_dir, network_handle))
 }
 
 /// Multi-node test cluster infrastructure
 ///
-/// This struct manages a multi-node Raft cluster for integration testing,
-/// including network setup, node coordination, and cleanup.
+/// This struct manages a multi-node Raft cluster for integration testing
+/// using a stub network for instant, reliable communication.
 struct RaftTestCluster {
     nodes: Vec<RaftTestNode>,
     _temp_dirs: Vec<TempDir>,
+    _hub: StubNetworkHub,
 }
 
 struct RaftTestNode {
     id: u64,
     raft: StorageRaftMemberImpl,
-    network_handle: StorageNetworkHandle,
     peer_id: String,
-    address: std::net::SocketAddr,
-    _event_loop_thread: std::thread::JoinHandle<()>,
 }
 
 impl RaftTestCluster {
     /// Create a new N-node test cluster (not yet initialized)
     async fn new(node_count: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        eprintln!(
+            "Creating {}-node test cluster with stub network",
+            node_count
+        );
+
+        // Create shared network hub for all nodes
+        let hub = StubNetworkHub::new();
+
         let mut nodes = Vec::with_capacity(node_count);
         let mut temp_dirs = Vec::with_capacity(node_count);
 
-        // Create all nodes first (they don't know about each other yet)
+        // Create nodes with stub network (simple and instant!)
         for i in 0..node_count {
             let node_id = (i + 1) as u64;
             let temp_dir = TempDir::new()?;
             let data_dir = temp_dir.path().to_path_buf();
 
-            // Generate stable keypair from node_id seed
-            let mut seed = [0u8; 32];
-            seed[0] = node_id as u8;
-            let keypair = identity::Keypair::ed25519_from_bytes(seed)?;
-            let peer_id = keypair.public().to_peer_id().to_string();
+            // Create stub network handle for this node
+            let network_handle = hub.create_handle(node_id);
+            network_handle.register().await;
 
-            // Allocate unique port for this node
-            let listen_port = allocate_test_port();
-            let address: std::net::SocketAddr = format!("127.0.0.1:{}", listen_port).parse()?;
+            // Get the real PeerId for this node
+            let peer_id = network_handle.peer_id_string();
 
-            // Create network configuration
-            let network_config = NetworkConfig {
-                node_id: format!("raft-node-{}", node_id),
-                listen_addresses: vec![format!("/ip4/127.0.0.1/tcp/{}", listen_port)],
-                peers: vec![], // We'll configure peers later
-                peer_id_store_path: data_dir.join("peer_ids.json"),
-                max_peers: 10,
-                max_connections_per_peer: 3,
-                connection_timeout: Duration::from_secs(10),
-                idle_connection_timeout: Duration::from_secs(60),
-                keep_alive_interval: Duration::from_secs(5),
-                admin_url: None,
-            };
-
-            // Create StorageNetwork instance
-            let (network_inner, network_handle) =
-                StorageNetworkFactory::create_with_keypair(network_config, keypair).await?;
-
-            // Spawn network event loop in dedicated thread
-            let network_node_id = format!("raft-node-{}", node_id);
-            let event_loop_thread = std::thread::spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create runtime for network event loop");
-
-                let local = tokio::task::LocalSet::new();
-                runtime.block_on(local.run_until(async move {
-                    if let Err(e) = network_inner.run().await {
-                        eprintln!("Network event loop error for {}: {}", network_node_id, e);
-                    }
-                }));
-            });
-
-            // Give network time to start listening
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            // Create Raft configuration
+            // Create Raft configuration with stub network
             let raft_config = wormfs::storage_raft_member::Config {
                 heartbeat_interval: Duration::from_millis(500),
                 election_timeout_min: Duration::from_millis(1500),
@@ -262,8 +156,8 @@ impl RaftTestCluster {
                 transaction_log_path: data_dir.join("raft_log.redb"),
                 metadata_db_path: data_dir.join("metadata.redb"),
                 snapshot_directory: data_dir.join("snapshots"),
-                network_address: address,
-                storage_network: Some(network_handle.clone()),
+                network_address: format!("127.0.0.1:{}", 50000 + node_id).parse().unwrap(),
+                storage_network: Some(Arc::new(network_handle.clone())),
             };
 
             // Create Raft instance
@@ -271,73 +165,91 @@ impl RaftTestCluster {
                 <StorageRaftMemberImpl as StorageRaftMember>::new(NodeId(node_id), raft_config)
                     .await?;
 
-            // Register Raft handler with network
+            // Register Raft handler with stub network
             network_handle
-                .register_raft_handler(Arc::new(raft_node.clone()))
-                .await?;
+                .register_raft_handler_internal(Arc::new(raft_node.clone()))
+                .await;
 
             nodes.push(RaftTestNode {
                 id: node_id,
                 raft: raft_node,
-                network_handle,
                 peer_id,
-                address,
-                _event_loop_thread: event_loop_thread,
             });
 
             temp_dirs.push(temp_dir);
         }
 
+        eprintln!(
+            "Created {} nodes - connectivity is instant with stub network!",
+            node_count
+        );
+
         Ok(RaftTestCluster {
             nodes,
             _temp_dirs: temp_dirs,
+            _hub: hub,
         })
     }
 
-    /// Initialize the cluster:
-    /// - Node 0 initializes as single-node cluster
-    /// - Other nodes are added via add_node()
+    /// Initialize the cluster using static membership (all nodes initialized together).
+    /// This is the recommended pattern for initial cluster formation.
     async fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.nodes.is_empty() {
             return Err("Cannot initialize empty cluster".into());
         }
 
-        // Initialize first node as single-node cluster
-        self.nodes[0].raft.initialize(vec![]).await?;
-
-        // Wait for first node to become leader
-        let max_wait = Duration::from_secs(5);
-        let start = std::time::Instant::now();
-        loop {
-            if self.nodes[0].raft.is_leader() {
-                eprintln!("Node 1 became leader");
-                break;
-            }
-            if start.elapsed() > max_wait {
-                return Err("Node 1 did not become leader in time".into());
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        // Build the initial membership set with all nodes
+        let mut member_nodes = std::collections::BTreeMap::new();
+        for node in &self.nodes {
+            let wormfs_node = wormfs::storage_raft_member::raft_config::WormFsNode {
+                peer_id: node.peer_id.clone(),
+                metadata: Some(wormfs::storage_raft_member::raft_config::NodeMetadata {
+                    name: Some(format!("node-{}", node.id)),
+                    version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                }),
+            };
+            member_nodes.insert(NodeId(node.id), wormfs_node);
         }
 
-        // Add remaining nodes to the cluster
-        for i in 1..self.nodes.len() {
-            let node = &self.nodes[i];
-            eprintln!(
-                "Adding node {} with peer_id {} and address {}",
-                node.id, node.peer_id, node.address
-            );
+        eprintln!(
+            "Initializing {} nodes with static membership",
+            self.nodes.len()
+        );
 
-            self.nodes[0]
-                .raft
-                .add_node(NodeId(node.id), node.address, node.peer_id.clone())
-                .await?;
+        // Initialize ALL nodes CONCURRENTLY with the complete member list (static membership)
+        // This is critical - nodes must initialize together to participate in the first election
+        //
+        // Note: We're using OpenRaft's initialize() directly since our wrapper
+        // currently only supports single-node clusters via the public API
+        let mut init_futures = vec![];
+        for node in &self.nodes {
+            eprintln!("Starting initialization for node {}", node.id);
+            let inner = node.raft.inner();
+            let members = member_nodes.clone();
+            let node_id = node.id;
 
-            // Give time for membership change to replicate
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            // Spawn concurrent initialization
+            let future = async move {
+                inner
+                    .raft
+                    .initialize(members)
+                    .await
+                    .map_err(|e| format!("Failed to initialize node {}: {:?}", node_id, e))
+            };
+            init_futures.push(future);
         }
 
-        // Wait for cluster to stabilize
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Wait for all initializations to complete
+        let results = futures::future::join_all(init_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.map_err(|e| format!("Node {}: {}", i + 1, e))?;
+            eprintln!("Node {} initialization complete", i + 1);
+        }
+
+        // Wait for leader election
+        eprintln!("Waiting for leader election...");
+        let leader_idx = self.wait_for_leader(Duration::from_secs(10)).await?;
+        eprintln!("Node {} elected as leader", self.nodes[leader_idx].id);
 
         Ok(())
     }
@@ -390,7 +302,7 @@ impl RaftTestCluster {
 /// 4. Verify leader status and metrics
 #[tokio::test]
 async fn test_single_node_initialization() {
-    let (mut node, _temp_dir, _network_handle, _event_loop_thread) =
+    let (mut node, _temp_dir, _network_handle) =
         create_single_node(1).await.expect("Failed to create node");
 
     // Initialize as single-node cluster
@@ -469,7 +381,7 @@ async fn test_vote_persistence_across_restart() {
 
     // First instance: initialize and become leader
     let term1 = {
-        let (mut node1, _temp_dir1, _network_handle1, _event_loop_thread1) = create_single_node(1)
+        let (mut node1, _temp_dir1, _network_handle1) = create_single_node(1)
             .await
             .expect("Failed to create first instance");
 
@@ -500,7 +412,7 @@ async fn test_vote_persistence_across_restart() {
     // Note: This test currently verifies infrastructure works.
     // Full vote persistence validation would require using the same temp_dir paths,
     // which needs more infrastructure to coordinate shared storage with new network.
-    let (_node2, _temp_dir2, _network_handle2, _event_loop_thread2) = create_single_node(1)
+    let (_node2, _temp_dir2, _network_handle2) = create_single_node(1)
         .await
         .expect("Failed to create second instance");
 

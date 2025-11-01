@@ -94,7 +94,7 @@ use async_trait::async_trait;
 pub use implementation::StorageRaftMemberImpl;
 pub use log_storage::RaftLogStorageAdapter;
 pub use network_factory::WormFsNetworkFactory;
-pub use raft_member::RaftMember;
+pub use raft_member::{RaftMember, RaftRpcHandler};
 pub use state_machine::WormFsStateMachine;
 use std::net::SocketAddr;
 pub use types::{

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
-use crate::storage_network::StorageNetworkHandle;
+use crate::storage_network::NetworkHandleTrait;
 
 /// Unique identifier for a node in the Raft cluster.
 ///
@@ -123,7 +123,8 @@ pub struct Config {
 
     /// Handle to the storage network for peer-to-peer communication
     /// This must be set before calling new() - there's no default
-    pub storage_network: Option<StorageNetworkHandle>,
+    /// Uses trait object to support both production (libp2p) and test (stub) networks
+    pub storage_network: Option<Arc<dyn NetworkHandleTrait>>,
 }
 
 impl std::fmt::Debug for Config {

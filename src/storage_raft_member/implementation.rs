@@ -32,21 +32,22 @@ use super::StorageRaftMember;
 /// This struct contains all the mutable state and is shared across clones of
 /// StorageRaftMemberImpl via Arc. This pattern is required by OpenRaft which needs
 /// to "own" an instance while other components hold clones.
-struct Inner {
+/// Inner state shared between Raft components
+pub struct Inner {
     /// This node's ID
-    node_id: NodeId,
+    pub node_id: NodeId,
 
     /// Raft configuration
-    config: Config,
+    pub config: Config,
 
     /// The OpenRaft instance
-    raft: Arc<Raft<WormFsTypeConfig>>,
+    pub raft: Arc<Raft<WormFsTypeConfig>>,
 
     /// Whether this node is currently the leader
-    is_leader: AtomicBool,
+    pub is_leader: AtomicBool,
 
     /// Current leader's node ID (if known)
-    current_leader: RwLock<Option<NodeId>>,
+    pub current_leader: RwLock<Option<NodeId>>,
 
     /// In-flight transaction state for two-phase commit
     /// Maps transaction ID to transaction state
@@ -608,20 +609,27 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             }),
         };
 
-        // Add the node as a learner first, then promote to voter
-        // Step 1: Add as learner (retain=true means keep existing members)
-        let mut nodes = std::collections::BTreeMap::new();
-        nodes.insert(node_id, node);
+        // Two-step process: add as learner first, then promote to voter
+        // This allows the node to catch up on the log before participating in consensus
 
+        // Step 1: Add as learner using the dedicated add_learner API
+        // Use blocking=true to wait for the learner to catch up before returning
+        eprintln!(
+            "Step 1: Adding node {:?} as learner (blocking until caught up)",
+            node_id
+        );
         self.inner
             .raft
-            .change_membership(openraft::ChangeMembers::AddNodes(nodes.clone()), true)
+            .add_learner(node_id, node, true) // true = blocking (wait for learner to catch up)
             .await
             .map_err(|e| {
                 Error::MembershipChangeFailed(format!("Failed to add node as learner: {:?}", e))
             })?;
 
-        // Step 2: Promote to voter
+        eprintln!("Learner {:?} has caught up with the log", node_id);
+
+        eprintln!("Step 2: Promoting node {:?} to voter", node_id);
+        // Step 2: Promote learner to voter using change_membership
         let mut voter_ids = std::collections::BTreeSet::new();
         voter_ids.insert(node_id);
 
@@ -720,21 +728,33 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         // Handle the RPC based on its type by calling the appropriate Raft method
         let response = match rpc_message {
             RaftRpcMessage::Vote(vote_req) => {
-                let resp = self
-                    .inner
-                    .raft
-                    .vote(vote_req)
-                    .await
-                    .map_err(|e| Error::RaftError(format!("Vote RPC failed: {:?}", e)))?;
+                eprintln!(
+                    "[Node {:?}] Handling Vote RPC from term {}",
+                    self.inner.node_id, vote_req.vote.committed
+                );
+                let resp = self.inner.raft.vote(vote_req).await.map_err(|e| {
+                    eprintln!("[Node {:?}] Vote RPC error: {:?}", self.inner.node_id, e);
+                    Error::RaftError(format!("Vote RPC failed: {:?}", e))
+                })?;
                 RaftRpcResponse::Vote(resp)
             }
             RaftRpcMessage::AppendEntries(append_req) => {
+                eprintln!("[Node {:?}] Handling AppendEntries RPC: term={}, prev_log_index={:?}, entries={}",
+                         self.inner.node_id, append_req.vote.leader_id.term,
+                         append_req.prev_log_id, append_req.entries.len());
+
                 let resp = self
                     .inner
                     .raft
                     .append_entries(append_req)
                     .await
-                    .map_err(|e| Error::RaftError(format!("AppendEntries RPC failed: {:?}", e)))?;
+                    .map_err(|e| {
+                        eprintln!(
+                            "[Node {:?}] AppendEntries error: {:?}",
+                            self.inner.node_id, e
+                        );
+                        Error::RaftError(format!("AppendEntries RPC failed: {:?}", e))
+                    })?;
                 RaftRpcResponse::AppendEntries(resp)
             }
             RaftRpcMessage::InstallSnapshot(snapshot_req) => {
@@ -754,6 +774,25 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         bincode::serialize(&response).map_err(|e| {
             Error::RaftError(format!("Failed to serialize Raft RPC response: {:?}", e))
         })
+    }
+}
+
+impl StorageRaftMemberImpl {
+    /// Get access to the inner state (for testing).
+    ///
+    /// This is primarily used by integration tests that need direct access
+    /// to the OpenRaft instance for advanced initialization scenarios.
+    pub fn inner(&self) -> &Inner {
+        &self.inner
+    }
+}
+
+// Implement RaftRpcHandler trait so StorageRaftMemberImpl can be registered with the network
+#[async_trait]
+impl super::raft_member::RaftRpcHandler for StorageRaftMemberImpl {
+    async fn handle_raft_rpc(&self, request: Vec<u8>) -> Result<Vec<u8>, Error> {
+        // Delegate to the StorageRaftMember trait method
+        <Self as StorageRaftMember>::handle_raft_rpc(self, request).await
     }
 }
 

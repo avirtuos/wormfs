@@ -253,8 +253,8 @@ pub struct InnerState {
     /// Heartbeat sequence counter
     pub(crate) heartbeat_sequence: RwLock<u64>,
 
-    /// Optional Raft handler for processing incoming Raft RPCs
-    pub(crate) raft_handler: RwLock<Option<Arc<crate::storage_raft_member::StorageRaftMemberImpl>>>,
+    /// Optional Raft handler for processing incoming Raft RPCs (trait object for flexibility)
+    pub(crate) raft_handler: RwLock<Option<Arc<dyn crate::storage_raft_member::RaftRpcHandler>>>,
 }
 
 // InnerState is no longer shared via Arc, so no need for unsafe impl Sync.

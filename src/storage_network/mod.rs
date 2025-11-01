@@ -69,10 +69,12 @@
 
 pub mod behaviour;
 pub mod implementation;
+pub mod network_handle_trait;
 pub mod peer_id_store;
 pub mod types;
 
 use async_trait::async_trait;
+pub use network_handle_trait::NetworkHandleTrait;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -349,12 +351,21 @@ impl StorageNetworkHandle {
     /// This should typically be called after starting the event loop.
     pub async fn dial_configured_peers(&self) -> Result<(), Error> {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
 
-        for peer_config in &self.config.peers {
+        // Generate all jitter values upfront to avoid holding thread_rng across await
+        // (thread_rng is not Send because it uses thread-local storage)
+        let jitter_values: Vec<u64> = {
+            let mut rng = rand::thread_rng();
+            self.config
+                .peers
+                .iter()
+                .map(|_| rng.gen_range(250..=500))
+                .collect()
+        };
+
+        for (peer_config, jitter_ms) in self.config.peers.iter().zip(jitter_values.iter()) {
             // Add random jitter between 250ms and 500ms before each dial
-            let jitter_ms = rng.gen_range(250..=500);
-            tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+            tokio::time::sleep(Duration::from_millis(*jitter_ms)).await;
 
             // Send dial command to event loop
             self.event_tx
@@ -400,7 +411,7 @@ impl StorageNetworkHandle {
     /// Returns an error if the event loop is not running.
     pub async fn register_raft_handler(
         &self,
-        handler: std::sync::Arc<crate::storage_raft_member::StorageRaftMemberImpl>,
+        handler: std::sync::Arc<dyn crate::storage_raft_member::RaftRpcHandler>,
     ) -> Result<(), Error> {
         self.event_tx
             .send(NetworkCommand::RegisterRaftHandler { handler })
@@ -669,6 +680,40 @@ pub trait StorageNetwork: Send + Sync + Clone {
         ip: IpAddr,
         peer_id: PeerId,
     ) -> Result<ValidationResult, Error>;
+}
+
+// Implement NetworkHandleTrait for StorageNetworkHandle
+#[async_trait]
+impl NetworkHandleTrait for StorageNetworkHandle {
+    async fn send_request(
+        &self,
+        peer_id_bytes: &[u8],
+        protocol: &str,
+        request: Vec<u8>,
+    ) -> Result<Vec<u8>, Error> {
+        // Convert bytes to our PeerId type
+        let peer_id = PeerId::new(peer_id_bytes.to_vec());
+        // Call the existing send_request method
+        self.send_request(&peer_id, protocol, request).await
+    }
+
+    async fn register_raft_handler(
+        &self,
+        handler: Arc<dyn crate::storage_raft_member::raft_member::RaftRpcHandler>,
+    ) -> Result<(), Error> {
+        // Call the existing register_raft_handler method
+        self.register_raft_handler(handler).await
+    }
+
+    async fn get_connected_peers(&self) -> Result<Vec<PeerInfo>, Error> {
+        // Call the existing get_connected_peers method
+        Ok(self.get_connected_peers().await)
+    }
+
+    async fn dial_configured_peers(&self) -> Result<(), Error> {
+        // Call the existing dial_configured_peers method
+        self.dial_configured_peers().await
+    }
 }
 
 #[cfg(test)]

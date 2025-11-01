@@ -17,6 +17,7 @@
 //! request-response mechanism. Messages are wrapped in `RaftRpcMessage` enums to
 //! identify the RPC type on the receiving end.
 
+use async_trait::async_trait;
 use libp2p::PeerId;
 use openraft::error::{InstallSnapshotError, NetworkError, RPCError, RaftError, Unreachable};
 use openraft::network::{RPCOption, RaftNetwork};
@@ -25,13 +26,32 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{debug, error, warn};
 
-use crate::storage_network::types::PeerId as NetworkPeerId;
-use crate::storage_network::StorageNetworkHandle;
+use crate::storage_network::NetworkHandleTrait;
 
 use super::raft_config::{WormFsNode, WormFsTypeConfig};
-use super::types::NodeId;
+use super::types::{Error, NodeId};
+
+/// Trait for handling incoming Raft RPCs.
+///
+/// This trait is implemented by StorageRaftMember to handle incoming Raft RPCs
+/// from other nodes in the cluster. It's used by StorageNetwork to route RPCs
+/// to the Raft instance.
+#[async_trait]
+pub trait RaftRpcHandler: Send + Sync {
+    /// Handle an incoming Raft RPC.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The serialized Raft RPC request (bincode-encoded)
+    ///
+    /// # Returns
+    ///
+    /// The serialized Raft RPC response (bincode-encoded)
+    async fn handle_raft_rpc(&self, request: Vec<u8>) -> Result<Vec<u8>, Error>;
+}
 
 /// RPC message wrapper that identifies the type of Raft RPC.
 ///
@@ -63,15 +83,15 @@ pub enum RaftRpcResponse {
 /// Network client for communicating with a specific Raft cluster member.
 ///
 /// Each instance is lightweight and represents communication to one target node.
-/// Multiple instances share the same underlying libp2p network infrastructure.
+/// Multiple instances share the same underlying network infrastructure (libp2p or stub).
 #[derive(Clone)]
 pub struct RaftMember {
     /// The NodeId of the target Raft member
     target_node_id: NodeId,
-    /// The PeerId of the target for libp2p communication
+    /// The PeerId of the target for network communication
     target_peer_id: PeerId,
-    /// Shared handle to the storage network
-    network: StorageNetworkHandle,
+    /// Shared handle to the storage network (trait object)
+    network: Arc<dyn NetworkHandleTrait>,
 }
 
 impl RaftMember {
@@ -80,12 +100,12 @@ impl RaftMember {
     /// # Arguments
     ///
     /// * `target_node_id` - The NodeId of the target Raft member
-    /// * `target_peer_id` - The PeerId of the target for libp2p communication
-    /// * `network` - Shared handle to the storage network
+    /// * `target_peer_id` - The PeerId of the target for network communication
+    /// * `network` - Shared handle to the storage network (trait object)
     pub fn new(
         target_node_id: NodeId,
         target_peer_id: PeerId,
-        network: StorageNetworkHandle,
+        network: Arc<dyn NetworkHandleTrait>,
     ) -> Self {
         Self {
             target_node_id,
@@ -120,13 +140,15 @@ impl RaftMember {
             rpc_name, self.target_node_id, self.target_peer_id
         );
 
-        // Convert libp2p::PeerId to storage_network::types::PeerId
-        let network_peer_id = NetworkPeerId::new(self.target_peer_id.to_bytes());
-
-        // Send via request-response protocol
+        // Send via network trait (works with both libp2p and stub)
+        // The peer_id is passed as bytes for maximum flexibility
         let response_bytes = self
             .network
-            .send_request(&network_peer_id, "/wormfs/raft/1.0.0", request_bytes)
+            .send_request(
+                &self.target_peer_id.to_bytes(),
+                "/wormfs/raft/1.0.0",
+                request_bytes,
+            )
             .await
             .map_err(|e| {
                 warn!(
