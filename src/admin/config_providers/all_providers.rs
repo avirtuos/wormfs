@@ -3,7 +3,7 @@
 //! This file contains config provider implementations for all major components.
 
 use crate::admin::config_provider::{ConfigProvider, ConfigWithDescriptions};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 
 /// Configuration provider for Admin component.

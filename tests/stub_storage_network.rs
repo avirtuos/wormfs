@@ -84,12 +84,36 @@ impl StubStorageNetworkHandle {
         request: Vec<u8>,
     ) -> Result<Vec<u8>, Error> {
         use wormfs::storage_network::types::PeerId as WormFsPeerId;
+        use wormfs::storage_raft_member::raft_member::{RaftRpcMessage, RaftRpcResponse};
+
+        // Deserialize request to log it
+        let rpc_type = match bincode::deserialize::<RaftRpcMessage>(&request) {
+            Ok(RaftRpcMessage::Vote(ref req)) => {
+                format!(
+                    "Vote(term={}, candidate={:?})",
+                    req.vote.leader_id.term, req.vote.leader_id.node_id
+                )
+            }
+            Ok(RaftRpcMessage::AppendEntries(ref req)) => {
+                format!(
+                    "AppendEntries(term={}, prev_log={:?}, entries={})",
+                    req.vote.leader_id.term,
+                    req.prev_log_id,
+                    req.entries.len()
+                )
+            }
+            Ok(RaftRpcMessage::InstallSnapshot(ref req)) => {
+                format!(
+                    "InstallSnapshot(term={}, last_included={:?})",
+                    req.vote.leader_id.term, req.meta.last_log_id
+                )
+            }
+            Err(_) => format!("Unknown({} bytes)", request.len()),
+        };
 
         eprintln!(
-            "[StubNetwork] Node {} sending RPC to node {} ({} bytes)",
-            self.node_id,
-            target_node_id,
-            request.len()
+            "[StubNetwork] Node {} → Node {}: {}",
+            self.node_id, target_node_id, rpc_type
         );
 
         // Get the target node's Raft handler
@@ -106,10 +130,6 @@ impl StubStorageNetworkHandle {
         drop(handlers); // Release lock before async call
 
         // Call the handler directly (simulating network RPC)
-        eprintln!(
-            "[StubNetwork] Calling handle_raft_rpc on node {}",
-            target_node_id
-        );
         let result = handler.handle_raft_rpc(request).await.map_err(|e| {
             eprintln!(
                 "[StubNetwork] ERROR: RPC to node {} failed: {:?}",
@@ -121,11 +141,27 @@ impl StubStorageNetworkHandle {
             }
         })?;
 
+        // Deserialize response to log it
+        let response_type = match bincode::deserialize::<RaftRpcResponse>(&result) {
+            Ok(RaftRpcResponse::Vote(ref resp)) => {
+                format!(
+                    "VoteResp(granted={}, term={})",
+                    resp.vote_granted, resp.vote.committed
+                )
+            }
+            Ok(RaftRpcResponse::AppendEntries(ref resp)) => {
+                // Use Debug formatting since AppendEntriesResponse fields vary by OpenRaft version
+                format!("AppendResp({:?})", resp)
+            }
+            Ok(RaftRpcResponse::InstallSnapshot(ref resp)) => {
+                format!("SnapshotResp({:?})", resp)
+            }
+            Err(_) => format!("Unknown({} bytes)", result.len()),
+        };
+
         eprintln!(
-            "[StubNetwork] Node {} received response from node {} ({} bytes)",
-            self.node_id,
-            target_node_id,
-            result.len()
+            "[StubNetwork] Node {} ← Node {}: {}",
+            self.node_id, target_node_id, response_type
         );
         Ok(result)
     }

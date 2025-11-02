@@ -53,6 +53,7 @@ const VOTE_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_vote
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct LogEntryData {
     term: u64,
+    leader_node_id: u64,
     operations: Vec<u8>,
     timestamp_secs: u64,
     timestamp_nanos: u32,
@@ -61,7 +62,7 @@ struct LogEntryData {
 
 impl LogEntryData {
     /// Create a new log entry with CRC32 checksum
-    fn new(term: u64, operations: Vec<u8>, timestamp: SystemTime) -> Self {
+    fn new(term: u64, leader_node_id: u64, operations: Vec<u8>, timestamp: SystemTime) -> Self {
         let duration = timestamp
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default();
@@ -71,6 +72,7 @@ impl LogEntryData {
         // Calculate CRC32 checksum of the data
         let mut hasher = Hasher::new();
         hasher.update(&term.to_le_bytes());
+        hasher.update(&leader_node_id.to_le_bytes());
         hasher.update(&operations);
         hasher.update(&timestamp_secs.to_le_bytes());
         hasher.update(&timestamp_nanos.to_le_bytes());
@@ -78,6 +80,7 @@ impl LogEntryData {
 
         Self {
             term,
+            leader_node_id,
             operations,
             timestamp_secs,
             timestamp_nanos,
@@ -89,6 +92,7 @@ impl LogEntryData {
     fn verify_checksum(&self) -> bool {
         let mut hasher = Hasher::new();
         hasher.update(&self.term.to_le_bytes());
+        hasher.update(&self.leader_node_id.to_le_bytes());
         hasher.update(&self.operations);
         hasher.update(&self.timestamp_secs.to_le_bytes());
         hasher.update(&self.timestamp_nanos.to_le_bytes());
@@ -105,6 +109,7 @@ impl LogEntryData {
         LogEntry {
             index,
             term: self.term,
+            leader_node_id: self.leader_node_id,
             operations: self.operations.clone(),
             timestamp,
         }
@@ -462,7 +467,9 @@ impl TransactionLogStoreImpl {
             }
 
             // Create log entry with checksum
-            let entry_data = LogEntryData::new(term, data, SystemTime::now());
+            // Note: This legacy API doesn't provide leader_node_id, so we use 0 as a placeholder.
+            // New code should use append_batch() which properly tracks leader_node_id.
+            let entry_data = LogEntryData::new(term, 0, data, SystemTime::now());
             let serialized = bincode::serialize(&entry_data).map_err(|e| {
                 LogError::SerializationError(format!("Failed to serialize entry: {}", e))
             })?;
@@ -520,7 +527,10 @@ impl TransactionLogStoreImpl {
     /// * `LogError::InvalidRange` - Indices create unexpected gaps
     /// * `LogError::DatabaseError` - Database operation or fsync failed (entire batch rolled back)
     /// * `LogError::SerializationError` - Failed to serialize an entry
-    fn append_batch_blocking(&self, entries: Vec<(u64, u64, Vec<u8>)>) -> Result<(), LogError> {
+    fn append_batch_blocking(
+        &self,
+        entries: Vec<(u64, u64, u64, Vec<u8>)>,
+    ) -> Result<(), LogError> {
         if entries.is_empty() {
             return Err(LogError::InvalidRange(
                 "Cannot append empty batch".to_string(),
@@ -558,7 +568,7 @@ impl TransactionLogStoreImpl {
             let mut max_index = 0u64;
 
             // Insert all entries
-            for (index, term, data) in entries.iter() {
+            for (index, term, leader_node_id, data) in entries.iter() {
                 min_index = min_index.min(*index);
                 max_index = max_index.max(*index);
 
@@ -570,7 +580,8 @@ impl TransactionLogStoreImpl {
                     )));
                 }
 
-                let entry_data = LogEntryData::new(*term, data.clone(), SystemTime::now());
+                let entry_data =
+                    LogEntryData::new(*term, *leader_node_id, data.clone(), SystemTime::now());
                 let serialized = bincode::serialize(&entry_data).map_err(|e| {
                     LogError::SerializationError(format!("Failed to serialize entry: {}", e))
                 })?;
@@ -1213,7 +1224,7 @@ impl TransactionLogStore for TransactionLogStoreImpl {
             .map_err(|e| LogError::DatabaseError(format!("Task join error: {}", e)))?
     }
 
-    async fn append_batch(&self, entries: Vec<(u64, u64, Vec<u8>)>) -> Result<(), LogError> {
+    async fn append_batch(&self, entries: Vec<(u64, u64, u64, Vec<u8>)>) -> Result<(), LogError> {
         let self_clone = self.clone();
         task::spawn_blocking(move || self_clone.append_batch_blocking(entries))
             .await
@@ -1381,9 +1392,9 @@ mod tests {
         let store = TransactionLogStoreImpl::new(config).unwrap();
 
         let entries = vec![
-            (1, 1, b"op1".to_vec()),
-            (2, 1, b"op2".to_vec()),
-            (3, 2, b"op3".to_vec()),
+            (1, 1, 0, b"op1".to_vec()),
+            (2, 1, 0, b"op2".to_vec()),
+            (3, 2, 0, b"op3".to_vec()),
         ];
 
         store.append_batch(entries).await.unwrap();
@@ -1403,7 +1414,7 @@ mod tests {
         let store = TransactionLogStoreImpl::new(config).unwrap();
 
         // Attempting to append an empty batch should return InvalidRange error
-        let empty_entries: Vec<(u64, u64, Vec<u8>)> = vec![];
+        let empty_entries: Vec<(u64, u64, u64, Vec<u8>)> = vec![];
         let result = store.append_batch(empty_entries).await;
 
         assert!(result.is_err());

@@ -125,6 +125,7 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 md5 = "0.7"
 walkdir = "2"
 reqwest = { version = "0.11", features = ["json"] }
+ntest = "0.9"  # For test timeouts
 
 [features]
 default = ["openraft", "rusqlite", "tokio-rusqlite", "redb", "reed-solomon-erasure", "fuser"]
