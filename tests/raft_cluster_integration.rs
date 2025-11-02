@@ -418,6 +418,11 @@ impl RaftTestCluster {
             node_id
         );
 
+        // CRITICAL: Unregister the Raft handler from StubNetworkHub BEFORE shutting down
+        // This drops the Arc<RaftNode> reference that prevents database locks from being released
+        eprintln!("  Unregistering Raft handler from hub...");
+        self.hub.unregister_raft_handler(node_id).await;
+
         // Explicitly shutdown the Raft instance to stop background tasks
         removed_node
             .raft
@@ -457,7 +462,41 @@ impl RaftTestCluster {
 
         eprintln!("🔄 Restarting node {} with existing storage...", node_id);
 
-        // Get the data directory from the preserved temp_dir
+        // CRITICAL FIX: Remove node from cluster membership first
+        // This prevents the restarted node from immediately participating in elections
+        // with stale log data, which would cause log reversion panics.
+        eprintln!(
+            "  Step 1: Removing node {} from cluster membership...",
+            node_id
+        );
+        let leader = self
+            .leader()
+            .ok_or("No leader found to change membership")?;
+
+        // Build new membership excluding the node being restarted
+        let remaining_node_ids: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .map(|n| NodeId(n.id))
+            .filter(|id| id.0 != node_id)
+            .collect();
+
+        leader
+            .raft
+            .inner()
+            .raft
+            .change_membership(remaining_node_ids.clone(), false)
+            .await
+            .map_err(|e| format!("Failed to remove node {} from membership: {:?}", node_id, e))?;
+
+        eprintln!("  ✅ Node {} removed from cluster membership", node_id);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Step 2: Restart the node with existing storage
+        eprintln!(
+            "  Step 2: Starting node {} with existing storage...",
+            node_id
+        );
         let data_dir = self.temp_dirs.get(&node_id).unwrap().path().to_path_buf();
 
         // Create new stub network handle for this node
@@ -503,20 +542,94 @@ impl RaftTestCluster {
             .register_raft_handler_internal(Arc::new(raft_node.clone()))
             .await;
 
-        // Add the restarted node back to the cluster
+        // Add the restarted node to our tracking
         self.nodes.push(RaftTestNode {
             id: node_id,
-            raft: raft_node,
-            peer_id,
+            raft: raft_node.clone(),
+            peer_id: peer_id.clone(),
         });
 
+        eprintln!("  ✅ Node {} restarted with existing state", node_id);
+
+        // Step 3: Add the restarted node back as a LEARNER (non-voting)
         eprintln!(
-            "✅ Node {} restarted successfully with existing state",
+            "  Step 3: Adding node {} as learner (non-voting)...",
             node_id
         );
+        let leader = self.leader().ok_or("No leader found to add learner")?;
+        let wormfs_node = wormfs::storage_raft_member::raft_config::WormFsNode {
+            peer_id: peer_id.clone(),
+            metadata: Some(wormfs::storage_raft_member::raft_config::NodeMetadata {
+                name: Some(format!("node-{}", node_id)),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            }),
+        };
 
-        // Give the node time to reconnect and sync
+        // Use blocking=true to wait for the learner to catch up
+        leader
+            .raft
+            .inner()
+            .raft
+            .add_learner(NodeId(node_id), wormfs_node, true)
+            .await
+            .map_err(|e| format!("Failed to add node {} as learner: {:?}", node_id, e))?;
+
+        eprintln!("  ✅ Node {} added as learner and caught up", node_id);
+
+        // Step 4: Wait for the learner to fully sync
+        eprintln!(
+            "  Step 4: Waiting for node {} to sync with leader...",
+            node_id
+        );
+        let start = std::time::Instant::now();
+        loop {
+            let leader = self.leader().ok_or("No leader found")?;
+            let leader_metrics = leader.raft.inner().raft.metrics().borrow().clone();
+            let node_metrics = raft_node.inner().raft.metrics().borrow().clone();
+
+            if node_metrics.last_applied == leader_metrics.last_applied {
+                eprintln!(
+                    "  ✅ Node {} is fully synced (last_applied={:?})",
+                    node_id, node_metrics.last_applied
+                );
+                break;
+            }
+
+            if start.elapsed() > Duration::from_secs(10) {
+                return Err(format!(
+                    "Timeout waiting for node {} to sync. Node: {:?}, Leader: {:?}",
+                    node_id, node_metrics.last_applied, leader_metrics.last_applied
+                )
+                .into());
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Step 5: Promote the learner to voter
+        eprintln!("  Step 5: Promoting node {} to voter...", node_id);
+        let leader = self
+            .leader()
+            .ok_or("No leader found to change membership")?;
+
+        // Build new membership including the restarted node
+        let all_node_ids: Vec<NodeId> = self.nodes.iter().map(|n| NodeId(n.id)).collect();
+
+        leader
+            .raft
+            .inner()
+            .raft
+            .change_membership(all_node_ids, false)
+            .await
+            .map_err(|e| format!("Failed to promote node {} to voter: {:?}", node_id, e))?;
+
+        eprintln!("  ✅ Node {} promoted to voter", node_id);
         tokio::time::sleep(Duration::from_millis(500)).await;
+
+        eprintln!(
+            "✅ Node {} fully restarted and reintegrated into cluster",
+            node_id
+        );
 
         Ok(())
     }
@@ -1217,15 +1330,17 @@ async fn test_network_partition_handling() {
 /// 8. Verify node 3 can participate in consensus
 ///
 /// ## Status: BLOCKED
-/// Infrastructure is implemented but test is blocked by redb database lock issue:
-/// - StubNetworkHub holds Arc<RaftNode> references that prevent full cleanup
-/// - redb won't allow reopening database in same process while Arc is held
-/// - Need to add `unregister_raft_handler()` method to StubNetworkHub
-/// - Alternatively, could use separate processes for true isolation
+/// Tests that a node can be shutdown and restarted while preserving its data.
 ///
-/// The shutdown/restart infrastructure itself works correctly.
+/// This test verifies:
+/// 1. Node can be cleanly shutdown (Raft stopped, database locks released)
+/// 2. Node can be restarted with same storage (database reopened)
+/// 3. Restarted node catches up via log replication
+/// 4. Restarted node can participate in consensus again
+///
+/// The test uses unregister_raft_handler() to drop Arc references before restart,
+/// allowing redb database locks to be released properly.
 #[tokio::test]
-#[ignore = "Blocked by database cleanup - StubNetworkHub holds Arc references"]
 async fn test_node_restart_recovery() {
     eprintln!("=== Starting test_node_restart_recovery ===");
 

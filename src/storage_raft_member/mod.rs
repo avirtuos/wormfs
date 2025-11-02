@@ -82,6 +82,7 @@
 //! - **Lock Expiration**: Leader detects expired locks and issues Raft transaction
 //! - **Concurrent Transaction Limits**: Configurable maximum for resource management
 
+pub mod cluster_manager;
 pub mod implementation;
 pub mod log_storage;
 pub mod network_factory;

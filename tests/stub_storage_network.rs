@@ -29,6 +29,21 @@ impl StubNetworkHub {
         }
     }
 
+    /// Unregister a Raft handler for a node (for clean shutdown/restart)
+    pub async fn unregister_raft_handler(&self, node_id: u64) {
+        eprintln!(
+            "[StubNetwork] Unregistering Raft handler for node {}",
+            node_id
+        );
+        let mut handlers = self.raft_handlers.write().await;
+        handlers.remove(&node_id);
+        eprintln!(
+            "[StubNetwork] Handler unregistered for node {}. Remaining handlers: {}",
+            node_id,
+            handlers.len()
+        );
+    }
+
     /// Create a handle for a specific node
     pub fn create_handle(&self, node_id: u64) -> StubStorageNetworkHandle {
         let (tx, rx) = mpsc::unbounded_channel();
