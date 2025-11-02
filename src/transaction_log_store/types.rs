@@ -79,6 +79,9 @@ pub struct LogEntry {
     /// Raft term
     pub term: u64,
 
+    /// Leader node ID that created this entry
+    pub leader_node_id: u64,
+
     /// Serialized operations (Vec<MetadataOperation>)
     pub operations: Vec<u8>,
 

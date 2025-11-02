@@ -25,14 +25,12 @@ use openraft::{
 };
 use std::fmt::Debug;
 use std::ops::RangeBounds;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
 use crate::transaction_log_store::{LogError, TransactionLogStore, TransactionLogStoreImpl};
 
 use super::raft_config::WormFsTypeConfig;
-use super::types::{NodeId, WormFsOperation};
+use super::types::NodeId;
 use crate::transaction_log_store::VoteData;
 
 /// Adapter that implements OpenRaft's RaftLogStorage trait using TransactionLogStore.
@@ -94,29 +92,23 @@ impl RaftLogStorageAdapter {
     fn convert_to_raft_entry(
         log_entry: crate::transaction_log_store::LogEntry,
     ) -> Result<Entry<WormFsTypeConfig>, StorageError<NodeId>> {
-        // Deserialize the operations from the log entry
-        let operation: WormFsOperation =
-            bincode::deserialize(&log_entry.operations).map_err(|e| {
-                let io_error =
-                    StorageIOError::new(ErrorSubject::Logs, ErrorVerb::Read, AnyError::new(&e));
-                StorageError::IO { source: io_error }
-            })?;
+        // Deserialize the EntryPayload directly (preserves Blank, Normal, Membership types)
+        let payload: EntryPayload<WormFsTypeConfig> = bincode::deserialize(&log_entry.operations)
+            .map_err(|e| {
+            let io_error =
+                StorageIOError::new(ErrorSubject::Logs, ErrorVerb::Read, AnyError::new(&e));
+            StorageError::IO { source: io_error }
+        })?;
 
-        // Create a LogId from the entry's index and term
-        // NOTE: We use NodeId(0) as a placeholder since TransactionLogStore doesn't persist leader_id.
-        // This is acceptable because the leader_id is primarily used for conflict resolution during
-        // replication, and we reconstruct it correctly during normal Raft operations.
-        let leader_id = CommittedLeaderId::new(log_entry.term, NodeId(0));
+        // Create a LogId from the entry's index, term, and leader_node_id
+        let leader_id = CommittedLeaderId::new(log_entry.term, NodeId(log_entry.leader_node_id));
         let log_id = LogId::new(leader_id, log_entry.index);
 
-        // Create the entry with the deserialized operation
-        Ok(Entry {
-            log_id,
-            payload: EntryPayload::Normal(operation),
-        })
+        // Create the entry with the deserialized payload
+        Ok(Entry { log_id, payload })
     }
 
-    /// Convert an OpenRaft Entry to WormFS log format (index, term, data).
+    /// Convert an OpenRaft Entry to WormFS log format (index, term, leader_node_id, data).
     ///
     /// # Arguments
     ///
@@ -124,58 +116,27 @@ impl RaftLogStorageAdapter {
     ///
     /// # Returns
     ///
-    /// A tuple of (index, term, serialized_data) ready for storage
+    /// A tuple of (index, term, leader_node_id, serialized_data) ready for storage
     fn convert_from_raft_entry(
         entry: &Entry<WormFsTypeConfig>,
-    ) -> Result<(u64, u64, Vec<u8>), StorageError<NodeId>> {
+    ) -> Result<(u64, u64, u64, Vec<u8>), StorageError<NodeId>> {
         let index = entry.log_id.index;
         let term = entry.log_id.leader_id.term;
+        let leader_node_id = entry
+            .log_id
+            .leader_id
+            .voted_for()
+            .map(|nid| nid.0)
+            .unwrap_or(0); // Use 0 if no node ID is set (shouldn't happen in normal operation)
 
-        // Serialize the payload
-        let data = match &entry.payload {
-            EntryPayload::Blank => {
-                // Blank entries are used for leader election
-                bincode::serialize(&WormFsOperation::TransactionPrepare {
-                    tx_id: super::types::TxId(0),
-                    metadata_ops: Some(vec![]),
-                    command_ops: None,
-                    timeout: std::time::SystemTime::now(),
-                })
-                .map_err(|e| {
-                    let io_error = StorageIOError::new(
-                        ErrorSubject::Logs,
-                        ErrorVerb::Write,
-                        AnyError::new(&e),
-                    );
-                    StorageError::IO { source: io_error }
-                })?
-            }
-            EntryPayload::Normal(operation) => bincode::serialize(operation).map_err(|e| {
-                let io_error =
-                    StorageIOError::new(ErrorSubject::Logs, ErrorVerb::Write, AnyError::new(&e));
-                StorageError::IO { source: io_error }
-            })?,
-            EntryPayload::Membership(_) => {
-                // Membership changes are stored as empty operations for now
-                // A future enhancement would be to store these properly
-                bincode::serialize(&WormFsOperation::TransactionPrepare {
-                    tx_id: super::types::TxId(0),
-                    metadata_ops: Some(vec![]),
-                    command_ops: None,
-                    timeout: std::time::SystemTime::now(),
-                })
-                .map_err(|e| {
-                    let io_error = StorageIOError::new(
-                        ErrorSubject::Logs,
-                        ErrorVerb::Write,
-                        AnyError::new(&e),
-                    );
-                    StorageError::IO { source: io_error }
-                })?
-            }
-        };
+        // Serialize the entire payload (preserves Blank, Normal, Membership types)
+        let data = bincode::serialize(&entry.payload).map_err(|e| {
+            let io_error =
+                StorageIOError::new(ErrorSubject::Logs, ErrorVerb::Write, AnyError::new(&e));
+            StorageError::IO { source: io_error }
+        })?;
 
-        Ok((index, term, data))
+        Ok((index, term, leader_node_id, data))
     }
 
     /// Convert a LogError to a StorageError.
@@ -480,6 +441,7 @@ impl RaftLogStorage<WormFsTypeConfig> for RaftLogStorageAdapter {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::WormFsOperation;
     use super::*;
     use crate::transaction_log_store::TransactionLogConfig;
     use tempfile::TempDir;

@@ -3,7 +3,7 @@
 //! This module defines the WormFsTypeConfig that implements OpenRaft's RaftTypeConfig trait,
 //! mapping WormFS-specific types to OpenRaft's generic type parameters.
 
-use openraft::{RaftTypeConfig, SnapshotId};
+use openraft::RaftTypeConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -70,6 +70,9 @@ pub struct NodeMetadata {
 /// Contains the result of applying a WormFsOperation to the state machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WormFsResponse {
+    /// Empty response for entries that don't produce application-level responses (Blank, Membership)
+    Empty,
+
     /// Transaction prepare phase completed successfully
     TransactionPrepared {
         tx_id: crate::storage_raft_member::types::TxId,

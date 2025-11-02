@@ -61,7 +61,7 @@ async fn test_batch_append_performance() {
     let mut entries = Vec::new();
     for i in 1..=10000 {
         let data = format!("batch operation {}", i).into_bytes();
-        entries.push((i, i % 10 + 1, data));
+        entries.push((i, i % 10 + 1, 0, data));
     }
 
     // Measure batch append time
@@ -417,7 +417,7 @@ async fn test_stress_mixed_operations() {
         let store_clone = Arc::clone(&store);
         let handle = tokio::spawn(async move {
             let batch: Vec<_> = (501..=600)
-                .map(|i| (i, 1u64, format!("batch {}", i).into_bytes()))
+                .map(|i| (i, 1u64, 0u64, format!("batch {}", i).into_bytes()))
                 .collect();
             store_clone.append_batch(batch).await.unwrap();
         });

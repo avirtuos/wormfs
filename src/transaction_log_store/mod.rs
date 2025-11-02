@@ -126,7 +126,7 @@ pub trait TransactionLogStore: Send + Sync {
     /// - Any index is 0 (invalid)
     /// - Indices create unexpected gaps
     /// - Any write fails (all entries are rolled back)
-    async fn append_batch(&self, entries: Vec<(u64, u64, Vec<u8>)>) -> Result<(), LogError>;
+    async fn append_batch(&self, entries: Vec<(u64, u64, u64, Vec<u8>)>) -> Result<(), LogError>;
 
     /// Get a log entry by index.
     ///

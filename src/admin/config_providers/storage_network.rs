@@ -2,7 +2,7 @@
 
 use crate::admin::config_provider::{ConfigProvider, ConfigWithDescriptions};
 use crate::storage_network::Config;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 
 /// Configuration provider for StorageNetwork component.

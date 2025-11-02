@@ -17,12 +17,12 @@ use crate::storage_network::NetworkHandleTrait;
     Debug,
     Clone,
     Copy,
+    Default,
     PartialEq,
     Eq,
     Hash,
     PartialOrd,
     Ord,
-    Default,
     serde::Serialize,
     serde::Deserialize,
 )]

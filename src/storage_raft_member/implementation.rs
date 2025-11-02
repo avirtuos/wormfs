@@ -12,9 +12,9 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info};
+use tracing::info;
 
-use crate::metadata_store::{MetadataStoreFactory, MetadataStoreImpl};
+use crate::metadata_store::MetadataStoreFactory;
 use crate::transaction_log_store::{TransactionLogConfig, TransactionLogStoreImpl};
 
 use super::log_storage::RaftLogStorageAdapter;
@@ -469,8 +469,17 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             self.inner.node_id
         );
 
+        eprintln!(
+            "[propose_operation] Node {:?}: About to call client_write()",
+            self.inner.node_id
+        );
+
         // Submit the operation to Raft for replication and consensus
         let response = self.inner.raft.client_write(operation).await.map_err(|e| {
+            eprintln!(
+                "[propose_operation] Node {:?}: client_write() returned error: {:?}",
+                self.inner.node_id, e
+            );
             // Convert OpenRaft errors to our Error type
             match e {
                 openraft::error::RaftError::APIError(api_err) => {
@@ -489,6 +498,11 @@ impl StorageRaftMember for StorageRaftMemberImpl {
                 }
             }
         })?;
+
+        eprintln!(
+            "[propose_operation] Node {:?}: client_write() returned successfully! log_id={:?}",
+            self.inner.node_id, response.log_id
+        );
 
         info!(
             "Operation committed at log_id: {:?} for node {:?}",
@@ -739,9 +753,14 @@ impl StorageRaftMember for StorageRaftMemberImpl {
                 RaftRpcResponse::Vote(resp)
             }
             RaftRpcMessage::AppendEntries(append_req) => {
-                eprintln!("[Node {:?}] Handling AppendEntries RPC: term={}, prev_log_index={:?}, entries={}",
+                // Log current state to understand why we're panicking
+                let metrics = self.inner.raft.metrics().borrow().clone();
+                eprintln!("[Node {:?}] Handling AppendEntries RPC: term={}, prev_log_index={:?}, entries={}, leader_committed={:?}",
                          self.inner.node_id, append_req.vote.leader_id.term,
-                         append_req.prev_log_id, append_req.entries.len());
+                         append_req.prev_log_id, append_req.entries.len(), append_req.leader_commit);
+                eprintln!("[Node {:?}] Current state: last_log={:?}, last_applied={:?}, snapshot={:?}, state={:?}, is_initialized={}",
+                         self.inner.node_id, metrics.last_log_index, metrics.last_applied,
+                         metrics.snapshot, metrics.state, self.inner.raft.is_initialized().await.unwrap_or(false));
 
                 let resp = self
                     .inner

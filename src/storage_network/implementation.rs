@@ -269,7 +269,7 @@ impl super::StorageNetworkInner {
     /// It should be called exactly once and runs until shutdown.
     ///
     /// Takes ownership of self to prevent the event loop from being run multiple times.
-    pub async fn run(mut self) -> Result<(), Error> {
+    pub async fn run(self) -> Result<(), Error> {
         info!("Starting StorageNetwork event loop");
 
         // Set up listen addresses
@@ -1462,7 +1462,7 @@ impl super::StorageNetworkInner {
     ///
     /// Returns errors for deserialization failures or if Raft instance is not registered
     async fn handle_raft_request(&self, request: Vec<u8>) -> Result<Vec<u8>, Error> {
-        use crate::storage_raft_member::raft_member::{RaftRpcMessage, RaftRpcResponse};
+        use crate::storage_raft_member::raft_member::RaftRpcMessage;
 
         // Record metric
         self.record_metric_counter("storage_network.request_response.raft_requests", 1)
