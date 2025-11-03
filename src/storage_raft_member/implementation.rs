@@ -12,11 +12,12 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::info;
+use tracing::{debug, error, info};
 
 use crate::metadata_store::MetadataStoreFactory;
 use crate::transaction_log_store::{TransactionLogConfig, TransactionLogStoreImpl};
 
+use super::cluster_manager::{ClusterEvent, ClusterManager, ClusterManagerConfig};
 use super::log_storage::RaftLogStorageAdapter;
 use super::network_factory::WormFsNetworkFactory;
 use super::raft_config::{WormFsNode, WormFsTypeConfig};
@@ -58,6 +59,16 @@ pub struct Inner {
 
     /// Metadata change subscribers
     subscribers: RwLock<Vec<SubscriberHandle>>,
+
+    /// Cluster manager for automatic failure detection and recovery
+    /// Only active on the leader node
+    cluster_manager: RwLock<Option<Arc<ClusterManager>>>,
+
+    /// Channel for cluster events (sent by ClusterManager)
+    cluster_event_sender: mpsc::UnboundedSender<ClusterEvent>,
+
+    /// Channel receiver for cluster events
+    cluster_event_receiver: RwLock<Option<mpsc::UnboundedReceiver<ClusterEvent>>>,
 }
 
 /// State of an in-flight transaction during two-phase commit.
@@ -124,6 +135,12 @@ impl StorageRaftMemberImpl {
         config: Config,
         raft: Arc<Raft<WormFsTypeConfig>>,
     ) -> Self {
+        // Create event channel for cluster manager events
+        let (cluster_event_sender, cluster_event_receiver) = mpsc::unbounded_channel();
+
+        // We'll create the ClusterManager lazily when we become leader
+        // For now, just store None
+
         Self {
             inner: Arc::new(Inner {
                 node_id,
@@ -134,6 +151,9 @@ impl StorageRaftMemberImpl {
                 pending_transactions: RwLock::new(HashMap::new()),
                 next_tx_id: AtomicU64::new(1),
                 subscribers: RwLock::new(Vec::new()),
+                cluster_manager: RwLock::new(None),
+                cluster_event_sender,
+                cluster_event_receiver: RwLock::new(Some(cluster_event_receiver)),
             }),
         }
     }
@@ -147,10 +167,77 @@ impl StorageRaftMemberImpl {
     /// Update leadership state based on Raft metrics.
     async fn update_leadership(&self, metrics: &OpenRaftMetrics<NodeId, WormFsNode>) {
         let is_leader = matches!(metrics.state, openraft::ServerState::Leader);
-        self.inner.is_leader.store(is_leader, Ordering::SeqCst);
+        let was_leader = self.inner.is_leader.swap(is_leader, Ordering::SeqCst);
 
         let mut current_leader = self.inner.current_leader.write().await;
         *current_leader = metrics.current_leader;
+
+        // Handle ClusterManager lifecycle based on leadership changes
+        if is_leader && !was_leader {
+            // We just became the leader - start ClusterManager
+            info!("Node became leader, starting ClusterManager");
+            self.start_cluster_manager().await;
+        } else if !is_leader && was_leader {
+            // We lost leadership - stop ClusterManager
+            info!("Node lost leadership, stopping ClusterManager");
+            self.stop_cluster_manager().await;
+        }
+    }
+
+    /// Start the ClusterManager for automatic failure detection and recovery.
+    ///
+    /// This is called when this node becomes the leader.
+    async fn start_cluster_manager(&self) {
+        // Check if cluster management is disabled in config
+        // For now, we'll use a moderate config by default
+        let cluster_config = Arc::new(ClusterManagerConfig::moderate());
+
+        // Check if already running
+        let mut manager_guard = self.inner.cluster_manager.write().await;
+        if manager_guard.is_some() {
+            debug!("ClusterManager already running");
+            return;
+        }
+
+        // Create a new ClusterManager instance
+        let self_clone = Arc::new(self.clone());
+        let cluster_manager = Arc::new(ClusterManager::new(
+            cluster_config,
+            self_clone,
+            self.inner.cluster_event_sender.clone(),
+        ));
+
+        // Start the manager
+        if let Err(e) = cluster_manager.start().await {
+            error!("Failed to start ClusterManager: {}", e);
+            return;
+        }
+
+        // Store the manager
+        *manager_guard = Some(cluster_manager);
+        info!("ClusterManager started successfully");
+    }
+
+    /// Stop the ClusterManager.
+    ///
+    /// This is called when this node loses leadership.
+    async fn stop_cluster_manager(&self) {
+        let mut manager_guard = self.inner.cluster_manager.write().await;
+        if let Some(manager) = manager_guard.take() {
+            if let Err(e) = manager.stop().await {
+                error!("Error stopping ClusterManager: {}", e);
+            } else {
+                info!("ClusterManager stopped successfully");
+            }
+        }
+    }
+
+    /// Subscribe to cluster events.
+    ///
+    /// Returns a receiver channel for cluster events emitted by the ClusterManager.
+    /// Only one subscriber is supported - subsequent calls will return None.
+    pub async fn subscribe_cluster_events(&self) -> Option<mpsc::UnboundedReceiver<ClusterEvent>> {
+        self.inner.cluster_event_receiver.write().await.take()
     }
 
     /// Notify subscribers of a metadata change event.

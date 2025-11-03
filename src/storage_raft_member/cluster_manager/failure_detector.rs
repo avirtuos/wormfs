@@ -356,6 +356,23 @@ impl FailureDetector {
     pub fn get_all_nodes(&self) -> Vec<NodeId> {
         self.node_states.keys().copied().collect()
     }
+
+    /// Clear all tracked nodes.
+    ///
+    /// Used when reinitializing the detector (e.g., on leadership change).
+    pub fn clear_all_nodes(&mut self) {
+        self.node_states.clear();
+    }
+
+    /// Get the health status of all tracked nodes.
+    ///
+    /// Returns a map of NodeId to NodeHealth.
+    pub fn get_all_node_health(&self) -> HashMap<NodeId, NodeHealth> {
+        self.node_states
+            .iter()
+            .map(|(id, state)| (*id, state.health))
+            .collect()
+    }
 }
 
 #[cfg(test)]
