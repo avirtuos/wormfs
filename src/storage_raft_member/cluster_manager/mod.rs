@@ -17,7 +17,7 @@
 /// 2. **MembershipManager**: Executes safe membership changes (demote/promote),
 ///    enforces rate limits, and ensures quorum is always maintained.
 ///
-/// 3. **ClusterManager** (to be implemented): Coordinates the failure detector and
+/// 3. **ClusterManager**: Coordinates the failure detector and
 ///    membership manager in a background task running on the cluster leader.
 ///
 /// ## Usage
@@ -68,12 +68,14 @@
 /// Phase 2 (current): Foundation - types, config, skeleton components
 /// Phase 3: Full implementation with Raft integration
 /// Phase 4: Advanced features (predictive detection, geographic awareness)
+pub mod cluster_manager;
 pub mod config;
 pub mod failure_detector;
 pub mod membership_manager;
 pub mod types;
 
 // Re-export main types for convenience
+pub use cluster_manager::ClusterManager;
 pub use config::{ClusterManagerConfig, ConfigError};
 pub use failure_detector::FailureDetector;
 pub use membership_manager::{MembershipError, MembershipManager};
