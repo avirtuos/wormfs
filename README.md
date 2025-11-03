@@ -14,9 +14,9 @@ Much of the architecture of this project is inspired by LizardFS' simplicity wit
 
 ## 📊 Project Status
 
-**Current Phase:** ✨ Phase 1 Complete! ✨
+**Current Phase:** 🚧 Phase 2 - Consensus Layer (In Development)
 
-WormFS is a work in progress that's being developed iteratively following a phased implementation plan. **Phase 1 is now complete** with all core components wired together and fully documented!
+WormFS is a work in progress that's being developed iteratively following a phased implementation plan. **Phase 1 is complete** with all core components wired together and fully documented! Phase 2 is now underway, adding distributed consensus capabilities with automatic failure detection and recovery.
 
 ### What's Working Now (Phase 1 - Complete ✅)
 - ✅ **MetadataStore**: SQLite-based metadata persistence with WAL mode
@@ -31,13 +31,24 @@ WormFS is a work in progress that's being developed iteratively following a phas
 - ✅ **Documentation**: Complete user guide, configuration reference, and troubleshooting guide
 - ✅ **Demo Script**: Interactive demo with MD5 integrity verification
 
+### Phase 2 Progress (In Development 🚧)
+- ✅ **StorageRaftMember**: Core Raft consensus implementation for distributed coordination
+- ✅ **TransactionLogStore**: Persistent Raft log storage with vote persistence
+- ✅ **Cluster Manager**: Automatic failure detection and recovery with configurable health monitoring
+  - Automatic node health monitoring with heartbeat tracking
+  - Automatic demotion of failed voters to learners
+  - Automatic promotion of recovered learners back to voters
+  - Configurable failure detection thresholds (conservative/moderate/aggressive)
+  - Quorum-safe membership management with rate limiting
+- 🚧 **Multi-node cluster formation and leader election** (in progress)
+
 ### Documentation
 - 📖 [User Guide](docs/user_guide_phase1.md) - Getting started and basic usage
 - ⚙️ [Configuration Reference](docs/configuration.md) - Complete configuration options
 - 🔧 [Troubleshooting Guide](docs/troubleshooting.md) - Common issues and solutions
 
 ### What's Coming Next
-- 📋 Phase 2: Raft consensus and distributed coordination
+- 🚧 Phase 2: Raft consensus and distributed coordination (in progress - cluster manager complete!)
 - 📋 Phase 3: Multi-node storage with distributed erasure coding
 - 📋 Phase 4: Robustness and recovery features
 - 📋 Phase 5: Observability and production testing
