@@ -508,6 +508,90 @@ Based on the open questions answered below, the following key design decisions h
 - **Metrics**: Basic metrics (latency, replication lag, success/failure rates)
 - **Tuning**: LAN-optimized (no special WAN configuration)
 - **Orphaned Chunks**: StorageWatchdog cleanup (1-hour threshold)
+- **Automatic Failover**: ClusterManager provides automatic failure detection and recovery
+
+### Cluster Manager (Phase 2.4)
+
+The StorageRaftMember includes an integrated ClusterManager that provides automatic failure detection and recovery capabilities for the Raft cluster. This system ensures high availability by automatically handling node failures without manual intervention.
+
+**Architecture:**
+```
+ClusterManager (Coordinator)
+├── FailureDetector
+│   ├── Monitors heartbeats and replication lag
+│   ├── Tracks consecutive failures/successes
+│   └── Detects health state transitions
+└── MembershipManager
+    ├── Executes safe membership changes
+    ├── Enforces quorum preservation
+    └── Applies rate limiting
+```
+
+**Health State Machine:**
+```
+    Healthy ──────────► Degraded
+       ▲                    │
+       │                    ▼
+  Recovering ◄────────── Failed
+```
+
+**Key Features:**
+- **Automatic Failure Detection**: Monitors node health via heartbeat timeouts and replication lag
+- **Automatic Demotion**: Failed voters are demoted to learners to maintain cluster health
+- **Automatic Promotion**: Recovered learners are promoted back to voters after syncing
+- **Quorum Safety**: Never performs actions that would cause quorum loss
+- **Rate Limiting**: Maximum one membership change per minute prevents thrashing
+- **Leader-Only**: Runs only on the current Raft leader for consistency
+- **Flapping Prevention**: Exponential backoff for nodes exhibiting unstable behavior
+
+**Configuration Presets:**
+
+The ClusterManager provides three configuration presets optimized for different scenarios:
+
+1. **Conservative** (Stable Networks):
+   - Heartbeat timeout: 30s
+   - Max consecutive failures: 5
+   - Min membership change interval: 120s
+   - Best for: Production systems where false positives are costly
+
+2. **Moderate** (Default):
+   - Heartbeat timeout: 15s
+   - Max consecutive failures: 3
+   - Min membership change interval: 60s
+   - Best for: Most deployments with balanced requirements
+
+3. **Aggressive** (Fast Failover):
+   - Heartbeat timeout: 5s
+   - Max consecutive failures: 2
+   - Min membership change interval: 30s
+   - Best for: Development or systems prioritizing availability
+
+**Failure Detection Thresholds:**
+- **Warning Lag**: 300-500 entries behind leader (configurable)
+- **Critical Lag**: 600-1000 entries behind leader (configurable)
+- **Heartbeat Timeout**: 5-30 seconds (preset dependent)
+- **Recovery Threshold**: 2x consecutive successes of failure threshold
+
+**Event Emission:**
+The ClusterManager emits events for observability:
+- `NodeHealthChanged`: Health state transitions
+- `FailureDetected`: Node failure with details
+- `RecoveryDetected`: Node recovery confirmation
+- `MembershipChangeInitiated`: Demotion/promotion started
+- `MembershipChangeCompleted`: Successful membership change
+- `MembershipChangeFailed`: Failed membership change with error
+- `QuorumPreservationBlocked`: Action prevented to maintain quorum
+
+**Example Failure Scenario:**
+1. Node 3 in a 5-node cluster stops responding
+2. After 3 consecutive failed heartbeats (15s with moderate config)
+3. ClusterManager detects failure and marks node as Failed
+4. If Node 3 was a voter, demotes it to learner (cluster now 4 voters + 1 learner)
+5. Cluster continues operating with 4 voters (maintains quorum)
+6. When Node 3 recovers and catches up with replication
+7. After sustained health (6 consecutive successes)
+8. ClusterManager promotes Node 3 back to voter
+9. Cluster returns to 5 voters
 
 ## Configuration
 
