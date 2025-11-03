@@ -69,6 +69,12 @@ pub struct Inner {
 
     /// Channel receiver for cluster events
     cluster_event_receiver: RwLock<Option<mpsc::UnboundedReceiver<ClusterEvent>>>,
+
+    /// Timestamp when leader last sent AppendEntries to each follower (leader only)
+    pub heartbeat_sent: Arc<RwLock<HashMap<NodeId, std::time::Instant>>>,
+
+    /// Timestamp when leader received AppendEntriesResponse from each follower (leader only)
+    pub heartbeat_acked: Arc<RwLock<HashMap<NodeId, std::time::Instant>>>,
 }
 
 /// State of an in-flight transaction during two-phase commit.
@@ -130,10 +136,14 @@ impl StorageRaftMemberImpl {
     /// * `node_id` - Unique identifier for this node
     /// * `config` - Raft configuration
     /// * `raft` - Initialized OpenRaft instance
+    /// * `heartbeat_sent` - Shared timing tracker for AppendEntries sent times
+    /// * `heartbeat_acked` - Shared timing tracker for AppendEntries response times
     pub(crate) fn new_with_raft(
         node_id: NodeId,
         config: Config,
         raft: Arc<Raft<WormFsTypeConfig>>,
+        heartbeat_sent: Arc<RwLock<HashMap<NodeId, std::time::Instant>>>,
+        heartbeat_acked: Arc<RwLock<HashMap<NodeId, std::time::Instant>>>,
     ) -> Self {
         // Create event channel for cluster manager events
         let (cluster_event_sender, cluster_event_receiver) = mpsc::unbounded_channel();
@@ -154,6 +164,8 @@ impl StorageRaftMemberImpl {
                 cluster_manager: RwLock::new(None),
                 cluster_event_sender,
                 cluster_event_receiver: RwLock::new(Some(cluster_event_receiver)),
+                heartbeat_sent,
+                heartbeat_acked,
             }),
         }
     }
@@ -169,6 +181,11 @@ impl StorageRaftMemberImpl {
         let is_leader = matches!(metrics.state, openraft::ServerState::Leader);
         let was_leader = self.inner.is_leader.swap(is_leader, Ordering::SeqCst);
 
+        eprintln!(
+            "[Leadership] Node {:?}: is_leader={}, was_leader={}",
+            self.inner.node_id, is_leader, was_leader
+        );
+
         let mut current_leader = self.inner.current_leader.write().await;
         *current_leader = metrics.current_leader;
 
@@ -176,10 +193,18 @@ impl StorageRaftMemberImpl {
         if is_leader && !was_leader {
             // We just became the leader - start ClusterManager
             info!("Node became leader, starting ClusterManager");
+            eprintln!(
+                "[Leadership] Node {:?} became leader, starting ClusterManager",
+                self.inner.node_id
+            );
             self.start_cluster_manager().await;
         } else if !is_leader && was_leader {
             // We lost leadership - stop ClusterManager
             info!("Node lost leadership, stopping ClusterManager");
+            eprintln!(
+                "[Leadership] Node {:?} lost leadership, stopping ClusterManager",
+                self.inner.node_id
+            );
             self.stop_cluster_manager().await;
         }
     }
@@ -188,16 +213,42 @@ impl StorageRaftMemberImpl {
     ///
     /// This is called when this node becomes the leader.
     async fn start_cluster_manager(&self) {
+        eprintln!(
+            "[ClusterManager] start_cluster_manager() called for node {:?}",
+            self.inner.node_id
+        );
+
         // Check if cluster management is disabled in config
-        // For now, we'll use a moderate config by default
-        let cluster_config = Arc::new(ClusterManagerConfig::moderate());
+        if !self.inner.config.enable_cluster_manager {
+            debug!("ClusterManager disabled in configuration");
+            eprintln!("[ClusterManager] ClusterManager disabled in configuration");
+            return;
+        }
 
         // Check if already running
         let mut manager_guard = self.inner.cluster_manager.write().await;
         if manager_guard.is_some() {
             debug!("ClusterManager already running");
+            eprintln!("[ClusterManager] ClusterManager already running");
             return;
         }
+
+        // Select the appropriate configuration based on preset
+        use super::types::ClusterManagerPreset;
+        let cluster_config = Arc::new(match self.inner.config.cluster_manager_preset {
+            ClusterManagerPreset::Conservative => ClusterManagerConfig::conservative(),
+            ClusterManagerPreset::Moderate => ClusterManagerConfig::moderate(),
+            ClusterManagerPreset::Aggressive => ClusterManagerConfig::aggressive(),
+        });
+
+        info!(
+            "Starting ClusterManager with preset: {:?}",
+            self.inner.config.cluster_manager_preset
+        );
+        eprintln!(
+            "[ClusterManager] Starting ClusterManager with preset: {:?}",
+            self.inner.config.cluster_manager_preset
+        );
 
         // Create a new ClusterManager instance
         let self_clone = Arc::new(self.clone());
@@ -208,14 +259,17 @@ impl StorageRaftMemberImpl {
         ));
 
         // Start the manager
+        eprintln!("[ClusterManager] Calling cluster_manager.start()...");
         if let Err(e) = cluster_manager.start().await {
             error!("Failed to start ClusterManager: {}", e);
+            eprintln!("[ClusterManager] Failed to start: {}", e);
             return;
         }
 
         // Store the manager
         *manager_guard = Some(cluster_manager);
         info!("ClusterManager started successfully");
+        eprintln!("[ClusterManager] ClusterManager started successfully");
     }
 
     /// Stop the ClusterManager.
@@ -238,6 +292,126 @@ impl StorageRaftMemberImpl {
     /// Only one subscriber is supported - subsequent calls will return None.
     pub async fn subscribe_cluster_events(&self) -> Option<mpsc::UnboundedReceiver<ClusterEvent>> {
         self.inner.cluster_event_receiver.write().await.take()
+    }
+
+    /// Process cluster events from the ClusterManager.
+    ///
+    /// This method runs in a background task and processes events emitted by the
+    /// ClusterManager. It logs all events for observability and could be extended
+    /// to emit metrics or trigger additional actions.
+    async fn process_cluster_events(self: Arc<Self>) {
+        // Try to take ownership of the receiver
+        let mut receiver_guard = self.inner.cluster_event_receiver.write().await;
+        let receiver = match receiver_guard.take() {
+            Some(rx) => rx,
+            None => {
+                error!("ClusterManager event receiver already taken");
+                return;
+            }
+        };
+        drop(receiver_guard);
+
+        info!("ClusterManager event processing task started");
+
+        // Process events until the channel is closed
+        let mut receiver = receiver;
+        while let Some(event) = receiver.recv().await {
+            match event {
+                ClusterEvent::NodeHealthChanged {
+                    node_id,
+                    old_health,
+                    new_health,
+                    reason,
+                } => {
+                    info!(
+                        node_id = ?node_id,
+                        old_health = ?old_health,
+                        new_health = ?new_health,
+                        reason = %reason,
+                        "Cluster event: Node health changed"
+                    );
+                }
+                ClusterEvent::FailureDetected {
+                    node_id,
+                    consecutive_failures,
+                    time_since_heartbeat,
+                } => {
+                    error!(
+                        node_id = ?node_id,
+                        consecutive_failures = consecutive_failures,
+                        time_since_heartbeat = ?time_since_heartbeat,
+                        "Cluster event: Node failure detected"
+                    );
+                }
+                ClusterEvent::RecoveryDetected {
+                    node_id,
+                    consecutive_successes,
+                } => {
+                    info!(
+                        node_id = ?node_id,
+                        consecutive_successes = consecutive_successes,
+                        "Cluster event: Node recovery detected"
+                    );
+                }
+                ClusterEvent::MembershipChangeInitiated {
+                    node_id,
+                    action,
+                    reason,
+                } => {
+                    info!(
+                        node_id = ?node_id,
+                        action = ?action,
+                        reason = %reason,
+                        "Cluster event: Membership change initiated"
+                    );
+                }
+                ClusterEvent::MembershipChangeCompleted { node_id, action } => {
+                    info!(
+                        node_id = ?node_id,
+                        action = ?action,
+                        "Cluster event: Membership change completed"
+                    );
+                }
+                ClusterEvent::MembershipChangeFailed {
+                    node_id,
+                    action,
+                    error,
+                } => {
+                    error!(
+                        node_id = ?node_id,
+                        action = ?action,
+                        error = %error,
+                        "Cluster event: Membership change failed"
+                    );
+                }
+                ClusterEvent::QuorumPreservationBlocked {
+                    node_id,
+                    action,
+                    reason,
+                } => {
+                    error!(
+                        node_id = ?node_id,
+                        action = ?action,
+                        reason = %reason,
+                        "Cluster event: Membership change blocked to preserve quorum"
+                    );
+                }
+                ClusterEvent::RateLimitTriggered {
+                    node_id,
+                    action,
+                    reason,
+                } => {
+                    debug!(
+                        node_id = ?node_id,
+                        action = ?action,
+                        reason = %reason,
+                        "Cluster event: Membership change rate-limited"
+                    );
+                }
+            }
+        }
+
+        info!("ClusterManager event processing task stopped");
     }
 
     /// Notify subscribers of a metadata change event.
@@ -315,6 +489,21 @@ impl StorageRaftMemberImpl {
             }
         }
 
+        // Clone the heartbeat timing maps (cheap since they're just timestamps)
+        // Use try_read() to avoid blocking in async contexts - if lock is held, return empty maps
+        let heartbeat_sent = self
+            .inner
+            .heartbeat_sent
+            .try_read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let heartbeat_acked = self
+            .inner
+            .heartbeat_acked
+            .try_read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+
         RaftMetrics {
             current_term: openraft_metrics.current_term,
             role,
@@ -329,6 +518,8 @@ impl StorageRaftMemberImpl {
                 .voter_ids()
                 .count(),
             replication_lag,
+            heartbeat_sent,
+            heartbeat_acked,
         }
     }
 }
@@ -387,11 +578,19 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             .await
             .map_err(|e| Error::StorageError(format!("Failed to open metadata store: {:?}", e)))?;
 
+        // Create shared timing trackers for heartbeat monitoring
+        let heartbeat_sent = Arc::new(RwLock::new(HashMap::new()));
+        let heartbeat_acked = Arc::new(RwLock::new(HashMap::new()));
+
         // Create the adapters
         let log_storage = RaftLogStorageAdapter::new(log_store);
         let state_machine =
             WormFsStateMachine::new(metadata_store, config.snapshot_directory.clone());
-        let network_factory = WormFsNetworkFactory::new(storage_network);
+        let network_factory = WormFsNetworkFactory::new(
+            storage_network,
+            heartbeat_sent.clone(),
+            heartbeat_acked.clone(),
+        );
 
         // Convert our Config to OpenRaft's config
         let raft_config = openraft::Config {
@@ -425,20 +624,38 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         let raft = Arc::new(raft);
 
         // Create the implementation
-        let impl_instance = Self::new_with_raft(node_id, config, raft.clone());
+        let impl_instance = Self::new_with_raft(
+            node_id,
+            config,
+            raft.clone(),
+            heartbeat_sent,
+            heartbeat_acked,
+        );
 
         // Start a background task to monitor Raft metrics and update leadership state
         let impl_clone = impl_instance.clone();
         tokio::spawn(async move {
             let mut metrics_rx = impl_clone.inner.raft.metrics();
+            eprintln!(
+                "[Metrics Monitor] Starting metrics monitoring task for node {:?}",
+                impl_clone.inner.node_id
+            );
             loop {
                 tokio::select! {
                     _ = metrics_rx.changed() => {
                         let metrics = metrics_rx.borrow_and_update().clone();
+                        eprintln!("[Metrics Monitor] Node {:?} metrics changed: state={:?}, leader={:?}",
+                            impl_clone.inner.node_id, metrics.state, metrics.current_leader);
                         impl_clone.update_leadership(&metrics).await;
                     }
                 }
             }
+        });
+
+        // Start a background task to process cluster events from ClusterManager
+        let impl_clone = Arc::new(impl_instance.clone());
+        tokio::spawn(async move {
+            impl_clone.process_cluster_events().await;
         });
 
         info!(
