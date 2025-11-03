@@ -241,8 +241,14 @@ impl MembershipManager {
     /// - Quorum preservation (prevents demotion that would lose quorum)
     /// - Rate limiting (enforces minimum time between changes)
     pub async fn demote_to_learner(&mut self, node_id: NodeId) -> Result<(), MembershipError> {
+        eprintln!(
+            "[MembershipManager] demote_to_learner called for node {:?}",
+            node_id
+        );
+
         // 1. Validate preconditions - must be leader
         if !self.raft.as_ref().is_leader() {
+            eprintln!("[MembershipManager] Not leader, cannot demote");
             return Err(MembershipError::RaftError(
                 "Not leader - cannot demote node".to_string(),
             ));
@@ -254,14 +260,69 @@ impl MembershipManager {
                 "Node {:?} is already a learner, no demotion needed",
                 node_id
             );
+            eprintln!(
+                "[MembershipManager] Node {:?} already a learner, skipping",
+                node_id
+            );
             return Ok(());
         }
 
+        eprintln!(
+            "[MembershipManager] Node {:?} is a voter, proceeding with demotion",
+            node_id
+        );
+
         // 3. Validate quorum safety and rate limiting
         let voter_count = self.get_voter_count().await?;
+        eprintln!("[MembershipManager] Current voter count: {}", voter_count);
         self.validate_action(node_id, MembershipAction::Demote, voter_count)?;
+        eprintln!("[MembershipManager] Validation passed, proceeding with demotion");
 
-        // 4. Execute demotion via OpenRaft
+        // 4. Get node information from current membership
+        // We need this to re-add the node as a learner
+        let node_info = {
+            let metrics = self.raft.inner().raft.metrics().borrow().clone();
+            let membership = metrics.membership_config.membership();
+            membership.get_node(&node_id).cloned().ok_or_else(|| {
+                MembershipError::RaftError(format!("Node {:?} not found in membership", node_id))
+            })?
+        };
+
+        // 5. Add as learner first (non-blocking) to ensure it stays in the cluster
+        // This is idempotent - if already a learner, this is a no-op
+        // Even if the node is offline, we can still add it as a learner
+        info!("Adding node {:?} as learner before demotion", node_id);
+        eprintln!(
+            "[MembershipManager] Adding node {:?} as learner (non-blocking) before demotion",
+            node_id
+        );
+
+        match self
+            .raft
+            .inner()
+            .raft
+            .add_learner(node_id, node_info, false)
+            .await
+        {
+            Ok(_) => {
+                eprintln!(
+                    "[MembershipManager] Successfully added node {:?} as learner",
+                    node_id
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[MembershipManager] ERROR: Failed to add node {:?} as learner: {:?}",
+                    node_id, e
+                );
+                return Err(MembershipError::RaftError(format!(
+                    "Failed to add learner: {:?}",
+                    e
+                )));
+            }
+        }
+
+        // 6. Execute demotion via OpenRaft (remove from voters)
         let mut voter_ids = std::collections::BTreeSet::new();
         voter_ids.insert(node_id);
 
@@ -272,7 +333,7 @@ impl MembershipManager {
             .await
             .map_err(|e| MembershipError::RaftError(format!("Demotion failed: {:?}", e)))?;
 
-        // 5. Record change for rate limiting
+        // 7. Record change for rate limiting
         self.record_membership_change(node_id);
 
         info!("Successfully demoted node {:?} to learner", node_id);
@@ -342,9 +403,14 @@ impl MembershipManager {
     /// to voter status when it recovers via `handle_node_recovery()`.
     pub async fn handle_node_failure(&mut self, node_id: NodeId) -> Result<(), MembershipError> {
         warn!("Handling failure for node {:?}", node_id);
+        eprintln!(
+            "[MembershipManager] handle_node_failure called for node {:?}",
+            node_id
+        );
 
         // 1. Validate this is the leader
         if !self.raft.as_ref().is_leader() {
+            eprintln!("[MembershipManager] Not leader, cannot handle failure");
             return Err(MembershipError::RaftError(
                 "Not leader - cannot handle node failure".to_string(),
             ));
@@ -356,9 +422,17 @@ impl MembershipManager {
                 "Node {:?} is already a learner, no demotion needed on failure",
                 node_id
             );
+            eprintln!(
+                "[MembershipManager] Node {:?} is already a learner, skipping demotion",
+                node_id
+            );
             return Ok(());
         }
 
+        eprintln!(
+            "[MembershipManager] Node {:?} is a voter, calling demote_to_learner()",
+            node_id
+        );
         // 3. Demote to learner (will validate quorum and rate limits)
         self.demote_to_learner(node_id).await?;
 
@@ -426,7 +500,7 @@ mod tests {
     use crate::storage_raft_member::network_factory::WormFsNetworkFactory;
     use crate::storage_raft_member::raft_member::RaftRpcHandler;
     use crate::storage_raft_member::state_machine::WormFsStateMachine;
-    use crate::storage_raft_member::types::Config as RaftConfig;
+    use crate::storage_raft_member::types::{ClusterManagerPreset, Config as RaftConfig};
     use crate::transaction_log_store::{TransactionLogConfig, TransactionLogStoreImpl};
     use openraft::Raft;
     use std::net::SocketAddr;
@@ -571,12 +645,20 @@ mod tests {
             snapshot_directory: snapshot_dir.clone(),
             network_address: "127.0.0.1:8080".parse().unwrap(),
             storage_network: Some(Arc::new(MockNetworkHandle)),
+            enable_cluster_manager: false,
+            cluster_manager_preset: ClusterManagerPreset::Moderate,
         };
+
+        // Create timing trackers for heartbeat monitoring
+        let heartbeat_sent = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let heartbeat_acked = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
 
         let raft_member = Arc::new(StorageRaftMemberImpl::new_with_raft(
             node_id,
             config,
             Arc::new(raft),
+            heartbeat_sent,
+            heartbeat_acked,
         ));
 
         (raft_member, temp_dir)

@@ -162,25 +162,49 @@ impl ClusterManager {
         let openraft_metrics = self.raft.inner().raft.metrics().borrow().clone();
         let membership = openraft_metrics.membership_config.membership();
 
+        eprintln!("[ClusterManager] initialize_node_tracking() called");
+        eprintln!(
+            "[ClusterManager] Current membership: voters={:?}, learners={:?}",
+            membership.voter_ids().collect::<Vec<_>>(),
+            membership.learner_ids().collect::<Vec<_>>()
+        );
+
         let mut detector = self.failure_detector.lock().await;
         detector.clear_all_nodes();
 
         // Add all voters
         for node_id in membership.voter_ids() {
+            eprintln!(
+                "[ClusterManager] Checking voter node {:?} (self={:?})",
+                node_id,
+                self.raft.inner().node_id
+            );
             if node_id != self.raft.inner().node_id {
                 detector.add_node(node_id, true);
                 info!("Tracking voter node: {:?}", node_id);
+                eprintln!(
+                    "[ClusterManager] Added voter node {:?} to tracking",
+                    node_id
+                );
+            } else {
+                eprintln!("[ClusterManager] Skipping self node {:?}", node_id);
             }
         }
 
         // Add all learners
         for node_id in membership.learner_ids() {
+            eprintln!("[ClusterManager] Checking learner node {:?}", node_id);
             if node_id != self.raft.inner().node_id {
                 detector.add_node(node_id, false);
                 info!("Tracking learner node: {:?}", node_id);
+                eprintln!(
+                    "[ClusterManager] Added learner node {:?} to tracking",
+                    node_id
+                );
             }
         }
 
+        eprintln!("[ClusterManager] Node tracking initialized");
         Ok(())
     }
 
@@ -202,19 +226,26 @@ impl ClusterManager {
             check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             info!("ClusterManager monitoring task started");
+            eprintln!(
+                "[ClusterManager Monitor] Monitoring task started (interval: {:?})",
+                config.health_check_interval
+            );
 
             loop {
                 check_interval.tick().await;
+                eprintln!("[ClusterManager Monitor] Tick - checking cluster health");
 
                 // Check if we should stop
                 if !*is_running.read().await {
                     info!("ClusterManager monitoring task stopping");
+                    eprintln!("[ClusterManager Monitor] Stopping (is_running=false)");
                     break;
                 }
 
                 // Check if we're still the leader
                 if !raft.is_leader() {
                     warn!("No longer the leader, stopping ClusterManager monitoring");
+                    eprintln!("[ClusterManager Monitor] No longer leader, stopping");
                     *is_running.write().await = false;
                     break;
                 }
@@ -223,9 +254,47 @@ impl ClusterManager {
                 let metrics = raft.get_metrics();
                 let self_node_id = raft.inner().node_id;
 
+                eprintln!(
+                    "[ClusterManager Monitor] Polling metrics for self_node={:?}",
+                    self_node_id
+                );
+
+                // Re-sync node tracking with current membership
+                // This ensures we track nodes added after ClusterManager started
+                let openraft_metrics = raft.inner().raft.metrics().borrow().clone();
+                let membership = openraft_metrics.membership_config.membership();
+
                 {
                     let mut detector = failure_detector.lock().await;
+
+                    // Add any voters we're not yet tracking
+                    for node_id in membership.voter_ids() {
+                        if node_id != self_node_id && !detector.is_tracking(node_id) {
+                            detector.add_node(node_id, true);
+                            eprintln!(
+                                "[ClusterManager Monitor] Started tracking new voter: {:?}",
+                                node_id
+                            );
+                        }
+                    }
+
+                    // Add any learners we're not yet tracking
+                    for node_id in membership.learner_ids() {
+                        if node_id != self_node_id && !detector.is_tracking(node_id) {
+                            detector.add_node(node_id, false);
+                            eprintln!(
+                                "[ClusterManager Monitor] Started tracking new learner: {:?}",
+                                node_id
+                            );
+                        }
+                    }
+
                     detector.poll_raft_metrics(&metrics, self_node_id);
+                    let all_health = detector.get_all_node_health();
+                    eprintln!(
+                        "[ClusterManager Monitor] Current health states: {:?}",
+                        all_health
+                    );
                 }
 
                 // Check for health state changes and respond
@@ -238,10 +307,15 @@ impl ClusterManager {
                 .await
                 {
                     error!("Error processing health changes: {:?}", e);
+                    eprintln!(
+                        "[ClusterManager Monitor] Error processing health changes: {:?}",
+                        e
+                    );
                 }
             }
 
             info!("ClusterManager monitoring task stopped");
+            eprintln!("[ClusterManager Monitor] Monitoring task stopped");
         })
     }
 
@@ -275,6 +349,10 @@ impl ClusterManager {
                 "Node {:?} health changed: {:?} -> {:?}",
                 node_id, previous, current
             );
+            eprintln!(
+                "[ClusterManager] Node {:?} health changed: {:?} -> {:?}",
+                node_id, previous, current
+            );
 
             // Update last known state
             last_health.insert(*node_id, *current);
@@ -293,6 +371,10 @@ impl ClusterManager {
                 (NodeHealth::Failed, Some(NodeHealth::Degraded))
                 | (NodeHealth::Failed, Some(NodeHealth::Healthy)) => {
                     info!("Node {:?} has failed, triggering failure handling", node_id);
+                    eprintln!(
+                        "[ClusterManager] Node {:?} has FAILED, triggering failure handling",
+                        node_id
+                    );
 
                     let mut manager = membership_manager.lock().await;
                     if let Err(e) = manager.handle_node_failure(*node_id).await {
@@ -318,6 +400,7 @@ impl ClusterManager {
                         "Node {:?} has recovered, triggering recovery handling",
                         node_id
                     );
+                    eprintln!("[ClusterManager] Node {:?} has RECOVERED (Recovering->Healthy), triggering recovery handling", node_id);
 
                     let mut manager = membership_manager.lock().await;
                     if let Err(e) = manager.handle_node_recovery(*node_id).await {
