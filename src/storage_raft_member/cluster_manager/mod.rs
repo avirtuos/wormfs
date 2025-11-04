@@ -22,25 +22,20 @@
 ///
 /// ## Usage
 ///
+/// ClusterManager is automatically integrated into StorageRaftMember and runs
+/// when the node becomes the Raft leader. The example below shows how to configure it:
+///
 /// ```rust,no_run
-/// use wormfs::storage_raft_member::cluster_manager::{
-///     ClusterManagerConfig,
-///     FailureDetector,
-///     MembershipManager,
-/// };
-/// use std::sync::Arc;
+/// use wormfs::storage_raft_member::{Config, ClusterManagerPreset};
 ///
-/// // Create configuration (or use a preset)
-/// let config = Arc::new(ClusterManagerConfig::moderate());
+/// let mut config = Config::default();
 ///
-/// // Create components
-/// let mut failure_detector = FailureDetector::new(config.clone());
-/// let mut membership_manager = MembershipManager::new(config);
+/// // Enable ClusterManager (enabled by default)
+/// config.enable_cluster_manager = true;
 ///
-/// // Track nodes
-/// use openraft::NodeId;
-/// failure_detector.add_node(NodeId(1), true);  // voter
-/// failure_detector.add_node(NodeId(2), false); // learner
+/// // Select a configuration preset
+/// config.cluster_manager_preset = ClusterManagerPreset::Moderate;
+/// // Options: Conservative, Moderate, or Aggressive
 /// ```
 ///
 /// ## Configuration
@@ -71,6 +66,7 @@
 pub mod cluster_manager;
 pub mod config;
 pub mod failure_detector;
+pub mod heartbeat_tracker;
 pub mod membership_manager;
 pub mod types;
 
@@ -78,5 +74,6 @@ pub mod types;
 pub use cluster_manager::ClusterManager;
 pub use config::{ClusterManagerConfig, ConfigError};
 pub use failure_detector::FailureDetector;
+pub use heartbeat_tracker::{ClusterSummary, HeartbeatTracker, NodeHeartbeat};
 pub use membership_manager::{MembershipError, MembershipManager};
 pub use types::{ClusterEvent, MembershipAction, NodeHealth, NodeState};

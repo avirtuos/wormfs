@@ -15,7 +15,10 @@
 
 use libp2p::PeerId;
 use openraft::network::RaftNetworkFactory;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::RwLock;
 use tracing::debug;
 
 use crate::storage_network::NetworkHandleTrait;
@@ -38,6 +41,12 @@ use super::types::NodeId;
 pub struct WormFsNetworkFactory {
     /// Shared handle to the storage network (trait object for flexibility)
     network: Arc<dyn NetworkHandleTrait>,
+
+    /// Shared timing tracker for AppendEntries sent times
+    heartbeat_sent: Arc<RwLock<HashMap<NodeId, Instant>>>,
+
+    /// Shared timing tracker for AppendEntries response times
+    heartbeat_acked: Arc<RwLock<HashMap<NodeId, Instant>>>,
 }
 
 impl WormFsNetworkFactory {
@@ -46,8 +55,18 @@ impl WormFsNetworkFactory {
     /// # Arguments
     ///
     /// * `network` - The storage network handle (trait object) to use for all network operations
-    pub fn new(network: Arc<dyn NetworkHandleTrait>) -> Self {
-        Self { network }
+    /// * `heartbeat_sent` - Shared map to track when AppendEntries are sent
+    /// * `heartbeat_acked` - Shared map to track when AppendEntries responses are received
+    pub fn new(
+        network: Arc<dyn NetworkHandleTrait>,
+        heartbeat_sent: Arc<RwLock<HashMap<NodeId, Instant>>>,
+        heartbeat_acked: Arc<RwLock<HashMap<NodeId, Instant>>>,
+    ) -> Self {
+        Self {
+            network,
+            heartbeat_sent,
+            heartbeat_acked,
+        }
     }
 }
 
@@ -93,7 +112,13 @@ impl RaftNetworkFactory<WormFsTypeConfig> for WormFsNetworkFactory {
             target, target_peer_id
         );
 
-        RaftMember::new(target, target_peer_id, self.network.clone())
+        RaftMember::new(
+            target,
+            target_peer_id,
+            self.network.clone(),
+            self.heartbeat_sent.clone(),
+            self.heartbeat_acked.clone(),
+        )
     }
 }
 

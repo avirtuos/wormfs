@@ -99,7 +99,8 @@ pub use raft_member::{RaftMember, RaftRpcHandler};
 pub use state_machine::WormFsStateMachine;
 use std::net::SocketAddr;
 pub use types::{
-    Config, Error, MetadataChangeEvent, MetadataChangeType, NodeId, RaftMetrics, RaftRole,
+    ClusterManagerPreset, Config, Error, MetadataChangeEvent, MetadataChangeType, NodeId,
+    RaftMetrics, RaftRole,
 };
 
 /// StorageRaftMember trait defines the interface for Raft consensus operations.

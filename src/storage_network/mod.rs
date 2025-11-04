@@ -95,6 +95,10 @@ pub struct StorageNetworkHandle {
 
     /// Network configuration (immutable after creation, safe to clone)
     pub(crate) config: Arc<Config>,
+
+    /// Heartbeat tracker for monitoring cluster health and discovery
+    pub(crate) heartbeat_tracker:
+        Arc<crate::storage_raft_member::cluster_manager::HeartbeatTracker>,
 }
 
 // StorageNetworkHandle is automatically Send + Sync because:
@@ -457,6 +461,16 @@ impl StorageNetworkHandle {
             .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
 
         Ok(())
+    }
+
+    /// Get the heartbeat tracker for monitoring cluster health and discovery.
+    ///
+    /// The heartbeat tracker provides access to heartbeat information from all nodes
+    /// in the cluster, including their Raft state, log indices, and health status.
+    pub fn heartbeat_tracker(
+        &self,
+    ) -> Arc<crate::storage_raft_member::cluster_manager::HeartbeatTracker> {
+        self.heartbeat_tracker.clone()
     }
 }
 

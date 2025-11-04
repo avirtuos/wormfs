@@ -558,7 +558,6 @@ pub struct HeartbeatMessage {
     pub admin_url: Option<String>,
 
     // ==== Raft-Specific Fields for Cluster Discovery ====
-
     /// Current Raft state: "Leader", "Follower", "Candidate", "Learner", "Shutdown"
     #[serde(default)]
     pub raft_state: Option<String>,

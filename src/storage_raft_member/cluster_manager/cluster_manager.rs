@@ -45,6 +45,9 @@ pub struct ClusterManager {
     /// Background task handle (None when not running)
     monitor_task: Arc<RwLock<Option<JoinHandle<()>>>>,
 
+    /// Heartbeat discovery task handle (None when not running)
+    discovery_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+
     /// Channel for sending cluster events
     event_sender: mpsc::UnboundedSender<ClusterEvent>,
 
@@ -53,6 +56,9 @@ pub struct ClusterManager {
 
     /// Flag to track if we're currently the leader
     is_running: Arc<RwLock<bool>>,
+
+    /// Heartbeat tracker for discovering new/restarted nodes
+    heartbeat_tracker: Option<Arc<super::HeartbeatTracker>>,
 }
 
 impl ClusterManager {
@@ -63,6 +69,7 @@ impl ClusterManager {
     /// * `config` - Configuration for cluster management
     /// * `raft` - Reference to the Raft instance
     /// * `event_sender` - Channel for emitting cluster events
+    /// * `heartbeat_tracker` - Optional heartbeat tracker for discovering restarted nodes
     ///
     /// # Returns
     ///
@@ -71,6 +78,7 @@ impl ClusterManager {
         config: Arc<ClusterManagerConfig>,
         raft: Arc<StorageRaftMemberImpl>,
         event_sender: mpsc::UnboundedSender<ClusterEvent>,
+        heartbeat_tracker: Option<Arc<super::HeartbeatTracker>>,
     ) -> Self {
         // Create the sub-components
         let failure_detector = Arc::new(Mutex::new(FailureDetector::new(config.clone())));
@@ -85,9 +93,11 @@ impl ClusterManager {
             failure_detector,
             membership_manager,
             monitor_task: Arc::new(RwLock::new(None)),
+            discovery_task: Arc::new(RwLock::new(None)),
             event_sender,
             last_known_health: Arc::new(RwLock::new(HashMap::new())),
             is_running: Arc::new(RwLock::new(false)),
+            heartbeat_tracker,
         }
     }
 
@@ -120,6 +130,13 @@ impl ClusterManager {
         let mut task_guard = self.monitor_task.write().await;
         *task_guard = Some(handle);
 
+        // Spawn the heartbeat discovery task if we have a tracker
+        if let Some(discovery_handle) = self.spawn_heartbeat_discovery_task() {
+            let mut discovery_guard = self.discovery_task.write().await;
+            *discovery_guard = Some(discovery_handle);
+            info!("Heartbeat discovery task spawned");
+        }
+
         Ok(())
     }
 
@@ -147,6 +164,13 @@ impl ClusterManager {
             let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
         }
 
+        // Cancel the discovery task
+        let mut discovery_guard = self.discovery_task.write().await;
+        if let Some(handle) = discovery_guard.take() {
+            handle.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        }
+
         // Clear last known health states
         self.last_known_health.write().await.clear();
 
@@ -162,8 +186,8 @@ impl ClusterManager {
         let openraft_metrics = self.raft.inner().raft.metrics().borrow().clone();
         let membership = openraft_metrics.membership_config.membership();
 
-        eprintln!("[ClusterManager] initialize_node_tracking() called");
-        eprintln!(
+        info!("[ClusterManager] initialize_node_tracking() called");
+        debug!(
             "[ClusterManager] Current membership: voters={:?}, learners={:?}",
             membership.voter_ids().collect::<Vec<_>>(),
             membership.learner_ids().collect::<Vec<_>>()
@@ -174,7 +198,7 @@ impl ClusterManager {
 
         // Add all voters
         for node_id in membership.voter_ids() {
-            eprintln!(
+            debug!(
                 "[ClusterManager] Checking voter node {:?} (self={:?})",
                 node_id,
                 self.raft.inner().node_id
@@ -182,29 +206,29 @@ impl ClusterManager {
             if node_id != self.raft.inner().node_id {
                 detector.add_node(node_id, true);
                 info!("Tracking voter node: {:?}", node_id);
-                eprintln!(
+                debug!(
                     "[ClusterManager] Added voter node {:?} to tracking",
                     node_id
                 );
             } else {
-                eprintln!("[ClusterManager] Skipping self node {:?}", node_id);
+                info!("[ClusterManager] Skipping self node {:?}", node_id);
             }
         }
 
         // Add all learners
         for node_id in membership.learner_ids() {
-            eprintln!("[ClusterManager] Checking learner node {:?}", node_id);
+            info!("[ClusterManager] Checking learner node {:?}", node_id);
             if node_id != self.raft.inner().node_id {
                 detector.add_node(node_id, false);
                 info!("Tracking learner node: {:?}", node_id);
-                eprintln!(
+                debug!(
                     "[ClusterManager] Added learner node {:?} to tracking",
                     node_id
                 );
             }
         }
 
-        eprintln!("[ClusterManager] Node tracking initialized");
+        info!("[ClusterManager] Node tracking initialized");
         Ok(())
     }
 
@@ -226,26 +250,26 @@ impl ClusterManager {
             check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             info!("ClusterManager monitoring task started");
-            eprintln!(
+            info!(
                 "[ClusterManager Monitor] Monitoring task started (interval: {:?})",
                 config.health_check_interval
             );
 
             loop {
                 check_interval.tick().await;
-                eprintln!("[ClusterManager Monitor] Tick - checking cluster health");
+                info!("[ClusterManager Monitor] Tick - checking cluster health");
 
                 // Check if we should stop
                 if !*is_running.read().await {
                     info!("ClusterManager monitoring task stopping");
-                    eprintln!("[ClusterManager Monitor] Stopping (is_running=false)");
+                    info!("[ClusterManager Monitor] Stopping (is_running=false)");
                     break;
                 }
 
                 // Check if we're still the leader
                 if !raft.is_leader() {
                     warn!("No longer the leader, stopping ClusterManager monitoring");
-                    eprintln!("[ClusterManager Monitor] No longer leader, stopping");
+                    info!("[ClusterManager Monitor] No longer leader, stopping");
                     *is_running.write().await = false;
                     break;
                 }
@@ -254,7 +278,7 @@ impl ClusterManager {
                 let metrics = raft.get_metrics();
                 let self_node_id = raft.inner().node_id;
 
-                eprintln!(
+                debug!(
                     "[ClusterManager Monitor] Polling metrics for self_node={:?}",
                     self_node_id
                 );
@@ -271,7 +295,7 @@ impl ClusterManager {
                     for node_id in membership.voter_ids() {
                         if node_id != self_node_id && !detector.is_tracking(node_id) {
                             detector.add_node(node_id, true);
-                            eprintln!(
+                            debug!(
                                 "[ClusterManager Monitor] Started tracking new voter: {:?}",
                                 node_id
                             );
@@ -282,7 +306,7 @@ impl ClusterManager {
                     for node_id in membership.learner_ids() {
                         if node_id != self_node_id && !detector.is_tracking(node_id) {
                             detector.add_node(node_id, false);
-                            eprintln!(
+                            debug!(
                                 "[ClusterManager Monitor] Started tracking new learner: {:?}",
                                 node_id
                             );
@@ -291,7 +315,7 @@ impl ClusterManager {
 
                     detector.poll_raft_metrics(&metrics, self_node_id);
                     let all_health = detector.get_all_node_health();
-                    eprintln!(
+                    debug!(
                         "[ClusterManager Monitor] Current health states: {:?}",
                         all_health
                     );
@@ -307,7 +331,7 @@ impl ClusterManager {
                 .await
                 {
                     error!("Error processing health changes: {:?}", e);
-                    eprintln!(
+                    error!(
                         "[ClusterManager Monitor] Error processing health changes: {:?}",
                         e
                     );
@@ -315,8 +339,127 @@ impl ClusterManager {
             }
 
             info!("ClusterManager monitoring task stopped");
-            eprintln!("[ClusterManager Monitor] Monitoring task stopped");
+            info!("[ClusterManager Monitor] Monitoring task stopped");
         })
+    }
+
+    /// Spawn a heartbeat discovery task that monitors for restarted nodes.
+    ///
+    /// This task watches heartbeats and automatically re-adds nodes that appear
+    /// to have restarted and are behind in the log.
+    fn spawn_heartbeat_discovery_task(&self) -> Option<JoinHandle<()>> {
+        let heartbeat_tracker = self.heartbeat_tracker.as_ref()?.clone();
+        let raft = self.raft.clone();
+        let membership_manager = self.membership_manager.clone();
+        let event_sender = self.event_sender.clone();
+        let is_running = self.is_running.clone();
+        let config = self.config.clone();
+
+        Some(tokio::spawn(async move {
+            let mut check_interval = interval(Duration::from_secs(5));
+            check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            info!("ClusterManager heartbeat discovery task started");
+            info!("[ClusterManager HeartbeatDiscovery] Task started");
+
+            loop {
+                check_interval.tick().await;
+
+                // Check if we should stop
+                if !*is_running.read().await {
+                    info!("Heartbeat discovery task stopping");
+                    info!("[ClusterManager HeartbeatDiscovery] Stopping");
+                    break;
+                }
+
+                // Check if we're still the leader
+                if !raft.is_leader() {
+                    info!("[ClusterManager HeartbeatDiscovery] No longer leader, stopping");
+                    break;
+                }
+
+                // Get current membership
+                let openraft_metrics = raft.inner().raft.metrics().borrow().clone();
+                let membership = openraft_metrics.membership_config.membership();
+                let voter_ids: Vec<_> = membership.voter_ids().collect();
+                let learner_ids: Vec<_> = membership.learner_ids().collect();
+
+                // Check all active heartbeats for nodes not in membership
+                let active_hbs = heartbeat_tracker.get_active_heartbeats();
+
+                for hb in active_hbs {
+                    // Parse node_id from string (format is "node_X" where X is the number)
+                    let node_id = if let Some(num_str) = hb.node_id.strip_prefix("node_") {
+                        if let Ok(num) = num_str.parse::<u64>() {
+                            NodeId(num)
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    };
+
+                    // Skip if this is ourselves
+                    if node_id == raft.inner().node_id {
+                        continue;
+                    }
+
+                    // Check if node is not in current membership
+                    let is_member = voter_ids.contains(&node_id) || learner_ids.contains(&node_id);
+
+                    if !is_member {
+                        info!(
+                            "Discovered restarted node {:?} via heartbeat (not in membership)",
+                            node_id
+                        );
+                        info!(
+                            "[ClusterManager HeartbeatDiscovery] Discovered node {:?} not in membership",
+                            node_id
+                        );
+
+                        // Create a WormFsNode for the restarted node
+                        // Generate the same deterministic peer_id that the stub network uses
+                        let keypair =
+                            libp2p::identity::Keypair::ed25519_from_bytes([node_id.0 as u8; 32])
+                                .expect("Failed to create deterministic keypair");
+                        let peer_id = libp2p::PeerId::from(keypair.public());
+                        let node_info = super::super::raft_config::WormFsNode {
+                            peer_id: peer_id.to_string(),
+                            metadata: None,
+                        };
+
+                        // Try to re-add as learner using OpenRaft API directly
+                        match raft
+                            .inner()
+                            .raft
+                            .add_learner(node_id, node_info, true)
+                            .await
+                        {
+                            Ok(_) => {
+                                info!("Re-added discovered node {:?} as learner", node_id);
+                                info!(
+                                    "[ClusterManager HeartbeatDiscovery] Re-added node {:?} as learner",
+                                    node_id
+                                );
+
+                                // Emit event for the re-addition
+                                let _ =
+                                    event_sender.send(ClusterEvent::MembershipChangeCompleted {
+                                        node_id,
+                                        action: super::types::MembershipAction::Add,
+                                    });
+                            }
+                            Err(e) => {
+                                warn!("Failed to re-add discovered node {:?}: {:?}", node_id, e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            info!("Heartbeat discovery task stopped");
+            info!("[ClusterManager HeartbeatDiscovery] Task stopped");
+        }))
     }
 
     /// Check for health state changes and trigger appropriate responses.
@@ -349,7 +492,7 @@ impl ClusterManager {
                 "Node {:?} health changed: {:?} -> {:?}",
                 node_id, previous, current
             );
-            eprintln!(
+            info!(
                 "[ClusterManager] Node {:?} health changed: {:?} -> {:?}",
                 node_id, previous, current
             );
@@ -371,7 +514,7 @@ impl ClusterManager {
                 (NodeHealth::Failed, Some(NodeHealth::Degraded))
                 | (NodeHealth::Failed, Some(NodeHealth::Healthy)) => {
                     info!("Node {:?} has failed, triggering failure handling", node_id);
-                    eprintln!(
+                    warn!(
                         "[ClusterManager] Node {:?} has FAILED, triggering failure handling",
                         node_id
                     );
@@ -386,6 +529,15 @@ impl ClusterManager {
                             error: format!("{:?}", e),
                         });
                     } else {
+                        // Demotion successful - update FailureDetector to mark node as learner
+                        info!(
+                            "[ClusterManager] Demotion successful, updating FailureDetector for node {:?}",
+                            node_id
+                        );
+                        let mut detector = failure_detector.lock().await;
+                        detector.update_node_voter_status(*node_id, false);
+                        drop(detector);
+
                         // Emit success event
                         let _ = event_sender.send(ClusterEvent::MembershipChangeCompleted {
                             node_id: *node_id,
@@ -400,23 +552,57 @@ impl ClusterManager {
                         "Node {:?} has recovered, triggering recovery handling",
                         node_id
                     );
-                    eprintln!("[ClusterManager] Node {:?} has RECOVERED (Recovering->Healthy), triggering recovery handling", node_id);
+                    info!("[ClusterManager] Node {:?} has RECOVERED (Recovering->Healthy), triggering recovery handling", node_id);
 
+                    debug!(
+                        "[ClusterManager] Attempting to lock membership_manager for recovery..."
+                    );
                     let mut manager = membership_manager.lock().await;
-                    if let Err(e) = manager.handle_node_recovery(*node_id).await {
-                        warn!("Failed to handle node recovery for {:?}: {:?}", node_id, e);
-                        // Emit failure event
-                        let _ = event_sender.send(ClusterEvent::MembershipChangeFailed {
-                            node_id: *node_id,
-                            action: super::types::MembershipAction::Promote,
-                            error: format!("{:?}", e),
-                        });
-                    } else {
-                        // Emit success event
-                        let _ = event_sender.send(ClusterEvent::MembershipChangeCompleted {
-                            node_id: *node_id,
-                            action: super::types::MembershipAction::Promote,
-                        });
+                    debug!(
+                        "[ClusterManager] Lock acquired, calling handle_node_recovery for {:?}",
+                        node_id
+                    );
+                    match manager.handle_node_recovery(*node_id).await {
+                        Ok(_) => {
+                            // Promotion successful - update FailureDetector to mark node as voter
+                            info!(
+                                "[ClusterManager] Promotion successful, updating FailureDetector for node {:?}",
+                                node_id
+                            );
+                            let mut detector = failure_detector.lock().await;
+                            detector.update_node_voter_status(*node_id, true);
+                            drop(detector);
+
+                            // Emit success event
+                            let _ = event_sender.send(ClusterEvent::MembershipChangeCompleted {
+                                node_id: *node_id,
+                                action: super::types::MembershipAction::Promote,
+                            });
+                        }
+                        Err(MembershipError::RateLimitExceeded(msg)) => {
+                            // Rate limit exceeded - this is expected after a recent demotion
+                            // Keep the node in Recovering state so we retry on next health check
+                            debug!(
+                                "[ClusterManager] Promotion rate limited for node {:?}: {}. Will retry on next health check.",
+                                node_id, msg
+                            );
+                            // Revert the last_health state to Recovering to trigger retry
+                            last_health.insert(*node_id, NodeHealth::Recovering);
+                        }
+                        Err(e) => {
+                            // Real error - log and emit failure event
+                            warn!(
+                                "[ClusterManager] handle_node_recovery returned error: {:?}",
+                                e
+                            );
+                            warn!("Failed to handle node recovery for {:?}: {:?}", node_id, e);
+                            // Emit failure event
+                            let _ = event_sender.send(ClusterEvent::MembershipChangeFailed {
+                                node_id: *node_id,
+                                action: super::types::MembershipAction::Promote,
+                                error: format!("{:?}", e),
+                            });
+                        }
                     }
                 }
 

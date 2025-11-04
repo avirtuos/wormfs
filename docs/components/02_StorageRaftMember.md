@@ -593,6 +593,48 @@ The ClusterManager emits events for observability:
 8. ClusterManager promotes Node 3 back to voter
 9. Cluster returns to 5 voters
 
+**Integration Status:** ✅ **Fully Integrated and Operational**
+
+The ClusterManager is now fully integrated into StorageRaftMember and operates automatically:
+- **Lifecycle Management**: Automatically starts when a node becomes leader, stops when leadership is lost
+- **Event Processing**: All cluster events are logged with structured fields for observability
+- **Configuration**: Configurable via `Config` struct with `enable_cluster_manager` and `cluster_manager_preset` fields
+- **Default Behavior**: Enabled by default with Moderate preset for balanced failure detection
+
+**Programming Configuration:**
+
+```rust
+use wormfs::storage_raft_member::{Config, ClusterManagerPreset};
+
+let mut config = Config::default();
+
+// Enable/disable ClusterManager (default: true)
+config.enable_cluster_manager = true;
+
+// Select configuration preset (default: Moderate)
+config.cluster_manager_preset = ClusterManagerPreset::Moderate;
+// Options: Conservative, Moderate, Aggressive
+```
+
+**Observability:**
+
+ClusterManager events are processed in a background task and logged with structured fields:
+```rust
+// To subscribe to cluster events programmatically:
+let event_receiver = raft_member.subscribe_cluster_events().await;
+while let Some(event) = event_receiver.recv().await {
+    match event {
+        ClusterEvent::FailureDetected { node_id, .. } => {
+            // Handle failure detection
+        }
+        ClusterEvent::RecoveryDetected { node_id, .. } => {
+            // Handle recovery
+        }
+        // ... other events
+    }
+}
+```
+
 ## Configuration
 
 ```toml
@@ -623,6 +665,10 @@ max_read_staleness_seconds = 120
 default_transaction_timeout_seconds = 300
 max_concurrent_transactions = 100
 transaction_recovery_timeout_seconds = 60
+
+# Cluster Manager configuration (automatic failure detection and recovery)
+enable_cluster_manager = true           # Enable automatic failure detection/recovery
+cluster_manager_preset = "moderate"     # Options: "conservative", "moderate", "aggressive"
 ```
 
 ## Error Handling

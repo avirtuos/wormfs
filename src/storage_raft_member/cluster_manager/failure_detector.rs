@@ -76,6 +76,14 @@ impl FailureDetector {
             metrics.role,
             metrics.replication_lag.len()
         );
+        debug!(
+            "[FailureDetector] poll_raft_metrics: replication_lag={:?}",
+            metrics.replication_lag
+        );
+        debug!(
+            "[FailureDetector] Tracked nodes: {:?}",
+            self.node_states.keys().collect::<Vec<_>>()
+        );
 
         // Update lag for all followers in the metrics
         for (node_id, lag) in &metrics.replication_lag {
@@ -86,11 +94,75 @@ impl FailureDetector {
 
             // If we're tracking this node, update it
             if let Some(state) = self.node_states.get_mut(node_id) {
-                // Update lag
-                state.update_lag(*lag);
+                let previous_lag = state.replication_lag;
 
-                // Record heartbeat (if leader can see replication lag, node is responsive)
-                state.record_heartbeat();
+                // Check if this is a learner - learners may appear in replication_lag
+                // but we should ignore lag values for them since OpenRaft doesn't
+                // properly track learner replication the same way
+                if !state.is_voter {
+                    // This is a learner - use heartbeat-based tracking only, ignore lag
+                    let is_responsive = if let Some(last_ack) = metrics.heartbeat_acked.get(node_id)
+                    {
+                        let time_since_ack = std::time::Instant::now().duration_since(*last_ack);
+                        time_since_ack < self.config.heartbeat_timeout
+                    } else {
+                        false
+                    };
+
+                    if is_responsive {
+                        // Reset lag to 0 for responsive learners
+                        state.update_lag(0);
+                        state.record_heartbeat();
+                        debug!(
+                            "[FailureDetector] Learner node {:?} heartbeat recorded (resetting lag to 0)",
+                            node_id
+                        );
+                    } else {
+                        state.record_failure();
+                        debug!(
+                            "[FailureDetector] Learner node {:?} heartbeat timeout (ignoring lag={})",
+                            node_id, lag
+                        );
+                    }
+                } else {
+                    // This is a voter - use normal lag-based tracking
+                    state.update_lag(*lag);
+
+                    // Check heartbeat timing to determine if node is responsive
+                    // We use three signals for robust failure detection:
+                    // 1. Replication lag (from OpenRaft metrics)
+                    // 2. Time since last heartbeat sent
+                    // 3. Time since last heartbeat ack received
+                    let is_responsive = if let Some(last_ack) = metrics.heartbeat_acked.get(node_id)
+                    {
+                        let time_since_ack = std::time::Instant::now().duration_since(*last_ack);
+                        // Consider responsive if we got an ack within heartbeat_timeout
+                        time_since_ack < self.config.heartbeat_timeout
+                    } else {
+                        // No ack timestamp - node has never successfully responded to heartbeats
+                        // This means either:
+                        // 1. Node just joined (hasn't completed first heartbeat)
+                        // 2. Node went offline before any successful heartbeat exchange
+                        // 3. Node went offline and heartbeat tracking was cleared
+                        // We should consider it unresponsive and let consecutive_failures build up
+                        // If it's truly a new node, it will respond soon and reset failures
+                        false
+                    };
+
+                    if is_responsive {
+                        state.record_heartbeat();
+                        debug!(
+                            "[FailureDetector] Node {:?} heartbeat recorded (lag={}, prev_lag={})",
+                            node_id, lag, previous_lag
+                        );
+                    } else {
+                        state.record_failure();
+                        debug!(
+                            "[FailureDetector] Node {:?} heartbeat timeout (lag={}, last_ack too old)",
+                            node_id, lag
+                        );
+                    }
+                }
 
                 // Update health based on all signals
                 self.update_node_health_state(*node_id);
@@ -98,24 +170,50 @@ impl FailureDetector {
         }
 
         // Check for nodes we're tracking but aren't in the replication lag map
-        // These might be unresponsive or not yet added
+        // These could be learners (not in replication map) or unresponsive voters
         let tracked_nodes: Vec<NodeId> = self.node_states.keys().copied().collect();
         for node_id in tracked_nodes {
             if node_id != self_node_id && !metrics.replication_lag.contains_key(&node_id) {
-                // This node isn't in the replication map - might be unresponsive
-                debug!("Node {:?} not in replication lag map", node_id);
-
-                // Check responsiveness before getting mutable reference
-                let is_responsive = self.is_node_responsive(node_id);
-                if !is_responsive {
-                    if let Some(state) = self.node_states.get_mut(&node_id) {
+                if let Some(state) = self.node_states.get_mut(&node_id) {
+                    if state.is_voter {
+                        // Voter not in replication map - definitely unresponsive
+                        debug!(
+                            "[FailureDetector] Voter node {:?} not in replication lag map - recording failure",
+                            node_id
+                        );
                         state.record_failure();
-                    }
-                }
+                    } else {
+                        // Learner - check heartbeat timing instead of replication lag
+                        // OpenRaft doesn't expose learner replication metrics the same way
+                        let is_responsive =
+                            if let Some(last_ack) = metrics.heartbeat_acked.get(&node_id) {
+                                let time_since_ack =
+                                    std::time::Instant::now().duration_since(*last_ack);
+                                time_since_ack < self.config.heartbeat_timeout
+                            } else {
+                                false
+                            };
 
-                // Always update health state for nodes not in replication map
-                // This ensures state transitions happen even if failures were recorded manually
-                self.update_node_health_state(node_id);
+                        if is_responsive {
+                            // Reset lag to 0 for responsive learners (we can't measure actual lag)
+                            state.update_lag(0);
+                            state.record_heartbeat();
+                            debug!(
+                                "[FailureDetector] Learner node {:?} responsive (heartbeat OK)",
+                                node_id
+                            );
+                        } else {
+                            state.record_failure();
+                            debug!(
+                                "[FailureDetector] Learner node {:?} unresponsive (no heartbeat ack)",
+                                node_id
+                            );
+                        }
+                    }
+
+                    // Always update health state
+                    self.update_node_health_state(node_id);
+                }
             }
         }
     }
@@ -150,26 +248,50 @@ impl FailureDetector {
         // State machine transitions
         match old_health {
             NodeHealth::Healthy => {
-                // Healthy → Degraded: First failure or warning lag
+                // Healthy → Degraded: First failure, warning lag, or heartbeat timeout
+                let heartbeat_timed_out =
+                    state.time_since_heartbeat() >= self.config.heartbeat_timeout;
+
                 if state.consecutive_failures > 0
                     || state.replication_lag >= self.config.warning_lag_threshold
+                    || heartbeat_timed_out
                 {
                     new_health = NodeHealth::Degraded;
                     info!(
-                        "Node {:?} degraded: failures={}, lag={}",
-                        node_id, state.consecutive_failures, state.replication_lag
+                        "Node {:?} degraded: failures={}, lag={}, heartbeat_timeout={}",
+                        node_id,
+                        state.consecutive_failures,
+                        state.replication_lag,
+                        heartbeat_timed_out
+                    );
+                    info!(
+                        "[FailureDetector] Node {:?} Healthy → Degraded (failures={}, lag={}, time_since_heartbeat={:?}, timeout={:?})",
+                        node_id, state.consecutive_failures, state.replication_lag,
+                        state.time_since_heartbeat(), self.config.heartbeat_timeout
                     );
                 }
             }
             NodeHealth::Degraded => {
-                // Degraded → Failed: Max failures or critical lag
+                // Degraded → Failed: Max failures, critical lag, or sustained heartbeat timeout
+                let heartbeat_timed_out =
+                    state.time_since_heartbeat() >= self.config.heartbeat_timeout;
+
                 if state.consecutive_failures >= self.config.max_consecutive_failures
                     || state.replication_lag >= self.config.critical_lag_threshold
+                    || heartbeat_timed_out
                 {
                     new_health = NodeHealth::Failed;
                     warn!(
-                        "Node {:?} failed: failures={}, lag={}",
-                        node_id, state.consecutive_failures, state.replication_lag
+                        "Node {:?} failed: failures={}, lag={}, heartbeat_timeout={}",
+                        node_id,
+                        state.consecutive_failures,
+                        state.replication_lag,
+                        heartbeat_timed_out
+                    );
+                    warn!(
+                        "[FailureDetector] Node {:?} Degraded → Failed (failures={}, lag={}, time_since_heartbeat={:?}, timeout={:?})",
+                        node_id, state.consecutive_failures, state.replication_lag,
+                        state.time_since_heartbeat(), self.config.heartbeat_timeout
                     );
 
                     // Emit failure event
@@ -190,11 +312,24 @@ impl FailureDetector {
             }
             NodeHealth::Failed => {
                 // Failed → Recovering: Node becomes responsive
-                if state.consecutive_successes > 0
-                    && state.replication_lag < self.config.critical_lag_threshold
-                {
+                // For learners, we don't check replication lag (not tracked by OpenRaft)
+                let lag_check_passed = if state.is_voter {
+                    state.replication_lag < self.config.critical_lag_threshold
+                } else {
+                    // Learners: skip lag check, use heartbeat responsiveness only
+                    true
+                };
+
+                if state.consecutive_successes > 0 && lag_check_passed {
                     new_health = NodeHealth::Recovering;
-                    info!("Node {:?} recovering from failure", node_id);
+                    info!(
+                        "Node {:?} recovering from failure (is_voter={})",
+                        node_id, state.is_voter
+                    );
+                    info!(
+                        "[FailureDetector] Node {:?} Failed → Recovering (is_voter={}, consecutive_successes={})",
+                        node_id, state.is_voter, state.consecutive_successes
+                    );
 
                     // Emit recovery event
                     self.emit_event(ClusterEvent::RecoveryDetected {
@@ -212,6 +347,10 @@ impl FailureDetector {
                         "Node {:?} fully recovered: successes={}",
                         node_id, state.consecutive_successes
                     );
+                    info!(
+                        "[FailureDetector] Node {:?} Recovering → Healthy (is_voter={}, consecutive_successes={})",
+                        node_id, state.is_voter, state.consecutive_successes
+                    );
 
                     // Reset backoff on full recovery
                     if let Some(state) = self.node_states.get_mut(&node_id) {
@@ -219,14 +358,28 @@ impl FailureDetector {
                     }
                 }
                 // Recovering → Failed: Node degrades again
-                else if state.consecutive_failures >= self.config.max_consecutive_failures
-                    || state.replication_lag >= self.config.critical_lag_threshold
-                {
-                    new_health = NodeHealth::Failed;
-                    warn!(
-                        "Node {:?} failed again during recovery: failures={}, lag={}",
-                        node_id, state.consecutive_failures, state.replication_lag
-                    );
+                // For learners, we don't check replication lag (not tracked by OpenRaft)
+                else {
+                    let lag_check_failed = if state.is_voter {
+                        state.replication_lag >= self.config.critical_lag_threshold
+                    } else {
+                        // Learners: skip lag check, only use consecutive_failures
+                        false
+                    };
+
+                    if state.consecutive_failures >= self.config.max_consecutive_failures
+                        || lag_check_failed
+                    {
+                        new_health = NodeHealth::Failed;
+                        warn!(
+                            "Node {:?} failed again during recovery: failures={}, lag={}, is_voter={}",
+                            node_id, state.consecutive_failures, state.replication_lag, state.is_voter
+                        );
+                        warn!(
+                            "[FailureDetector] Node {:?} Recovering → Failed (is_voter={}, failures={}, lag={})",
+                            node_id, state.is_voter, state.consecutive_failures, state.replication_lag
+                        );
+                    }
                 }
             }
         }
@@ -357,6 +510,11 @@ impl FailureDetector {
         self.node_states.keys().copied().collect()
     }
 
+    /// Check if a node is currently being tracked
+    pub fn is_tracking(&self, node_id: NodeId) -> bool {
+        self.node_states.contains_key(&node_id)
+    }
+
     /// Clear all tracked nodes.
     ///
     /// Used when reinitializing the detector (e.g., on leadership change).
@@ -372,6 +530,26 @@ impl FailureDetector {
             .iter()
             .map(|(id, state)| (*id, state.health))
             .collect()
+    }
+
+    /// Update a node's voter/learner status.
+    ///
+    /// This should be called when a node is promoted to voter or demoted to learner.
+    /// The voter status affects how health checks are performed (voters use replication lag,
+    /// learners use heartbeat timing only).
+    pub fn update_node_voter_status(&mut self, node_id: NodeId, is_voter: bool) {
+        if let Some(state) = self.node_states.get_mut(&node_id) {
+            debug!(
+                "[FailureDetector] Updating node {:?} voter status: {} -> {}",
+                node_id, state.is_voter, is_voter
+            );
+            state.is_voter = is_voter;
+        } else {
+            warn!(
+                "Attempted to update voter status for non-tracked node {:?}",
+                node_id
+            );
+        }
     }
 }
 
@@ -524,6 +702,8 @@ mod tests {
             snapshot_index: 0,
             cluster_size: 3,
             replication_lag,
+            heartbeat_sent: HashMap::new(),
+            heartbeat_acked: HashMap::new(),
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -563,6 +743,8 @@ mod tests {
             snapshot_index: 0,
             cluster_size: 2,
             replication_lag,
+            heartbeat_sent: HashMap::new(),
+            heartbeat_acked: HashMap::new(),
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -603,6 +785,8 @@ mod tests {
             snapshot_index: 0,
             cluster_size: 2,
             replication_lag: HashMap::new(), // Node not in replication map
+            heartbeat_sent: HashMap::new(),
+            heartbeat_acked: HashMap::new(),
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -641,6 +825,8 @@ mod tests {
             snapshot_index: 0,
             cluster_size: 2,
             replication_lag,
+            heartbeat_sent: HashMap::new(),
+            heartbeat_acked: HashMap::new(),
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -679,6 +865,8 @@ mod tests {
             snapshot_index: 0,
             cluster_size: 2,
             replication_lag,
+            heartbeat_sent: HashMap::new(),
+            heartbeat_acked: HashMap::new(),
         };
 
         // Poll metrics multiple times (need 2x the failure threshold for recovery)
@@ -721,6 +909,8 @@ mod tests {
             snapshot_index: 0,
             cluster_size: 2,
             replication_lag: HashMap::new(),
+            heartbeat_sent: HashMap::new(),
+            heartbeat_acked: HashMap::new(),
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -760,6 +950,8 @@ mod tests {
             snapshot_index: 0,
             cluster_size: 2,
             replication_lag,
+            heartbeat_sent: HashMap::new(),
+            heartbeat_acked: HashMap::new(),
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -819,6 +1011,8 @@ mod tests {
             snapshot_index: 0,
             cluster_size: 2,
             replication_lag,
+            heartbeat_sent: HashMap::new(),
+            heartbeat_acked: HashMap::new(),
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
