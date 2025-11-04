@@ -80,11 +80,18 @@ impl ClusterManager {
         event_sender: mpsc::UnboundedSender<ClusterEvent>,
         heartbeat_tracker: Option<Arc<super::HeartbeatTracker>>,
     ) -> Self {
+        // Get the total configured membership size from Raft metrics
+        let metrics = raft.inner().raft.metrics().borrow().clone();
+        let membership = metrics.membership_config.membership();
+        let total_membership_size =
+            membership.voter_ids().count() + membership.learner_ids().count();
+
         // Create the sub-components
         let failure_detector = Arc::new(Mutex::new(FailureDetector::new(config.clone())));
         let membership_manager = Arc::new(Mutex::new(MembershipManager::new(
             config.clone(),
             raft.clone(),
+            total_membership_size,
         )));
 
         Self {
@@ -510,40 +517,25 @@ impl ClusterManager {
 
             // Take action based on the health change
             match (*current, previous) {
-                // Node has failed - trigger demotion if it's a voter
+                // Node has failed - log the failure but do NOT automatically demote
+                //
+                // IMPORTANT: Automatic demotion has been removed for safety.
+                // - Failed nodes remain as voters in the cluster configuration
+                // - Operators must manually remove permanently failed nodes
+                // - This prevents accidental quorum degradation during cascading failures
+                // - This prevents split-brain scenarios during network partitions
+                // - This follows industry standard (etcd, Consul, etc.)
                 (NodeHealth::Failed, Some(NodeHealth::Degraded))
                 | (NodeHealth::Failed, Some(NodeHealth::Healthy)) => {
-                    info!("Node {:?} has failed, triggering failure handling", node_id);
                     warn!(
-                        "[ClusterManager] Node {:?} has FAILED, triggering failure handling",
+                        "[ClusterManager] Node {:?} has FAILED. Manual operator action required to remove node if failure is permanent.",
                         node_id
                     );
-
-                    let mut manager = membership_manager.lock().await;
-                    if let Err(e) = manager.handle_node_failure(*node_id).await {
-                        warn!("Failed to handle node failure for {:?}: {:?}", node_id, e);
-                        // Emit failure event
-                        let _ = event_sender.send(ClusterEvent::MembershipChangeFailed {
-                            node_id: *node_id,
-                            action: super::types::MembershipAction::Demote,
-                            error: format!("{:?}", e),
-                        });
-                    } else {
-                        // Demotion successful - update FailureDetector to mark node as learner
-                        info!(
-                            "[ClusterManager] Demotion successful, updating FailureDetector for node {:?}",
-                            node_id
-                        );
-                        let mut detector = failure_detector.lock().await;
-                        detector.update_node_voter_status(*node_id, false);
-                        drop(detector);
-
-                        // Emit success event
-                        let _ = event_sender.send(ClusterEvent::MembershipChangeCompleted {
-                            node_id: *node_id,
-                            action: super::types::MembershipAction::Demote,
-                        });
-                    }
+                    info!(
+                        "Node {:?} failed - remaining in cluster configuration. Operator must manually demote/remove if needed.",
+                        node_id
+                    );
+                    // Node stays in configuration - no automatic action taken
                 }
 
                 // Node has recovered - trigger promotion if it's a learner

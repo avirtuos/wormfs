@@ -34,13 +34,13 @@ WormFS is a work in progress that's being developed iteratively following a phas
 ### Phase 2 Progress (In Development 🚧)
 - ✅ **StorageRaftMember**: Core Raft consensus implementation for distributed coordination
 - ✅ **TransactionLogStore**: Persistent Raft log storage with vote persistence
-- ✅ **Cluster Manager**: Fully integrated automatic failure detection and recovery
+- ✅ **Cluster Manager**: Fully integrated failure detection and monitoring
   - Fully integrated into StorageRaftMember with automatic lifecycle management
   - Automatic node health monitoring with heartbeat tracking and replication lag detection
-  - Automatic demotion of failed voters to learners
+  - Failed nodes remain as voters (operator-driven membership management following industry best practices)
   - Automatic promotion of recovered learners back to voters
   - Configurable failure detection thresholds (conservative/moderate/aggressive presets)
-  - Quorum-safe membership management with rate limiting
+  - Quorum-safe membership management prevents split-brain during network partitions
   - Structured event logging for observability and audit trails
   - Enabled by default with configurable presets
 - 🚧 **Multi-node cluster formation and leader election** (in progress)

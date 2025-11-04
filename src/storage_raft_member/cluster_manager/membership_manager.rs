@@ -58,6 +58,14 @@ pub struct MembershipManager {
 
     /// Track the last time a membership change was made (for rate limiting)
     last_membership_change: HashMap<NodeId, Instant>,
+
+    /// Total configured membership size (voters + learners)
+    ///
+    /// This is the total number of nodes that the cluster was originally configured with.
+    /// Quorum is always calculated based on this total, not the current number of voters.
+    /// For example, in a 5-node cluster, quorum is always 3, even if some nodes are
+    /// demoted to learners.
+    total_membership_size: usize,
 }
 
 impl MembershipManager {
@@ -67,11 +75,17 @@ impl MembershipManager {
     ///
     /// * `config` - Cluster manager configuration
     /// * `raft` - Reference to the Raft instance for executing membership changes
-    pub fn new(config: Arc<ClusterManagerConfig>, raft: Arc<StorageRaftMemberImpl>) -> Self {
+    /// * `total_membership_size` - Total number of nodes in the cluster (voters + learners)
+    pub fn new(
+        config: Arc<ClusterManagerConfig>,
+        raft: Arc<StorageRaftMemberImpl>,
+        total_membership_size: usize,
+    ) -> Self {
         Self {
             config,
             raft,
             last_membership_change: HashMap::new(),
+            total_membership_size,
         }
     }
 
@@ -93,27 +107,39 @@ impl MembershipManager {
 
     /// Check if demoting a voter would violate quorum
     ///
-    /// A demotion violates quorum if it would leave fewer than (n/2 + 1) voters.
+    /// A demotion violates quorum if it would leave fewer than (n/2 + 1) voters,
+    /// where n is the **total configured membership size**, not the current voter count.
+    ///
+    /// ## Critical: Quorum Based on Total Membership
+    ///
+    /// In Raft, quorum is always calculated based on the total configured membership,
+    /// not just the current voters. For example, in a 5-node cluster:
+    /// - Quorum always requires 3 nodes (5/2 + 1 = 3)
+    /// - Even if nodes are demoted to learners, we must maintain 3 voters
+    /// - We cannot allow only 2 voters, even if they're the only "healthy" nodes
+    ///
+    /// This prevents split-brain scenarios where demoted nodes could come back
+    /// and create conflicting leadership.
     ///
     /// ## Parameters
-    /// - `current_voters`: Number of voters currently in the cluster
+    /// - `current_voters`: Number of voters currently in the cluster (unused, kept for API compat)
     /// - `voters_after_demotion`: Number of voters after this demotion
     ///
     /// ## Returns
     /// `true` if the demotion would violate quorum, `false` otherwise
     pub fn would_violate_quorum(
         &self,
-        current_voters: usize,
+        _current_voters: usize,
         voters_after_demotion: usize,
     ) -> bool {
-        if current_voters <= 1 {
-            return true; // Can't demote the last voter
+        if voters_after_demotion == 0 {
+            return true; // Can't have zero voters
         }
 
-        // Quorum requires majority: n/2 + 1
-        // For 3 voters, quorum is 2
-        // For 5 voters, quorum is 3
-        let required_for_quorum = (current_voters / 2) + 1;
+        // Quorum requires majority based on TOTAL configured membership
+        // For a 5-node cluster: (5/2) + 1 = 3
+        // For a 3-node cluster: (3/2) + 1 = 2
+        let required_for_quorum = (self.total_membership_size / 2) + 1;
 
         voters_after_demotion < required_for_quorum
     }
@@ -782,7 +808,7 @@ mod tests {
         let config = Arc::new(ClusterManagerConfig::moderate());
         let (raft, _temp_dir) = create_test_raft_instance().await;
 
-        let manager = MembershipManager::new(config.clone(), raft);
+        let manager = MembershipManager::new(config.clone(), raft, 1); // Single-node cluster for test
 
         // Verify initial state - no previous membership changes
         assert!(manager.can_change_membership(NodeId(1)));
@@ -795,7 +821,7 @@ mod tests {
         let config = Arc::new(ClusterManagerConfig::aggressive()); // 30s interval
         let (raft, _temp_dir) = create_test_raft_instance().await;
 
-        let mut manager = MembershipManager::new(config.clone(), raft);
+        let mut manager = MembershipManager::new(config.clone(), raft, 1); // Single-node cluster for test
         let node_id = NodeId(1);
 
         // Initially should be allowed
@@ -855,10 +881,12 @@ mod tests {
         let config = Arc::new(ClusterManagerConfig::moderate());
         let (raft, _temp_dir) = create_test_raft_instance().await;
 
-        let manager = MembershipManager::new(config.clone(), raft);
+        // Create manager with 3-node total membership
+        let manager = MembershipManager::new(config.clone(), raft, 3);
         let node_id = NodeId(1);
 
-        // Test demotion that would violate quorum (2 voters -> 1)
+        // Test demotion that would violate quorum (3-node cluster: 2 voters -> 1)
+        // For a 3-node cluster, quorum=2, so demoting to 1 voter violates quorum
         let result = manager.validate_action(node_id, MembershipAction::Demote, 2);
         assert!(result.is_err());
         match result.err().unwrap() {
@@ -869,6 +897,7 @@ mod tests {
         }
 
         // Test demotion that's safe (3 voters -> 2)
+        // For a 3-node cluster, quorum=2, so having 2 voters is safe
         let result = manager.validate_action(node_id, MembershipAction::Demote, 3);
         assert!(result.is_ok());
     }
@@ -878,7 +907,7 @@ mod tests {
         let config = Arc::new(ClusterManagerConfig::moderate());
         let (raft, _temp_dir) = create_test_raft_instance().await;
 
-        let manager = MembershipManager::new(config.clone(), raft);
+        let manager = MembershipManager::new(config.clone(), raft, 5); // 5-node cluster for test
         let node_id = NodeId(1);
 
         // Promotions should never violate quorum
@@ -901,7 +930,7 @@ mod tests {
         let config = Arc::new(ClusterManagerConfig::moderate());
         let (raft, _temp_dir) = create_test_raft_instance().await;
 
-        let mut manager = MembershipManager::new(config.clone(), raft);
+        let mut manager = MembershipManager::new(config.clone(), raft, 1); // Single-node cluster for test
         let node_id = NodeId(1);
 
         // Initially should allow changes

@@ -36,12 +36,6 @@ pub struct ClusterManagerConfig {
     /// **Tuning:** Must be >= warning_lag_threshold. Consider demotion impact.
     pub critical_lag_threshold: u64,
 
-    /// Automatically demote voters to learners when they fail
-    ///
-    /// **Default:** true
-    /// **Safety:** Disable if you want manual control over demotions.
-    pub auto_demote_on_failure: bool,
-
     /// Automatically promote learners to voters after they sync
     ///
     /// **Default:** true
@@ -96,7 +90,6 @@ impl ClusterManagerConfig {
             max_consecutive_failures: 5,
             warning_lag_threshold: 500,
             critical_lag_threshold: 1000,
-            auto_demote_on_failure: true,
             auto_promote_after_sync: true,
             sync_wait_timeout: Duration::from_secs(120),
             health_check_interval: Duration::from_secs(10),
@@ -115,7 +108,6 @@ impl ClusterManagerConfig {
             max_consecutive_failures: 3,
             warning_lag_threshold: 300,
             critical_lag_threshold: 600,
-            auto_demote_on_failure: true,
             auto_promote_after_sync: true,
             sync_wait_timeout: Duration::from_secs(60),
             health_check_interval: Duration::from_secs(5),
@@ -127,14 +119,13 @@ impl ClusterManagerConfig {
 
     /// Aggressive configuration (fast failover, higher false positive risk)
     ///
-    /// Best for: Development, testing, or systems that prioritize availability
+    /// Best for: Development and testing only
     pub fn aggressive() -> Self {
         Self {
             heartbeat_timeout: Duration::from_secs(5),
             max_consecutive_failures: 2,
             warning_lag_threshold: 100,
             critical_lag_threshold: 200,
-            auto_demote_on_failure: true,
             auto_promote_after_sync: true,
             sync_wait_timeout: Duration::from_secs(30),
             health_check_interval: Duration::from_secs(2),
@@ -300,7 +291,6 @@ mod tests {
             max_consecutive_failures: 3,
             warning_lag_threshold: 100,
             critical_lag_threshold: 200,
-            auto_demote_on_failure: true,
             auto_promote_after_sync: true,
             sync_wait_timeout: Duration::from_secs(30),
             health_check_interval: Duration::from_secs(5),

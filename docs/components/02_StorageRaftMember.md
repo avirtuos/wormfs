@@ -508,11 +508,11 @@ Based on the open questions answered below, the following key design decisions h
 - **Metrics**: Basic metrics (latency, replication lag, success/failure rates)
 - **Tuning**: LAN-optimized (no special WAN configuration)
 - **Orphaned Chunks**: StorageWatchdog cleanup (1-hour threshold)
-- **Automatic Failover**: ClusterManager provides automatic failure detection and recovery
+- **Failure Detection**: ClusterManager provides automatic failure detection and monitoring
 
 ### Cluster Manager (Phase 2.4)
 
-The StorageRaftMember includes an integrated ClusterManager that provides automatic failure detection and recovery capabilities for the Raft cluster. This system ensures high availability by automatically handling node failures without manual intervention.
+The StorageRaftMember includes an integrated ClusterManager that provides automatic failure detection and monitoring capabilities for the Raft cluster. This system ensures observability and supports manual operator intervention by detecting and logging node failures. Following industry best practices (etcd, Consul), failed nodes remain in the voter configuration to prevent split-brain scenarios during network partitions.
 
 **Architecture:**
 ```
@@ -537,12 +537,12 @@ ClusterManager (Coordinator)
 
 **Key Features:**
 - **Automatic Failure Detection**: Monitors node health via heartbeat timeouts and replication lag
-- **Automatic Demotion**: Failed voters are demoted to learners to maintain cluster health
-- **Automatic Promotion**: Recovered learners are promoted back to voters after syncing
-- **Quorum Safety**: Never performs actions that would cause quorum loss
-- **Rate Limiting**: Maximum one membership change per minute prevents thrashing
+- **Operator-Driven Membership**: Failed voters remain as voters (no automatic demotion) until operator manually removes them
+- **Automatic Promotion**: Learners are promoted back to voters after syncing
+- **Quorum Safety**: Never performs actions that would cause quorum loss; prevents split-brain during network partitions
+- **Rate Limiting**: Minimum time between membership changes prevents thrashing
 - **Leader-Only**: Runs only on the current Raft leader for consistency
-- **Flapping Prevention**: Exponential backoff for nodes exhibiting unstable behavior
+- **Industry Best Practice**: Follows etcd/Consul model where failed nodes remain in configuration
 
 **Configuration Presets:**
 
@@ -586,12 +586,16 @@ The ClusterManager emits events for observability:
 1. Node 3 in a 5-node cluster stops responding
 2. After 3 consecutive failed heartbeats (15s with moderate config)
 3. ClusterManager detects failure and marks node as Failed
-4. If Node 3 was a voter, demotes it to learner (cluster now 4 voters + 1 learner)
-5. Cluster continues operating with 4 voters (maintains quorum)
-6. When Node 3 recovers and catches up with replication
-7. After sustained health (6 consecutive successes)
-8. ClusterManager promotes Node 3 back to voter
-9. Cluster returns to 5 voters
+4. Node 3 remains as a voter in the configuration (no automatic demotion)
+5. Cluster continues operating with 5 voters configured (2 healthy, requires 3 for quorum)
+6. Operator must manually remove Node 3 if failure is permanent, OR wait for recovery
+7. When Node 3 recovers and restarts
+8. Node 3 catches up with replication log as a voter
+9. Cluster returns to full health with all 5 voters operational
+
+**Note:** This approach follows industry best practices (etcd, Consul) and prevents split-brain
+scenarios during network partitions. Failed nodes are not automatically removed to preserve
+important state and maintain proper quorum requirements.
 
 **Integration Status:** ✅ **Fully Integrated and Operational**
 

@@ -815,6 +815,10 @@ mod tests {
         let mut replication_lag = HashMap::new();
         replication_lag.insert(NodeId(2), 50); // Low lag
 
+        // Add heartbeat acknowledgment to show node is responsive
+        let mut heartbeat_acked = HashMap::new();
+        heartbeat_acked.insert(NodeId(2), std::time::Instant::now());
+
         let metrics = RaftMetrics {
             current_term: 1,
             role: RaftRole::Leader,
@@ -826,7 +830,7 @@ mod tests {
             cluster_size: 2,
             replication_lag,
             heartbeat_sent: HashMap::new(),
-            heartbeat_acked: HashMap::new(),
+            heartbeat_acked,
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -855,6 +859,10 @@ mod tests {
         let mut replication_lag = HashMap::new();
         replication_lag.insert(NodeId(2), 10);
 
+        // Add heartbeat acknowledgment to show node is responsive
+        let mut heartbeat_acked = HashMap::new();
+        heartbeat_acked.insert(NodeId(2), std::time::Instant::now());
+
         let metrics = RaftMetrics {
             current_term: 1,
             role: RaftRole::Leader,
@@ -866,7 +874,7 @@ mod tests {
             cluster_size: 2,
             replication_lag,
             heartbeat_sent: HashMap::new(),
-            heartbeat_acked: HashMap::new(),
+            heartbeat_acked,
         };
 
         // Poll metrics multiple times (need 2x the failure threshold for recovery)
@@ -940,6 +948,10 @@ mod tests {
         let mut replication_lag = HashMap::new();
         replication_lag.insert(NodeId(2), 50);
 
+        // Add heartbeat acknowledgment to show node is responsive
+        let mut heartbeat_acked = HashMap::new();
+        heartbeat_acked.insert(NodeId(2), std::time::Instant::now());
+
         let metrics = RaftMetrics {
             current_term: 1,
             role: RaftRole::Leader,
@@ -951,7 +963,7 @@ mod tests {
             cluster_size: 2,
             replication_lag,
             heartbeat_sent: HashMap::new(),
-            heartbeat_acked: HashMap::new(),
+            heartbeat_acked,
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
