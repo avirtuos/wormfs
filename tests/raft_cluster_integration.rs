@@ -695,6 +695,11 @@ impl RaftTestCluster {
 
         eprintln!("  ✅ Node {} restarted with existing state", node_id);
 
+        // IMPORTANT: Mark node as online in the stub network BEFORE adding as learner
+        // This allows the leader to send AppendEntries during the sync phase
+        eprintln!("  Marking node {} as ONLINE in stub network", node_id);
+        self.hub.mark_node_online(node_id).await;
+
         // Step 3: Add the restarted node back as a LEARNER (non-voting)
         eprintln!(
             "  Step 3: Adding node {} as learner (non-voting)...",
@@ -769,10 +774,6 @@ impl RaftTestCluster {
 
         eprintln!("  ✅ Node {} promoted to voter", node_id);
         tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // Mark node as online in the stub network (reverses the offline marking from shutdown)
-        eprintln!("  Marking node {} as ONLINE in stub network", node_id);
-        self.hub.mark_node_online(node_id).await;
 
         eprintln!(
             "✅ Node {} fully restarted and reintegrated into cluster",
@@ -1968,135 +1969,27 @@ async fn test_node_restart_recovery() {
 // and recovers nodes without manual intervention.
 // ============================================================================
 
-/// Test: Automatic failure detection and demotion
-///
-/// ## Test Scenario:
-/// 1. Create a 3-node cluster with ClusterManager enabled (aggressive preset for fast detection)
-/// 2. Kill node 3 to simulate a crash
-/// 3. Wait for ClusterManager to automatically detect the failure (~10-15 seconds with aggressive config)
-/// 4. Verify node 3 was automatically demoted from voter to learner
-/// 5. Verify the cluster is still operational with 2 voters
-///
-/// ## Expected Behavior:
-/// - ClusterManager detects failure after 2 consecutive failed heartbeats (~10s)
-/// - Node 3 is automatically demoted to non-voting status
-/// - Cluster continues operating with 2 voters (maintaining quorum of 2)
-#[tokio::test]
-// TODO(issue-76): This test validates end-to-end automatic failure detection in ClusterManager.
-// However, in stub network environments, OpenRaft continues to report lag=0 for shutdown nodes,
-// making automatic detection impossible without realistic network behavior (RPC timeouts, increasing lag).
-// The individual ClusterManager components (FailureDetector, MembershipManager) are fully tested
-// in unit tests. With enhanced stub network offline tracking, automatic detection now works!
-#[ntest::timeout(60000)]
-async fn test_automatic_failure_detection_and_demotion() {
-    eprintln!("\n=== test_automatic_failure_detection_and_demotion ===");
+// NOTE: test_automatic_failure_detection_and_demotion was removed
+// Automatic demotion is no longer supported. Failed nodes remain as voters
+// until an operator manually removes them. See test_cluster_manager_no_auto_demotion
+// for verification that failed nodes are NOT automatically demoted.
 
-    // Create 3-node cluster with ClusterManager enabled (aggressive for fast detection)
-    let mut cluster = RaftTestCluster::new_with_cluster_manager(
-        3,
-        wormfs::storage_raft_member::ClusterManagerPreset::Aggressive,
-    )
-    .await
-    .expect("Failed to create cluster");
-
-    cluster.initialize().await.expect("Failed to initialize");
-
-    // Give cluster time to elect leader and start ClusterManager
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Verify all nodes are voters initially
-    let leader = cluster.leader().expect("No leader found");
-    let metrics_before = leader.raft.inner().raft.metrics().borrow().clone();
-    let membership = metrics_before.membership_config.membership();
-    let voters_before: Vec<NodeId> = membership.voter_ids().collect();
-    assert_eq!(
-        voters_before.len(),
-        3,
-        "Should have 3 voters initially. Found: {:?}",
-        voters_before
-    );
-    eprintln!("✅ Initial cluster has 3 voters: {:?}", voters_before);
-
-    // Simulate node 3 crash by shutting it down
-    eprintln!("🔥 Simulating node 3 crash...");
-    cluster
-        .shutdown_node(3)
-        .await
-        .expect("Failed to shutdown node 3");
-
-    // Wait for ClusterManager to detect failure and demote
-    // With aggressive config: 5s heartbeat timeout + 2 consecutive failures = ~10-15s
-    // Periodically propose operations to trigger replication attempts
-    eprintln!("⏳ Waiting for ClusterManager to detect failure and demote node 3...");
-    for i in 0..10 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        // Propose an operation to trigger replication
-        if let Some(leader) = cluster.leader() {
-            let operation =
-                wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-                    tx_id: TxId(900 + i),
-                    metadata_ops: Some(vec![]),
-                    command_ops: None,
-                    timeout: std::time::SystemTime::now() + Duration::from_secs(30),
-                };
-            let _ = leader.raft.propose_operation(operation).await;
-        }
-    }
-
-    // Verify node 3 was automatically demoted
-    let leader = cluster.leader().expect("No leader found");
-    let metrics_after = leader.raft.inner().raft.metrics().borrow().clone();
-    let membership = metrics_after.membership_config.membership();
-    let voters_after: Vec<NodeId> = membership.voter_ids().collect();
-
-    eprintln!("Voters after demotion: {:?}", voters_after);
-    assert_eq!(
-        voters_after.len(),
-        2,
-        "Should have 2 voters after automatic demotion. Found: {:?}",
-        voters_after
-    );
-    assert!(
-        !voters_after.contains(&NodeId(3)),
-        "Node 3 should be demoted from voters"
-    );
-    eprintln!("✅ Node 3 was automatically demoted after failure detection");
-
-    // Verify cluster is still operational
-    let operation = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-        tx_id: TxId(999),
-        metadata_ops: Some(vec![]),
-        command_ops: None,
-        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
-    };
-
-    leader
-        .raft
-        .propose_operation(operation)
-        .await
-        .expect("Cluster should still be operational with 2 voters");
-    eprintln!("✅ Cluster is still operational after automatic demotion");
-
-    eprintln!("=== test_automatic_failure_detection_and_demotion PASSED ===");
-}
-
-/// Test: Automatic recovery and promotion
+/// Test: Failed voter recovery (nodes remain voters when offline)
 ///
 /// ## Test Scenario:
 /// 1. Create 3-node cluster with ClusterManager enabled
-/// 2. Shutdown node 3 and wait for automatic demotion
-/// 3. Restart node 3 minimally (no manual membership steps)
-/// 4. Wait for ClusterManager to detect recovery and promote
-/// 5. Verify node 3 was automatically promoted back to voter
+/// 2. Shutdown node 3 (it remains as a voter in the configuration)
+/// 3. Verify node 3 is still a voter (no automatic demotion)
+/// 4. Restart node 3 minimally (no manual membership steps)
+/// 5. Verify node 3 successfully catches up and participates as voter
 ///
 /// ## Expected Behavior:
-/// - Node restarts and ClusterManager detects it's back online
-/// - ClusterManager waits for node to sync
-/// - Node is automatically promoted back to voter after sustained health
+/// - Failed node remains as voter in membership (no automatic demotion)
+/// - When node restarts, it catches up with the log
+/// - Node successfully participates in quorum again
 #[tokio::test]
-// TODO(issue-76): This test validates end-to-end automatic recovery/promotion in ClusterManager.
-// With enhanced stub network offline tracking, automatic recovery now works!
+// This test validates that failed voters remain in the configuration and can
+// successfully catch up when they come back online (no automatic demotion).
 #[ntest::timeout(120000)]
 async fn test_automatic_recovery_and_promotion() {
     // Initialize tracing with timestamps for detailed diagnostics (ANSI disabled for clean file output)
@@ -2125,6 +2018,17 @@ async fn test_automatic_recovery_and_promotion() {
     cluster.initialize().await.expect("Failed to initialize");
     tokio::time::sleep(Duration::from_secs(3)).await;
 
+    // Verify all nodes are voters initially
+    let leader = cluster.leader().expect("No leader found");
+    let metrics_before = leader.raft.inner().raft.metrics().borrow().clone();
+    let voters_before: Vec<NodeId> = metrics_before
+        .membership_config
+        .membership()
+        .voter_ids()
+        .collect();
+    assert_eq!(voters_before.len(), 3, "Should have 3 voters initially");
+    info!("✅ Initial cluster has 3 voters: {:?}", voters_before);
+
     // Shutdown node 3 to simulate failure
     info!("🔥 Shutting down node 3...");
     cluster
@@ -2132,40 +2036,32 @@ async fn test_automatic_recovery_and_promotion() {
         .await
         .expect("Failed to shutdown node 3");
 
-    // Wait for automatic demotion while triggering replication
-    info!("⏳ Waiting for automatic demotion...");
-    for i in 0..10 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait a bit for failure to be detected
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
-        // Propose an operation to trigger replication
-        if let Some(leader) = cluster.leader() {
-            let operation =
-                wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-                    tx_id: TxId(800 + i),
-                    metadata_ops: Some(vec![]),
-                    command_ops: None,
-                    timeout: std::time::SystemTime::now() + Duration::from_secs(30),
-                };
-            let _ = leader.raft.propose_operation(operation).await;
-        }
-    }
-
-    // Verify node 3 was demoted
+    // Verify node 3 is STILL a voter (no automatic demotion)
     let leader = cluster.leader().expect("No leader found");
-    let metrics = leader.raft.inner().raft.metrics().borrow().clone();
-    let voters_after_demotion: Vec<NodeId> =
-        metrics.membership_config.membership().voter_ids().collect();
+    let metrics_after_shutdown = leader.raft.inner().raft.metrics().borrow().clone();
+    let voters_after_shutdown: Vec<NodeId> = metrics_after_shutdown
+        .membership_config
+        .membership()
+        .voter_ids()
+        .collect();
     assert_eq!(
-        voters_after_demotion.len(),
-        2,
-        "Should have 2 voters after demotion"
+        voters_after_shutdown.len(),
+        3,
+        "Should still have 3 voters (no automatic demotion)"
+    );
+    assert!(
+        voters_after_shutdown.contains(&NodeId(3)),
+        "Node 3 should still be a voter"
     );
     info!(
-        "✅ Node 3 was demoted (voters: {:?})",
-        voters_after_demotion
+        "✅ Node 3 remains as voter despite being offline (voters: {:?})",
+        voters_after_shutdown
     );
 
-    // Restart node 3 minimally (ClusterManager will handle recovery)
+    // Restart node 3 minimally (it will catch up as a voter)
     info!("🔄 Restarting node 3 minimally...");
     cluster
         .restart_node_minimal(
@@ -2175,58 +2071,78 @@ async fn test_automatic_recovery_and_promotion() {
         .await
         .expect("Failed to restart node 3");
 
-    // Wait for ClusterManager to detect recovery and promote
-    // With aggressive config + hysteresis: 2 failures * 2 = 4 successes needed, ~15-25s
-    info!("⏳ Waiting for automatic recovery and promotion...");
-    tokio::time::sleep(Duration::from_secs(35)).await;
+    // Wait for node to catch up
+    info!("⏳ Waiting for node 3 to catch up...");
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
-    // Verify node 3 was automatically promoted back to voter
+    // Verify node 3 is still a voter and can participate
     let leader = cluster.leader().expect("No leader found");
     let metrics_final = leader.raft.inner().raft.metrics().borrow().clone();
-    let voters_after_promotion: Vec<NodeId> = metrics_final
+    let voters_final: Vec<NodeId> = metrics_final
         .membership_config
         .membership()
         .voter_ids()
         .collect();
 
-    info!("Final voters: {:?}", voters_after_promotion);
+    info!("Final voters: {:?}", voters_final);
     assert_eq!(
-        voters_after_promotion.len(),
+        voters_final.len(),
         3,
-        "Should have 3 voters after automatic promotion. Found: {:?}",
-        voters_after_promotion
+        "Should have 3 voters (node never demoted). Found: {:?}",
+        voters_final
     );
     assert!(
-        voters_after_promotion.contains(&NodeId(3)),
-        "Node 3 should be promoted back to voter"
+        voters_final.contains(&NodeId(3)),
+        "Node 3 should still be a voter"
     );
-    info!("✅ Node 3 was automatically promoted back to voter");
 
+    // Verify cluster is operational by committing a new operation
+    let operation = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
+        tx_id: TxId(999),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+    leader
+        .raft
+        .propose_operation(operation)
+        .await
+        .expect("Cluster should be operational with all 3 voters");
+
+    info!("✅ Node 3 successfully recovered and participates as voter");
     info!("=== test_automatic_recovery_and_promotion PASSED ===");
 }
 
-/// Test: ClusterManager maintains quorum during multiple failures
+/// Test: Nodes are NOT automatically demoted when they fail
 ///
 /// ## Test Scenario:
 /// 1. Create 5-node cluster with ClusterManager enabled
-/// 2. Simultaneously fail nodes 3 and 4
-/// 3. Wait for ClusterManager to process failures
-/// 4. Verify only ONE node was demoted (to preserve quorum)
+/// 2. Fail nodes 3 and 4
+/// 3. Wait for ClusterManager to detect failures
+/// 4. Verify that nodes 3 and 4 remain as voters (no automatic demotion)
+/// 5. Verify that cluster still has all 5 voters configured
+/// 6. Verify that cluster loses quorum when >2 nodes are offline
 ///
 /// ## Expected Behavior:
-/// - ClusterManager detects both failures
-/// - Only demotes one node to maintain quorum (need 3 out of 5 voters)
-/// - Rate limiting or quorum preservation prevents demoting both
-// With enhanced stub network offline tracking, automatic quorum maintenance now works!
+/// - Failed nodes are detected and logged but NOT automatically demoted
+/// - All 5 nodes remain in the voter configuration
+/// - Cluster correctly loses quorum when only 2/5 nodes are available
+/// - Operator must manually remove permanently failed nodes
+///
+/// ## Rationale:
+/// - Prevents accidental quorum degradation during cascading failures
+/// - Preserves important state on temporarily failed nodes
+/// - Prevents split-brain during network partitions
+/// - Follows industry standard (etcd, Consul, etc.)
 #[tokio::test]
 #[ntest::timeout(60000)]
-async fn test_cluster_manager_maintains_quorum() {
-    eprintln!("\n=== test_cluster_manager_maintains_quorum ===");
+async fn test_cluster_manager_no_auto_demotion() {
+    eprintln!("\n=== test_cluster_manager_no_auto_demotion ===");
 
-    // Create 5-node cluster for better quorum testing
+    // Create 5-node cluster with ClusterManager enabled (but no auto-demotion)
     let mut cluster = RaftTestCluster::new_with_cluster_manager(
         5,
-        wormfs::storage_raft_member::ClusterManagerPreset::Aggressive,
+        wormfs::storage_raft_member::ClusterManagerPreset::Moderate,
     )
     .await
     .expect("Failed to create cluster");
@@ -2234,7 +2150,7 @@ async fn test_cluster_manager_maintains_quorum() {
     cluster.initialize().await.expect("Failed to initialize");
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // Verify all 5 nodes are voters
+    // Verify all 5 nodes are voters initially
     let leader = cluster.leader().expect("No leader found");
     let metrics = leader.raft.inner().raft.metrics().borrow().clone();
     let voters_initial: Vec<NodeId> = metrics.membership_config.membership().voter_ids().collect();
@@ -2252,105 +2168,140 @@ async fn test_cluster_manager_maintains_quorum() {
         .await
         .expect("Failed to shutdown node 4");
 
-    // Wait for ClusterManager to process failures
-    eprintln!("⏳ Waiting for ClusterManager to process failures...");
-    tokio::time::sleep(Duration::from_secs(25)).await;
+    // Wait for ClusterManager to process failures (but nodes should NOT be demoted)
+    eprintln!("⏳ Waiting for ClusterManager to detect failures...");
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
-    // Verify quorum is maintained (should have at least 3 voters)
+    // Verify ALL 5 nodes are STILL voters (no automatic demotion)
     let leader = cluster.leader().expect("No leader found");
-    let metrics_final = leader.raft.inner().raft.metrics().borrow().clone();
-    let voters_final: Vec<NodeId> = metrics_final
+    let metrics_after_2_failures = leader.raft.inner().raft.metrics().borrow().clone();
+    let voters_after_2_failures: Vec<NodeId> = metrics_after_2_failures
         .membership_config
         .membership()
         .voter_ids()
         .collect();
 
-    eprintln!("Voters after failures: {:?}", voters_final);
+    eprintln!("Voters after 2 failures: {:?}", voters_after_2_failures);
+    assert_eq!(
+        voters_after_2_failures.len(),
+        5,
+        "All 5 nodes should remain as voters (no automatic demotion). Found: {}",
+        voters_after_2_failures.len()
+    );
     assert!(
-        voters_final.len() >= 3,
-        "Must maintain at least 3 voters for quorum. Found: {}",
-        voters_final.len()
+        voters_after_2_failures.contains(&NodeId(3)),
+        "Node 3 should still be a voter"
     );
-
-    // Verify at least one failed node was NOT demoted (to preserve quorum)
-    let node3_is_voter = voters_final.contains(&NodeId(3));
-    let node4_is_voter = voters_final.contains(&NodeId(4));
     assert!(
-        node3_is_voter || node4_is_voter,
-        "At least one failed node should remain a voter due to quorum preservation"
+        voters_after_2_failures.contains(&NodeId(4)),
+        "Node 4 should still be a voter"
     );
-    eprintln!(
-        "✅ ClusterManager correctly preserved quorum (voters: {})",
-        voters_final.len()
-    );
+    eprintln!("✅ Failed nodes 3 and 4 remain as voters (no automatic demotion)");
 
-    eprintln!("=== test_cluster_manager_maintains_quorum PASSED ===");
-}
-
-/// Test: ClusterManager rate limiting prevents thrashing
-///
-/// ## Test Scenario:
-/// 1. Create 3-node cluster with conservative config (120s rate limit)
-/// 2. Cause node 3 to fail and wait for demotion
-/// 3. Track the demotion time
-/// 4. Restart node 3, then cause it to fail again quickly
-/// 5. Verify second demotion is rate-limited (takes at least 120s from first)
-///
-/// ## Expected Behavior:
-/// - First demotion happens normally
-/// - Second demotion is delayed by rate limit
-/// - This prevents membership thrashing from flapping nodes
-// TODO(issue-76): Same stub network limitations as test_automatic_failure_detection_and_demotion
-#[tokio::test]
-#[ignore]
-#[ntest::timeout(300000)] // 5 minute timeout for conservative config
-async fn test_cluster_manager_rate_limiting() {
-    eprintln!("\n=== test_cluster_manager_rate_limiting ===");
-
-    // Use conservative config for 120s rate limit
-    let mut cluster = RaftTestCluster::new_with_cluster_manager(
-        3,
-        wormfs::storage_raft_member::ClusterManagerPreset::Conservative,
-    )
-    .await
-    .expect("Failed to create cluster");
-
-    cluster.initialize().await.expect("Failed to initialize");
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Cause node 3 to fail
-    eprintln!("🔥 Causing node 3 to fail (first failure)...");
+    // Phase 2: Fail a third node - all nodes should STILL remain as voters
+    eprintln!("\n🔥 Phase 2: Failing a third node (node 5)...");
     cluster
-        .shutdown_node(3)
+        .shutdown_node(5)
         .await
-        .expect("Failed to shutdown node 3");
+        .expect("Failed to shutdown node 5");
 
-    // Wait for first demotion (conservative: 30s timeout + 5 failures = ~150s, but we'll wait less)
-    eprintln!("⏳ Waiting for first demotion...");
-    let first_demotion_start = std::time::Instant::now();
-    tokio::time::sleep(Duration::from_secs(180)).await;
+    // Wait for ClusterManager to detect the third failure
+    eprintln!("⏳ Waiting for ClusterManager to detect third failure...");
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
-    // Verify first demotion happened
+    // Check the membership after third failure - ALL 5 nodes should STILL be voters
     let leader = cluster.leader().expect("No leader found");
-    let metrics = leader.raft.inner().raft.metrics().borrow().clone();
-    let voters: Vec<NodeId> = metrics.membership_config.membership().voter_ids().collect();
-    assert_eq!(voters.len(), 2, "First demotion should have occurred");
-    let first_demotion_time = first_demotion_start.elapsed();
-    eprintln!(
-        "✅ First demotion completed after {:?}",
-        first_demotion_time
+    let metrics_after_third_failure = leader.raft.inner().raft.metrics().borrow().clone();
+    let voters_after_third: Vec<NodeId> = metrics_after_third_failure
+        .membership_config
+        .membership()
+        .voter_ids()
+        .collect();
+
+    eprintln!("After third failure:");
+    eprintln!("  Voters: {:?}", voters_after_third);
+
+    // CRITICAL VERIFICATION: All 5 nodes should STILL be voters (no automatic demotion)
+    //
+    // Even though 3 nodes are offline and only 2 are healthy, all 5 nodes remain as voters
+    // in the configuration. The cluster will lose quorum (can't commit new operations)
+    // because only 2/5 voters are available, but nodes are NOT automatically demoted.
+    //
+    // This is the correct behavior: operator must manually remove permanently failed nodes.
+    assert_eq!(
+        voters_after_third.len(),
+        5,
+        "All 5 nodes should STILL be voters (no automatic demotion)"
+    );
+    assert!(
+        voters_after_third.contains(&NodeId(3)),
+        "Node 3 should still be a voter"
+    );
+    assert!(
+        voters_after_third.contains(&NodeId(4)),
+        "Node 4 should still be a voter"
+    );
+    assert!(
+        voters_after_third.contains(&NodeId(5)),
+        "Node 5 should still be a voter"
     );
 
-    // Note: For this test to fully validate rate limiting, we would need to:
-    // 1. Restart node 3
-    // 2. Wait for it to be promoted back
-    // 3. Cause it to fail again immediately
-    // 4. Verify the second demotion takes at least 120s from the first
-    //
-    // However, this would make the test take 5+ minutes total.
-    // For practical testing, we've validated the first demotion works.
-    // The rate limiting logic is tested in unit tests for MembershipManager.
+    eprintln!("✅ All 5 nodes remain as voters despite 3 being offline");
+    eprintln!("✅ No automatic demotion occurred (operator must manually remove failed nodes)");
 
-    eprintln!("✅ Rate limiting behavior validated (first demotion successful)");
-    eprintln!("=== test_cluster_manager_rate_limiting PASSED ===");
+    // IMPORTANT RAFT BEHAVIOR NOTE:
+    //
+    // With 5 voters and only 2 healthy, the cluster CANNOT form quorum because
+    // quorum requires a majority: ⌊5/2⌋ + 1 = 3 voters.
+    //
+    // This is standard Raft behavior: quorum is calculated from the current voter set.
+    // Since we don't automatically demote failed nodes, all 5 nodes remain voters,
+    // and the cluster loses quorum when only 2/5 are available.
+    //
+    // To verify this, let's try a write operation (it should fail or timeout):
+    eprintln!("\n📝 Testing write operation with 2/5 voters online (should lose quorum)...");
+
+    let leader = cluster.leader();
+    use wormfs::storage_raft_member::types::{TxId, WormFsOperation};
+
+    let operation = WormFsOperation::TransactionPrepare {
+        tx_id: TxId(99999),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+
+    // The write should either timeout or fail because only 2/5 voters are available
+    // (quorum requires 3)
+    if let Some(leader_node) = leader {
+        let write_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            leader_node.raft.propose_operation(operation),
+        )
+        .await;
+
+        match write_result {
+            Ok(Ok(_)) => {
+                eprintln!("❌ Write unexpectedly succeeded with only 2/5 voters online");
+                panic!("Write should NOT succeed - quorum requires 3/5 voters");
+            }
+            Ok(Err(e)) => {
+                eprintln!("✅ Write correctly failed: {:?}", e);
+                eprintln!("   This is correct because 2/5 voters is not a quorum (need 3)");
+            }
+            Err(_timeout) => {
+                eprintln!("✅ Write correctly timed out (cannot achieve quorum)");
+                eprintln!("   This is correct because 2/5 voters is not a quorum (need 3)");
+            }
+        }
+    } else {
+        eprintln!("✅ No leader available (expected with 2/5 voters - cannot form quorum)");
+    }
+
+    eprintln!("=== test_cluster_manager_no_auto_demotion PASSED ===");
 }
+
+// NOTE: test_cluster_manager_rate_limiting was removed
+// This test validated rate limiting for automatic demotion, which is no longer supported.
+// Automatic demotion has been removed in favor of operator-driven membership management.
+// Rate limiting for manual operator actions is not needed.
