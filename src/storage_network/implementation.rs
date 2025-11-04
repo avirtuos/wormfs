@@ -8,6 +8,7 @@ use crate::storage_network::{
     behaviour::{BehaviourConfig, WormFsBehaviour, WormFsCodec},
     types::*,
 };
+use crate::storage_raft_member::cluster_manager::HeartbeatTracker;
 use crate::storage_raft_member::StorageRaftMember;
 use futures::StreamExt;
 use libp2p::{
@@ -184,6 +185,12 @@ impl super::StorageNetworkFactory {
         // Wrap config in Arc for sharing with handle
         let config_arc = Arc::new(config.clone());
 
+        // Create heartbeat tracker (shared between inner state and handle)
+        let heartbeat_tracker = Arc::new(HeartbeatTracker::new(
+            HEARTBEAT_INTERVAL_SECS * 3 * 1000, // stale after 15 seconds (3x interval)
+            60_000,                             // 60 second startup grace period
+        ));
+
         // Create inner state (owned by StorageNetworkInner, not Arc)
         let state = InnerState {
             swarm: swarm_lock,
@@ -198,12 +205,14 @@ impl super::StorageNetworkFactory {
             heartbeat_sequence: RwLock::new(0),
             raft_handler: RwLock::new(None),
             raft_heartbeat_data: RwLock::new(RaftHeartbeatData::default()),
+            heartbeat_tracker: heartbeat_tracker.clone(),
         };
 
         // Create cloneable handle (no reference to inner state)
         let handle = super::StorageNetworkHandle {
             event_tx,
             config: config_arc,
+            heartbeat_tracker,
         };
 
         // Return both inner (for event loop) and handle (for operations)
@@ -274,6 +283,10 @@ pub struct InnerState {
     /// Raft heartbeat data for inclusion in gossipsub heartbeats
     /// Updated by the Raft layer, read by the heartbeat broadcaster
     pub(crate) raft_heartbeat_data: RwLock<RaftHeartbeatData>,
+
+    /// Tracker for recording and querying heartbeats from all nodes in the cluster
+    /// Wrapped in Arc to allow sharing with the network handle
+    pub(crate) heartbeat_tracker: Arc<HeartbeatTracker>,
 }
 
 // InnerState is no longer shared via Arc, so no need for unsafe impl Sync.
@@ -748,8 +761,23 @@ impl super::StorageNetworkInner {
         match HeartbeatMessage::from_bytes(data) {
             Ok(heartbeat) => {
                 debug!(
-                    "Received heartbeat from node '{}' via peer {:?} (seq: {})",
-                    heartbeat.node_id, source, heartbeat.sequence
+                    "Received heartbeat from node '{}' via peer {:?} (seq: {}, term: {:?}, log_idx: {:?})",
+                    heartbeat.node_id, source, heartbeat.sequence, heartbeat.raft_term, heartbeat.last_log_index
+                );
+
+                // Record in heartbeat tracker for cluster-wide awareness
+                self.state.heartbeat_tracker.record_heartbeat(
+                    heartbeat.node_id.clone(),
+                    heartbeat.timestamp_ms,
+                    heartbeat.sequence,
+                    heartbeat.admin_url.clone(),
+                    heartbeat.raft_state.clone(),
+                    heartbeat.raft_term,
+                    heartbeat.last_log_index,
+                    heartbeat.last_log_term,
+                    heartbeat.current_leader,
+                    heartbeat.is_voter,
+                    heartbeat.startup_time,
                 );
 
                 // Update peer's last_heartbeat time and metadata
@@ -1148,8 +1176,10 @@ impl super::StorageNetworkInner {
                 data.current_leader = current_leader;
                 data.is_voter = is_voter;
                 data.startup_time = startup_time;
-                debug!("Updated Raft heartbeat data: state={:?}, term={:?}, last_log={:?}",
-                    data.raft_state, data.raft_term, data.last_log_index);
+                debug!(
+                    "Updated Raft heartbeat data: state={:?}, term={:?}, last_log={:?}",
+                    data.raft_state, data.raft_term, data.last_log_index
+                );
                 true
             }
         }

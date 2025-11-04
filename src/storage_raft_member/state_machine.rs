@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use openraft::storage::RaftStateMachine;
 use openraft::{
@@ -907,15 +907,16 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
     {
         let mut responses = Vec::new();
 
-        eprintln!("[StateMachine] apply() called");
+        debug!("[StateMachine] apply() called");
 
         for entry in entries {
             let log_index = entry.log_id.index;
             let log_term = entry.log_id.leader_id.term;
 
-            eprintln!(
+            trace!(
                 "[StateMachine] Processing entry at index {}, term {}",
-                log_index, log_term
+                log_index,
+                log_term
             );
 
             // Extract the operation from the entry payload
@@ -991,7 +992,7 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
             }
         }
 
-        eprintln!(
+        debug!(
             "[StateMachine] apply() returning {} responses",
             responses.len()
         );

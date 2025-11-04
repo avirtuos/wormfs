@@ -6,10 +6,11 @@ use super::config::ClusterManagerConfig;
 use super::types::MembershipAction;
 use crate::storage_raft_member::types::NodeId;
 use crate::storage_raft_member::{StorageRaftMember, StorageRaftMemberImpl};
+use futures::FutureExt; // For catch_unwind on Futures
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Error type for membership operations
 #[derive(Debug, Clone)]
@@ -173,19 +174,53 @@ impl MembershipManager {
     /// Check if a node has caught up with the leader (is synced)
     ///
     /// A node is considered synced if its replication lag is below the configured threshold.
+    /// For learners, we use heartbeat timing instead of replication lag since OpenRaft
+    /// doesn't expose learner replication metrics the same way as voters.
     async fn is_synced(&self, node_id: NodeId) -> Result<bool, MembershipError> {
-        // Call trait method through Arc
-        let metrics = self.raft.as_ref().get_metrics();
+        // Check if node is a learner
+        let openraft_metrics = self.raft.inner().raft.metrics().borrow().clone();
+        let membership = openraft_metrics.membership_config.membership();
+        let is_learner = membership.learner_ids().any(|id| id == node_id);
 
-        // Check replication lag
-        if let Some(lag) = metrics.replication_lag.get(&node_id) {
-            // Node is synced if lag is below threshold (or 0)
-            // For now, use a simple threshold - could be made configurable
-            let sync_threshold = 10; // Allow up to 10 log entries behind
-            Ok(*lag <= sync_threshold)
+        if is_learner {
+            // For learners, use heartbeat timing instead of replication lag
+            // OpenRaft doesn't expose learner replication metrics in the standard way
+            let metrics = self.raft.as_ref().get_metrics();
+
+            if let Some(last_ack) = metrics.heartbeat_acked.get(&node_id) {
+                let time_since_ack = std::time::Instant::now().duration_since(*last_ack);
+                // Consider synced if heartbeat responded recently (within heartbeat timeout)
+                // Using 2x heartbeat timeout as a generous threshold
+                let heartbeat_timeout = self.config.heartbeat_timeout;
+                let synced = time_since_ack < heartbeat_timeout * 2;
+
+                debug!(
+                    "[MembershipManager] Learner node {:?} sync check: time_since_ack={:?}, synced={}",
+                    node_id, time_since_ack, synced
+                );
+
+                Ok(synced)
+            } else {
+                debug!(
+                    "[MembershipManager] Learner node {:?} has no heartbeat_acked timestamp, not synced",
+                    node_id
+                );
+                Ok(false)
+            }
         } else {
-            // Node not in replication map - not synced
-            Ok(false)
+            // For voters, use replication lag as before
+            let metrics = self.raft.as_ref().get_metrics();
+
+            // Check replication lag
+            if let Some(lag) = metrics.replication_lag.get(&node_id) {
+                // Node is synced if lag is below threshold (or 0)
+                // For now, use a simple threshold - could be made configurable
+                let sync_threshold = 10; // Allow up to 10 log entries behind
+                Ok(*lag <= sync_threshold)
+            } else {
+                // Node not in replication map - not synced
+                Ok(false)
+            }
         }
     }
 
@@ -241,14 +276,14 @@ impl MembershipManager {
     /// - Quorum preservation (prevents demotion that would lose quorum)
     /// - Rate limiting (enforces minimum time between changes)
     pub async fn demote_to_learner(&mut self, node_id: NodeId) -> Result<(), MembershipError> {
-        eprintln!(
+        debug!(
             "[MembershipManager] demote_to_learner called for node {:?}",
             node_id
         );
 
         // 1. Validate preconditions - must be leader
         if !self.raft.as_ref().is_leader() {
-            eprintln!("[MembershipManager] Not leader, cannot demote");
+            debug!("[MembershipManager] Not leader, cannot demote");
             return Err(MembershipError::RaftError(
                 "Not leader - cannot demote node".to_string(),
             ));
@@ -260,23 +295,23 @@ impl MembershipManager {
                 "Node {:?} is already a learner, no demotion needed",
                 node_id
             );
-            eprintln!(
+            debug!(
                 "[MembershipManager] Node {:?} already a learner, skipping",
                 node_id
             );
             return Ok(());
         }
 
-        eprintln!(
+        debug!(
             "[MembershipManager] Node {:?} is a voter, proceeding with demotion",
             node_id
         );
 
         // 3. Validate quorum safety and rate limiting
         let voter_count = self.get_voter_count().await?;
-        eprintln!("[MembershipManager] Current voter count: {}", voter_count);
+        debug!("[MembershipManager] Current voter count: {}", voter_count);
         self.validate_action(node_id, MembershipAction::Demote, voter_count)?;
-        eprintln!("[MembershipManager] Validation passed, proceeding with demotion");
+        debug!("[MembershipManager] Validation passed, proceeding with demotion");
 
         // 4. Get node information from current membership
         // We need this to re-add the node as a learner
@@ -292,26 +327,30 @@ impl MembershipManager {
         // This is idempotent - if already a learner, this is a no-op
         // Even if the node is offline, we can still add it as a learner
         info!("Adding node {:?} as learner before demotion", node_id);
-        eprintln!(
+        debug!(
             "[MembershipManager] Adding node {:?} as learner (non-blocking) before demotion",
             node_id
         );
 
-        match self
-            .raft
-            .inner()
-            .raft
-            .add_learner(node_id, node_info, false)
-            .await
-        {
-            Ok(_) => {
-                eprintln!(
+        // Protect against panics from OpenRaft add_learner operation
+        let add_learner_result = std::panic::AssertUnwindSafe(
+            self.raft
+                .inner()
+                .raft
+                .add_learner(node_id, node_info, false),
+        )
+        .catch_unwind()
+        .await;
+
+        match add_learner_result {
+            Ok(Ok(_)) => {
+                info!(
                     "[MembershipManager] Successfully added node {:?} as learner",
                     node_id
                 );
             }
-            Err(e) => {
-                eprintln!(
+            Ok(Err(e)) => {
+                error!(
                     "[MembershipManager] ERROR: Failed to add node {:?} as learner: {:?}",
                     node_id, e
                 );
@@ -320,18 +359,58 @@ impl MembershipManager {
                     e
                 )));
             }
+            Err(panic_err) => {
+                error!(
+                    "[MembershipManager] PANIC: add_learner for node {:?} panicked: {:?}",
+                    node_id, panic_err
+                );
+                return Err(MembershipError::RaftError(
+                    "add_learner operation panicked".to_string(),
+                ));
+            }
         }
 
         // 6. Execute demotion via OpenRaft (remove from voters)
         let mut voter_ids = std::collections::BTreeSet::new();
         voter_ids.insert(node_id);
 
-        self.raft
-            .inner()
-            .raft
-            .change_membership(openraft::ChangeMembers::RemoveVoters(voter_ids), true)
-            .await
-            .map_err(|e| MembershipError::RaftError(format!("Demotion failed: {:?}", e)))?;
+        // Protect against panics from OpenRaft change_membership operation
+        let change_result = std::panic::AssertUnwindSafe(
+            self.raft
+                .inner()
+                .raft
+                .change_membership(openraft::ChangeMembers::RemoveVoters(voter_ids), true),
+        )
+        .catch_unwind()
+        .await;
+
+        match change_result {
+            Ok(Ok(_)) => {
+                info!(
+                    "[MembershipManager] Successfully demoted node {:?} from voters",
+                    node_id
+                );
+            }
+            Ok(Err(e)) => {
+                error!(
+                    "[MembershipManager] ERROR: Demotion failed for node {:?}: {:?}",
+                    node_id, e
+                );
+                return Err(MembershipError::RaftError(format!(
+                    "Demotion failed: {:?}",
+                    e
+                )));
+            }
+            Err(panic_err) => {
+                error!(
+                    "[MembershipManager] PANIC: change_membership for demotion of node {:?} panicked: {:?}",
+                    node_id, panic_err
+                );
+                return Err(MembershipError::RaftError(
+                    "Demotion operation panicked".to_string(),
+                ));
+            }
+        }
 
         // 7. Record change for rate limiting
         self.record_membership_change(node_id);
@@ -373,12 +452,43 @@ impl MembershipManager {
         let mut voter_ids = std::collections::BTreeSet::new();
         voter_ids.insert(node_id);
 
-        self.raft
-            .inner()
-            .raft
-            .change_membership(openraft::ChangeMembers::AddVoterIds(voter_ids), true)
-            .await
-            .map_err(|e| MembershipError::RaftError(format!("Promotion failed: {:?}", e)))?;
+        // Protect against panics from OpenRaft change_membership operation
+        let change_result = std::panic::AssertUnwindSafe(
+            self.raft
+                .inner()
+                .raft
+                .change_membership(openraft::ChangeMembers::AddVoterIds(voter_ids), true),
+        )
+        .catch_unwind()
+        .await;
+
+        match change_result {
+            Ok(Ok(_)) => {
+                info!(
+                    "[MembershipManager] Successfully promoted node {:?} to voter",
+                    node_id
+                );
+            }
+            Ok(Err(e)) => {
+                error!(
+                    "[MembershipManager] ERROR: Promotion failed for node {:?}: {:?}",
+                    node_id, e
+                );
+                return Err(MembershipError::RaftError(format!(
+                    "Promotion failed: {:?}",
+                    e
+                )));
+            }
+            Err(panic_err) => {
+                error!(
+                    "[MembershipManager] PANIC: change_membership for promotion of node {:?} panicked: {:?}",
+                    node_id, panic_err
+                );
+                return Err(MembershipError::RaftError(
+                    "Promotion operation panicked".to_string(),
+                ));
+            }
+        }
 
         // 5. Record change for rate limiting
         self.record_membership_change(node_id);
@@ -403,14 +513,14 @@ impl MembershipManager {
     /// to voter status when it recovers via `handle_node_recovery()`.
     pub async fn handle_node_failure(&mut self, node_id: NodeId) -> Result<(), MembershipError> {
         warn!("Handling failure for node {:?}", node_id);
-        eprintln!(
+        debug!(
             "[MembershipManager] handle_node_failure called for node {:?}",
             node_id
         );
 
         // 1. Validate this is the leader
         if !self.raft.as_ref().is_leader() {
-            eprintln!("[MembershipManager] Not leader, cannot handle failure");
+            debug!("[MembershipManager] Not leader, cannot handle failure");
             return Err(MembershipError::RaftError(
                 "Not leader - cannot handle node failure".to_string(),
             ));
@@ -422,14 +532,14 @@ impl MembershipManager {
                 "Node {:?} is already a learner, no demotion needed on failure",
                 node_id
             );
-            eprintln!(
+            debug!(
                 "[MembershipManager] Node {:?} is already a learner, skipping demotion",
                 node_id
             );
             return Ok(());
         }
 
-        eprintln!(
+        debug!(
             "[MembershipManager] Node {:?} is a voter, calling demote_to_learner()",
             node_id
         );
@@ -608,7 +718,10 @@ mod tests {
 
         // Create mock network factory
         let mock_network: Arc<dyn NetworkHandleTrait> = Arc::new(MockNetworkHandle);
-        let network_factory = WormFsNetworkFactory::new(mock_network);
+        let heartbeat_sent = Arc::new(RwLock::new(HashMap::new()));
+        let heartbeat_acked = Arc::new(RwLock::new(HashMap::new()));
+        let network_factory =
+            WormFsNetworkFactory::new(mock_network, heartbeat_sent, heartbeat_acked);
 
         // Create Raft instance using Raft::new
         let raft = Raft::new(

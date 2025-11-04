@@ -26,7 +26,10 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
 
 use crate::storage_network::NetworkHandleTrait;
@@ -92,6 +95,10 @@ pub struct RaftMember {
     target_peer_id: PeerId,
     /// Shared handle to the storage network (trait object)
     network: Arc<dyn NetworkHandleTrait>,
+    /// Shared timing tracker for AppendEntries sent times
+    heartbeat_sent: Arc<RwLock<HashMap<NodeId, Instant>>>,
+    /// Shared timing tracker for AppendEntries response times
+    heartbeat_acked: Arc<RwLock<HashMap<NodeId, Instant>>>,
 }
 
 impl RaftMember {
@@ -102,15 +109,21 @@ impl RaftMember {
     /// * `target_node_id` - The NodeId of the target Raft member
     /// * `target_peer_id` - The PeerId of the target for network communication
     /// * `network` - Shared handle to the storage network (trait object)
+    /// * `heartbeat_sent` - Shared map to track when AppendEntries are sent
+    /// * `heartbeat_acked` - Shared map to track when AppendEntries responses are received
     pub fn new(
         target_node_id: NodeId,
         target_peer_id: PeerId,
         network: Arc<dyn NetworkHandleTrait>,
+        heartbeat_sent: Arc<RwLock<HashMap<NodeId, Instant>>>,
+        heartbeat_acked: Arc<RwLock<HashMap<NodeId, Instant>>>,
     ) -> Self {
         Self {
             target_node_id,
             target_peer_id,
             network,
+            heartbeat_sent,
+            heartbeat_acked,
         }
     }
 
@@ -202,13 +215,42 @@ impl RaftNetwork<WormFsTypeConfig> for RaftMember {
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, WormFsNode, RaftError<NodeId>>>
     {
+        // Log the AppendEntries request details
+        debug!(
+            "[RaftMember] Sending AppendEntries to {:?}: term={}, prev_log={:?}, entries={}, leader_commit={:?}",
+            self.target_node_id,
+            rpc.vote.leader_id.term,
+            rpc.prev_log_id,
+            rpc.entries.len(),
+            rpc.leader_commit
+        );
+
+        // Record the time we're sending this AppendEntries
+        {
+            let mut sent_map = self.heartbeat_sent.write().await;
+            sent_map.insert(self.target_node_id, Instant::now());
+        }
+
         let message = RaftRpcMessage::AppendEntries(rpc);
         let response: RaftRpcResponse = self
             .send_rpc::<RaftRpcMessage, RaftRpcResponse>(message, "append_entries")
             .await?;
 
+        // Record the time we received the response
+        {
+            let mut acked_map = self.heartbeat_acked.write().await;
+            acked_map.insert(self.target_node_id, Instant::now());
+        }
+
         match response {
-            RaftRpcResponse::AppendEntries(resp) => Ok(resp),
+            RaftRpcResponse::AppendEntries(resp) => {
+                debug!(
+                    "[RaftMember] Received AppendEntries response from {:?}: success={:?}",
+                    self.target_node_id,
+                    resp.is_success()
+                );
+                Ok(resp)
+            }
             _ => {
                 error!("Received unexpected response type for append_entries");
                 Err(RPCError::Network(NetworkError::new(&std::io::Error::new(

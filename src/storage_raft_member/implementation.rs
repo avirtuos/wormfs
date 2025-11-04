@@ -5,6 +5,7 @@
 //! to satisfy OpenRaft's ownership requirements.
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use openraft::{Raft, RaftMetrics as OpenRaftMetrics};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -12,7 +13,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::metadata_store::MetadataStoreFactory;
 use crate::transaction_log_store::{TransactionLogConfig, TransactionLogStoreImpl};
@@ -75,6 +76,9 @@ pub struct Inner {
 
     /// Timestamp when leader received AppendEntriesResponse from each follower (leader only)
     pub heartbeat_acked: Arc<RwLock<HashMap<NodeId, std::time::Instant>>>,
+
+    /// Timestamp when this node started up (milliseconds since Unix epoch)
+    pub startup_time: u64,
 }
 
 /// State of an in-flight transaction during two-phase commit.
@@ -151,6 +155,12 @@ impl StorageRaftMemberImpl {
         // We'll create the ClusterManager lazily when we become leader
         // For now, just store None
 
+        // Record startup time for grace period tracking
+        let startup_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
         Self {
             inner: Arc::new(Inner {
                 node_id,
@@ -166,6 +176,7 @@ impl StorageRaftMemberImpl {
                 cluster_event_receiver: RwLock::new(Some(cluster_event_receiver)),
                 heartbeat_sent,
                 heartbeat_acked,
+                startup_time,
             }),
         }
     }
@@ -181,10 +192,23 @@ impl StorageRaftMemberImpl {
         let is_leader = matches!(metrics.state, openraft::ServerState::Leader);
         let was_leader = self.inner.is_leader.swap(is_leader, Ordering::SeqCst);
 
-        eprintln!(
-            "[Leadership] Node {:?}: is_leader={}, was_leader={}",
-            self.inner.node_id, is_leader, was_leader
-        );
+        // Only log when leadership actually changes (transition)
+        if is_leader != was_leader {
+            info!(
+                "[Leadership] Node {:?} leadership changed: {} -> {}",
+                self.inner.node_id,
+                if was_leader {
+                    "Leader"
+                } else {
+                    "Follower/Learner"
+                },
+                if is_leader {
+                    "Leader"
+                } else {
+                    "Follower/Learner"
+                }
+            );
+        }
 
         let mut current_leader = self.inner.current_leader.write().await;
         *current_leader = metrics.current_leader;
@@ -193,7 +217,7 @@ impl StorageRaftMemberImpl {
         if is_leader && !was_leader {
             // We just became the leader - start ClusterManager
             info!("Node became leader, starting ClusterManager");
-            eprintln!(
+            debug!(
                 "[Leadership] Node {:?} became leader, starting ClusterManager",
                 self.inner.node_id
             );
@@ -201,7 +225,7 @@ impl StorageRaftMemberImpl {
         } else if !is_leader && was_leader {
             // We lost leadership - stop ClusterManager
             info!("Node lost leadership, stopping ClusterManager");
-            eprintln!(
+            debug!(
                 "[Leadership] Node {:?} lost leadership, stopping ClusterManager",
                 self.inner.node_id
             );
@@ -213,7 +237,7 @@ impl StorageRaftMemberImpl {
     ///
     /// This is called when this node becomes the leader.
     async fn start_cluster_manager(&self) {
-        eprintln!(
+        debug!(
             "[ClusterManager] start_cluster_manager() called for node {:?}",
             self.inner.node_id
         );
@@ -221,7 +245,7 @@ impl StorageRaftMemberImpl {
         // Check if cluster management is disabled in config
         if !self.inner.config.enable_cluster_manager {
             debug!("ClusterManager disabled in configuration");
-            eprintln!("[ClusterManager] ClusterManager disabled in configuration");
+            info!("[ClusterManager] ClusterManager disabled in configuration");
             return;
         }
 
@@ -229,7 +253,7 @@ impl StorageRaftMemberImpl {
         let mut manager_guard = self.inner.cluster_manager.write().await;
         if manager_guard.is_some() {
             debug!("ClusterManager already running");
-            eprintln!("[ClusterManager] ClusterManager already running");
+            info!("[ClusterManager] ClusterManager already running");
             return;
         }
 
@@ -245,7 +269,7 @@ impl StorageRaftMemberImpl {
             "Starting ClusterManager with preset: {:?}",
             self.inner.config.cluster_manager_preset
         );
-        eprintln!(
+        debug!(
             "[ClusterManager] Starting ClusterManager with preset: {:?}",
             self.inner.config.cluster_manager_preset
         );
@@ -256,20 +280,21 @@ impl StorageRaftMemberImpl {
             cluster_config,
             self_clone,
             self.inner.cluster_event_sender.clone(),
+            None, // TODO: Pass heartbeat_tracker once we integrate it
         ));
 
         // Start the manager
-        eprintln!("[ClusterManager] Calling cluster_manager.start()...");
+        info!("[ClusterManager] Calling cluster_manager.start()...");
         if let Err(e) = cluster_manager.start().await {
             error!("Failed to start ClusterManager: {}", e);
-            eprintln!("[ClusterManager] Failed to start: {}", e);
+            info!("[ClusterManager] Failed to start: {}", e);
             return;
         }
 
         // Store the manager
         *manager_guard = Some(cluster_manager);
         info!("ClusterManager started successfully");
-        eprintln!("[ClusterManager] ClusterManager started successfully");
+        info!("[ClusterManager] ClusterManager started successfully");
     }
 
     /// Stop the ClusterManager.
@@ -636,16 +661,28 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         let impl_clone = impl_instance.clone();
         tokio::spawn(async move {
             let mut metrics_rx = impl_clone.inner.raft.metrics();
-            eprintln!(
+            debug!(
                 "[Metrics Monitor] Starting metrics monitoring task for node {:?}",
                 impl_clone.inner.node_id
             );
+
+            // Track previous state to only log actual changes
+            let mut prev_state: Option<openraft::ServerState> = None;
+            let mut prev_leader: Option<NodeId> = None;
+
             loop {
                 tokio::select! {
                     _ = metrics_rx.changed() => {
                         let metrics = metrics_rx.borrow_and_update().clone();
-                        eprintln!("[Metrics Monitor] Node {:?} metrics changed: state={:?}, leader={:?}",
-                            impl_clone.inner.node_id, metrics.state, metrics.current_leader);
+
+                        // Only log if state or leader actually changed
+                        if prev_state != Some(metrics.state) || prev_leader != metrics.current_leader {
+                            debug!("[Metrics Monitor] Node {:?} metrics changed: state={:?}, leader={:?}",
+                                impl_clone.inner.node_id, metrics.state, metrics.current_leader);
+                            prev_state = Some(metrics.state);
+                            prev_leader = metrics.current_leader;
+                        }
+
                         impl_clone.update_leadership(&metrics).await;
                     }
                 }
@@ -704,20 +741,20 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             let mut members = std::collections::BTreeMap::new();
             members.insert(self.inner.node_id, this_node);
 
-            eprintln!("Calling raft.initialize() with {} members", members.len());
+            debug!("Calling raft.initialize() with {} members", members.len());
 
             let init_result = self.inner.raft.initialize(members).await;
 
             match &init_result {
                 Ok(_) => {
-                    eprintln!("raft.initialize() returned Ok");
+                    debug!("raft.initialize() returned Ok");
                     info!(
                         "Successfully initialized single-node cluster for node {:?}",
                         self.inner.node_id
                     );
                 }
                 Err(e) => {
-                    eprintln!("raft.initialize() returned Err: {:?}", e);
+                    debug!("raft.initialize() returned Err: {:?}", e);
                 }
             }
 
@@ -726,12 +763,12 @@ impl StorageRaftMember for StorageRaftMemberImpl {
 
             // Give the Raft core task time to process the initialization
             // initialize() is async - it queues the request and returns, actual processing happens later
-            eprintln!("Waiting for Raft core to process initialization...");
+            debug!("Waiting for Raft core to process initialization...");
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
             // Check state after giving core time to process
             let metrics_after_init = self.inner.raft.metrics().borrow().clone();
-            eprintln!(
+            debug!(
                 "State after raft.initialize() + delay: state={:?}, term={}, current_leader={:?}",
                 metrics_after_init.state,
                 metrics_after_init.current_term,
@@ -773,14 +810,14 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             self.inner.node_id
         );
 
-        eprintln!(
+        debug!(
             "[propose_operation] Node {:?}: About to call client_write()",
             self.inner.node_id
         );
 
         // Submit the operation to Raft for replication and consensus
         let response = self.inner.raft.client_write(operation).await.map_err(|e| {
-            eprintln!(
+            debug!(
                 "[propose_operation] Node {:?}: client_write() returned error: {:?}",
                 self.inner.node_id, e
             );
@@ -803,7 +840,7 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             }
         })?;
 
-        eprintln!(
+        debug!(
             "[propose_operation] Node {:?}: client_write() returned successfully! log_id={:?}",
             self.inner.node_id, response.log_id
         );
@@ -851,14 +888,14 @@ impl StorageRaftMember for StorageRaftMemberImpl {
 
     async fn trigger_election(&self) -> Result<(), Error> {
         info!("Triggering election for node {:?}", self.inner.node_id);
-        eprintln!(
+        debug!(
             "trigger_election() called for node {:?}",
             self.inner.node_id
         );
 
         // Check state BEFORE election trigger
         let metrics_before = self.inner.raft.metrics().borrow().clone();
-        eprintln!(
+        debug!(
             "State BEFORE elect(): state={:?}, term={}, current_leader={:?}",
             metrics_before.state, metrics_before.current_term, metrics_before.current_leader
         );
@@ -868,14 +905,14 @@ impl StorageRaftMember for StorageRaftMemberImpl {
 
         match &result {
             Ok(_) => {
-                eprintln!(
+                debug!(
                     "trigger().elect() succeeded for node {:?}",
                     self.inner.node_id
                 );
 
                 // Check state immediately after election trigger
                 let metrics = self.inner.raft.metrics().borrow().clone();
-                eprintln!(
+                debug!(
                     "State immediately after elect(): state={:?}, term={}, current_leader={:?}",
                     metrics.state, metrics.current_term, metrics.current_leader
                 );
@@ -886,7 +923,7 @@ impl StorageRaftMember for StorageRaftMemberImpl {
                 );
             }
             Err(e) => {
-                eprintln!(
+                debug!(
                     "trigger().elect() FAILED for node {:?}: {:?}",
                     self.inner.node_id, e
                 );
@@ -932,7 +969,7 @@ impl StorageRaftMember for StorageRaftMemberImpl {
 
         // Step 1: Add as learner using the dedicated add_learner API
         // Use blocking=true to wait for the learner to catch up before returning
-        eprintln!(
+        debug!(
             "Step 1: Adding node {:?} as learner (blocking until caught up)",
             node_id
         );
@@ -944,9 +981,9 @@ impl StorageRaftMember for StorageRaftMemberImpl {
                 Error::MembershipChangeFailed(format!("Failed to add node as learner: {:?}", e))
             })?;
 
-        eprintln!("Learner {:?} has caught up with the log", node_id);
+        debug!("Learner {:?} has caught up with the log", node_id);
 
-        eprintln!("Step 2: Promoting node {:?} to voter", node_id);
+        debug!("Step 2: Promoting node {:?} to voter", node_id);
         // Step 2: Promote learner to voter using change_membership
         let mut voter_ids = std::collections::BTreeSet::new();
         voter_ids.insert(node_id);
@@ -1036,6 +1073,7 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         receiver
     }
 
+    #[tracing::instrument(skip(self, request), fields(node_id = %self.inner.node_id.0))]
     async fn handle_raft_rpc(&self, request: Vec<u8>) -> Result<Vec<u8>, Error> {
         use super::raft_member::{RaftRpcMessage, RaftRpcResponse};
 
@@ -1046,50 +1084,139 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         // Handle the RPC based on its type by calling the appropriate Raft method
         let response = match rpc_message {
             RaftRpcMessage::Vote(vote_req) => {
-                eprintln!(
+                debug!(
                     "[Node {:?}] Handling Vote RPC from term {}",
                     self.inner.node_id, vote_req.vote.committed
                 );
-                let resp = self.inner.raft.vote(vote_req).await.map_err(|e| {
-                    eprintln!("[Node {:?}] Vote RPC error: {:?}", self.inner.node_id, e);
-                    Error::RaftError(format!("Vote RPC failed: {:?}", e))
-                })?;
-                RaftRpcResponse::Vote(resp)
+
+                // Catch panics to prevent bad actors from crashing the leader with malformed Vote RPCs
+                let result = std::panic::AssertUnwindSafe(self.inner.raft.vote(vote_req))
+                    .catch_unwind()
+                    .await;
+
+                match result {
+                    Ok(Ok(resp)) => RaftRpcResponse::Vote(resp),
+                    Ok(Err(e)) => {
+                        debug!("[Node {:?}] Vote RPC error: {:?}", self.inner.node_id, e);
+                        return Err(Error::RaftError(format!("Vote RPC failed: {:?}", e)));
+                    }
+                    Err(panic_err) => {
+                        debug!(
+                            "[Node {:?}] Vote RPC caused panic (rejected): {:?}",
+                            self.inner.node_id, panic_err
+                        );
+                        return Err(Error::RaftError(
+                            "Vote RPC rejected due to internal error".to_string(),
+                        ));
+                    }
+                }
             }
             RaftRpcMessage::AppendEntries(append_req) => {
                 // Log current state to understand why we're panicking
                 let metrics = self.inner.raft.metrics().borrow().clone();
-                eprintln!("[Node {:?}] Handling AppendEntries RPC: term={}, prev_log_index={:?}, entries={}, leader_committed={:?}",
+                debug!("[Node {:?}] Handling AppendEntries RPC: term={}, prev_log_index={:?}, entries={}, leader_committed={:?}",
                          self.inner.node_id, append_req.vote.leader_id.term,
                          append_req.prev_log_id, append_req.entries.len(), append_req.leader_commit);
-                eprintln!("[Node {:?}] Current state: last_log={:?}, last_applied={:?}, snapshot={:?}, state={:?}, is_initialized={}",
+                debug!("[Node {:?}] Current state: last_log={:?}, last_applied={:?}, snapshot={:?}, state={:?}, is_initialized={}",
                          self.inner.node_id, metrics.last_log_index, metrics.last_applied,
                          metrics.snapshot, metrics.state, self.inner.raft.is_initialized().await.unwrap_or(false));
 
-                let resp = self
-                    .inner
-                    .raft
-                    .append_entries(append_req)
-                    .await
-                    .map_err(|e| {
-                        eprintln!(
+                let mut max_id = 0;
+                // Log individual entries for detailed debugging
+                for (idx, entry) in append_req.entries.iter().enumerate() {
+                    trace!(
+                        "[Node {:?}] AppendEntries entry[{}]: log_id={:?} (term={}, index={})",
+                        self.inner.node_id,
+                        idx,
+                        entry.log_id,
+                        entry.log_id.leader_id.term,
+                        entry.log_id.index
+                    );
+
+                    if max_id < entry.log_id.index {
+                        max_id = entry.log_id.index;
+                    }
+                }
+
+                // Catch panics to prevent bad actors from crashing nodes with malformed AppendEntries
+                let result =
+                    std::panic::AssertUnwindSafe(self.inner.raft.append_entries(append_req))
+                        .catch_unwind()
+                        .await;
+
+                match result {
+                    Ok(Ok(resp)) => {
+                        debug!(
+                            "[Node {:?}] Sending AppendEntries response: success={:?} - {:?}",
+                            self.inner.node_id,
+                            resp.is_success(),
+                            resp
+                        );
+                        RaftRpcResponse::AppendEntries(resp)
+                    }
+                    Ok(Err(e)) => {
+                        debug!(
                             "[Node {:?}] AppendEntries error: {:?}",
                             self.inner.node_id, e
                         );
-                        Error::RaftError(format!("AppendEntries RPC failed: {:?}", e))
-                    })?;
-                RaftRpcResponse::AppendEntries(resp)
+                        return Err(Error::RaftError(format!(
+                            "AppendEntries RPC failed: {:?}",
+                            e
+                        )));
+                    }
+                    Err(panic_err) => {
+                        debug!(
+                            "[Node {:?}] AppendEntries caused panic (rejected): {:?}",
+                            self.inner.node_id, panic_err
+                        );
+                        return Err(Error::RaftError(
+                            "AppendEntries rejected due to internal error".to_string(),
+                        ));
+                    }
+                }
             }
             RaftRpcMessage::InstallSnapshot(snapshot_req) => {
-                let resp = self
-                    .inner
-                    .raft
-                    .install_snapshot(snapshot_req)
-                    .await
-                    .map_err(|e| {
-                        Error::RaftError(format!("InstallSnapshot RPC failed: {:?}", e))
-                    })?;
-                RaftRpcResponse::InstallSnapshot(resp)
+                debug!(
+                    "[Node {:?}] Handling InstallSnapshot RPC: term={}, last_included={:?}",
+                    self.inner.node_id,
+                    snapshot_req.vote.leader_id.term,
+                    snapshot_req.meta.last_log_id
+                );
+
+                // Catch panics to prevent bad actors from crashing nodes with malformed InstallSnapshot
+                let result =
+                    std::panic::AssertUnwindSafe(self.inner.raft.install_snapshot(snapshot_req))
+                        .catch_unwind()
+                        .await;
+
+                match result {
+                    Ok(Ok(resp)) => {
+                        debug!(
+                            "[Node {:?}] InstallSnapshot completed successfully",
+                            self.inner.node_id
+                        );
+                        RaftRpcResponse::InstallSnapshot(resp)
+                    }
+                    Ok(Err(e)) => {
+                        debug!(
+                            "[Node {:?}] InstallSnapshot error: {:?}",
+                            self.inner.node_id, e
+                        );
+                        return Err(Error::RaftError(format!(
+                            "InstallSnapshot RPC failed: {:?}",
+                            e
+                        )));
+                    }
+                    Err(panic_err) => {
+                        debug!(
+                            "[Node {:?}] InstallSnapshot caused panic (rejected): {:?}",
+                            self.inner.node_id, panic_err
+                        );
+                        return Err(Error::RaftError(
+                            "InstallSnapshot rejected due to internal error".to_string(),
+                        ));
+                    }
+                }
             }
         };
 
@@ -1107,6 +1234,65 @@ impl StorageRaftMemberImpl {
     /// to the OpenRaft instance for advanced initialization scenarios.
     pub fn inner(&self) -> &Inner {
         &self.inner
+    }
+
+    /// Start a background task to periodically update the network's heartbeat data
+    /// with the current Raft state.
+    ///
+    /// This should be called after the Raft node is fully initialized and the
+    /// network layer is running.
+    ///
+    /// # Arguments
+    ///
+    /// * `network` - The network handle to update with heartbeat data
+    /// * `interval_secs` - How often to update the heartbeat data (defaults to 1 second)
+    pub fn start_heartbeat_updater(
+        &self,
+        network: Arc<crate::storage_network::StorageNetworkHandle>,
+        interval_secs: Option<u64>,
+    ) {
+        let member = self.clone();
+        let interval = std::time::Duration::from_secs(interval_secs.unwrap_or(1));
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+
+                // Get current Raft metrics
+                let metrics = member.inner.raft.metrics().borrow().clone();
+
+                // Extract Raft state information
+                let raft_state = format!("{:?}", metrics.state);
+                let raft_term = Some(metrics.current_term);
+                let last_log_index = metrics.last_log_index;
+                let last_log_term = metrics.last_applied.map(|log_id| log_id.leader_id.term);
+                let current_leader = metrics.current_leader.map(|id| id.0); // Extract inner u64
+                                                                            // Check if this node is a voter by seeing if it's in the voters set
+                let voters = metrics
+                    .membership_config
+                    .membership()
+                    .voter_ids()
+                    .collect::<Vec<_>>();
+                let is_voter = voters.contains(&&member.inner.node_id);
+                let startup_time = Some(member.inner.startup_time);
+
+                // Update the network layer's heartbeat data
+                if let Err(e) = network
+                    .update_raft_heartbeat_data(
+                        Some(raft_state),
+                        raft_term,
+                        last_log_index,
+                        last_log_term,
+                        current_leader,
+                        Some(is_voter),
+                        startup_time,
+                    )
+                    .await
+                {
+                    error!("Failed to update heartbeat data: {}", e);
+                }
+            }
+        });
     }
 }
 

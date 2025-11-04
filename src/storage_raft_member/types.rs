@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use thiserror::Error;
 
 use crate::storage_network::NetworkHandleTrait;
@@ -43,6 +43,28 @@ impl NodeId {
 impl std::fmt::Display for NodeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Node({})", self.0)
+    }
+}
+
+/// ClusterManager configuration preset.
+///
+/// Defines the aggressiveness of automatic failure detection and recovery:
+/// - Conservative: Slower to react, fewer false positives
+/// - Moderate: Balanced approach (recommended for most deployments)
+/// - Aggressive: Fast reaction, may have more false positives
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterManagerPreset {
+    /// Conservative: 30s heartbeat timeout, 120s min membership change interval
+    Conservative,
+    /// Moderate: 15s heartbeat timeout, 60s min membership change interval (default)
+    Moderate,
+    /// Aggressive: 5s heartbeat timeout, 30s min membership change interval
+    Aggressive,
+}
+
+impl Default for ClusterManagerPreset {
+    fn default() -> Self {
+        Self::Moderate
     }
 }
 
@@ -125,6 +147,13 @@ pub struct Config {
     /// This must be set before calling new() - there's no default
     /// Uses trait object to support both production (libp2p) and test (stub) networks
     pub storage_network: Option<Arc<dyn NetworkHandleTrait>>,
+
+    // === Cluster Manager Configuration ===
+    /// Enable ClusterManager for automatic failure detection and recovery (default: true)
+    pub enable_cluster_manager: bool,
+
+    /// ClusterManager configuration preset (default: Moderate)
+    pub cluster_manager_preset: ClusterManagerPreset,
 }
 
 impl std::fmt::Debug for Config {
@@ -173,6 +202,8 @@ impl std::fmt::Debug for Config {
             .field("snapshot_directory", &self.snapshot_directory)
             .field("network_address", &self.network_address)
             .field("storage_network", &self.storage_network.is_some())
+            .field("enable_cluster_manager", &self.enable_cluster_manager)
+            .field("cluster_manager_preset", &self.cluster_manager_preset)
             .finish()
     }
 }
@@ -220,6 +251,10 @@ impl Default for Config {
             snapshot_directory: PathBuf::from("/tmp/wormfs/snapshots"),
             network_address: SocketAddr::from(([127, 0, 0, 1], 5000)),
             storage_network: None, // Must be set before calling new()
+
+            // Cluster Manager Configuration
+            enable_cluster_manager: true, // Enabled by default for automatic recovery
+            cluster_manager_preset: ClusterManagerPreset::Moderate,
         }
     }
 }
@@ -324,6 +359,12 @@ pub struct RaftMetrics {
 
     /// Replication lag per follower (leader only)
     pub replication_lag: HashMap<NodeId, u64>,
+
+    /// Timestamp when leader last sent AppendEntries to each follower (leader only)
+    pub heartbeat_sent: HashMap<NodeId, Instant>,
+
+    /// Timestamp when leader received AppendEntriesResponse from each follower (leader only)
+    pub heartbeat_acked: HashMap<NodeId, Instant>,
 }
 
 // ============================================================================

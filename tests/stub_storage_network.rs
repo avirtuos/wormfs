@@ -4,9 +4,10 @@
 //! via channels instead of real libp2p networking, making tests faster and more reliable.
 
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, error, info};
 use wormfs::storage_network::{Error, NetworkHandleTrait, PeerInfo};
 use wormfs::storage_raft_member::raft_member::RaftRpcHandler;
 
@@ -18,6 +19,8 @@ pub struct StubNetworkHub {
     raft_handlers: Arc<RwLock<HashMap<u64, Arc<dyn RaftRpcHandler>>>>,
     /// Map of PeerId bytes -> node_id (for routing RPCs by PeerId)
     peer_to_node: Arc<RwLock<HashMap<Vec<u8>, u64>>>,
+    /// Set of nodes that are currently offline (for simulating node failures)
+    offline_nodes: Arc<RwLock<HashSet<u64>>>,
 }
 
 impl StubNetworkHub {
@@ -26,18 +29,39 @@ impl StubNetworkHub {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             raft_handlers: Arc::new(RwLock::new(HashMap::new())),
             peer_to_node: Arc::new(RwLock::new(HashMap::new())),
+            offline_nodes: Arc::new(RwLock::new(HashSet::new())),
         }
+    }
+
+    /// Mark a node as offline (simulates node failure)
+    pub async fn mark_node_offline(&self, node_id: u64) {
+        info!("[StubNetwork] Marking node {} as OFFLINE", node_id);
+        let mut offline = self.offline_nodes.write().await;
+        offline.insert(node_id);
+    }
+
+    /// Mark a node as online (simulates node recovery)
+    pub async fn mark_node_online(&self, node_id: u64) {
+        info!("[StubNetwork] Marking node {} as ONLINE", node_id);
+        let mut offline = self.offline_nodes.write().await;
+        offline.remove(&node_id);
+    }
+
+    /// Check if a node is currently offline
+    pub async fn is_node_offline(&self, node_id: u64) -> bool {
+        let offline = self.offline_nodes.read().await;
+        offline.contains(&node_id)
     }
 
     /// Unregister a Raft handler for a node (for clean shutdown/restart)
     pub async fn unregister_raft_handler(&self, node_id: u64) {
-        eprintln!(
+        debug!(
             "[StubNetwork] Unregistering Raft handler for node {}",
             node_id
         );
         let mut handlers = self.raft_handlers.write().await;
         handlers.remove(&node_id);
-        eprintln!(
+        debug!(
             "[StubNetwork] Handler unregistered for node {}. Remaining handlers: {}",
             node_id,
             handlers.len()
@@ -48,8 +72,11 @@ impl StubNetworkHub {
     pub fn create_handle(&self, node_id: u64) -> StubStorageNetworkHandle {
         let (tx, rx) = mpsc::unbounded_channel();
 
-        // Generate a real libp2p PeerId for this stub node
-        let peer_id = libp2p::PeerId::random();
+        // Generate a deterministic libp2p PeerId for this stub node based on node_id
+        // This ensures the same node_id always gets the same PeerId across restarts
+        let keypair = libp2p::identity::Keypair::ed25519_from_bytes([node_id as u8; 32])
+            .expect("Failed to create deterministic keypair");
+        let peer_id = libp2p::PeerId::from(keypair.public());
 
         StubStorageNetworkHandle {
             node_id,
@@ -59,6 +86,7 @@ impl StubNetworkHub {
             hub_nodes: self.nodes.clone(),
             hub_handlers: self.raft_handlers.clone(),
             hub_peer_to_node: self.peer_to_node.clone(),
+            hub_offline_nodes: self.offline_nodes.clone(),
         }
     }
 }
@@ -74,6 +102,7 @@ pub struct StubStorageNetworkHandle {
     hub_nodes: Arc<RwLock<HashMap<u64, mpsc::UnboundedSender<Vec<u8>>>>>,
     hub_handlers: Arc<RwLock<HashMap<u64, Arc<dyn RaftRpcHandler>>>>,
     hub_peer_to_node: Arc<RwLock<HashMap<Vec<u8>, u64>>>,
+    hub_offline_nodes: Arc<RwLock<HashSet<u64>>>,
 }
 
 impl StubStorageNetworkHandle {
@@ -101,6 +130,22 @@ impl StubStorageNetworkHandle {
         use wormfs::storage_network::types::PeerId as WormFsPeerId;
         use wormfs::storage_raft_member::raft_member::{RaftRpcMessage, RaftRpcResponse};
 
+        // Check if target node is offline (simulates network partition)
+        let offline_nodes = self.hub_offline_nodes.read().await;
+        if offline_nodes.contains(&target_node_id) {
+            drop(offline_nodes); // Release lock
+            debug!(
+                "[StubNetwork] Node {} → Node {}: OFFLINE (simulating network timeout)",
+                self.node_id, target_node_id
+            );
+            // Simulate a realistic network timeout delay (100ms)
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            return Err(Error::PeerNotConnected(WormFsPeerId::new(
+                target_node_id.to_le_bytes().to_vec(),
+            )));
+        }
+        drop(offline_nodes); // Release lock
+
         // Deserialize request to log it
         let rpc_type = match bincode::deserialize::<RaftRpcMessage>(&request) {
             Ok(RaftRpcMessage::Vote(ref req)) => {
@@ -126,7 +171,7 @@ impl StubStorageNetworkHandle {
             Err(_) => format!("Unknown({} bytes)", request.len()),
         };
 
-        eprintln!(
+        debug!(
             "[StubNetwork] Node {} → Node {}: {}",
             self.node_id, target_node_id, rpc_type
         );
@@ -134,7 +179,7 @@ impl StubStorageNetworkHandle {
         // Get the target node's Raft handler
         let handlers = self.hub_handlers.read().await;
         let handler = handlers.get(&target_node_id).ok_or_else(|| {
-            eprintln!(
+            error!(
                 "[StubNetwork] ERROR: Node {} not found in handlers map",
                 target_node_id
             );
@@ -146,7 +191,7 @@ impl StubStorageNetworkHandle {
 
         // Call the handler directly (simulating network RPC)
         let result = handler.handle_raft_rpc(request).await.map_err(|e| {
-            eprintln!(
+            error!(
                 "[StubNetwork] ERROR: RPC to node {} failed: {:?}",
                 target_node_id, e
             );
@@ -174,7 +219,7 @@ impl StubStorageNetworkHandle {
             Err(_) => format!("Unknown({} bytes)", result.len()),
         };
 
-        eprintln!(
+        debug!(
             "[StubNetwork] Node {} ← Node {}: {}",
             self.node_id, target_node_id, response_type
         );
@@ -183,13 +228,13 @@ impl StubStorageNetworkHandle {
 
     /// Register a Raft handler for this node
     pub async fn register_raft_handler_internal(&self, handler: Arc<dyn RaftRpcHandler>) {
-        eprintln!(
+        info!(
             "[StubNetwork] Registering Raft handler for node {}",
             self.node_id
         );
         let mut handlers = self.hub_handlers.write().await;
         handlers.insert(self.node_id, handler);
-        eprintln!(
+        info!(
             "[StubNetwork] Handler registered for node {}. Total handlers: {}",
             self.node_id,
             handlers.len()
@@ -197,10 +242,13 @@ impl StubStorageNetworkHandle {
     }
 
     /// Get list of connected peers (all other registered nodes)
+    /// NOTE: We don't filter offline nodes here because OpenRaft needs to know about
+    /// all configured members. The offline check happens in send_raft_rpc() instead.
     pub async fn get_connected_peers_internal(&self) -> Vec<PeerInfo> {
         use wormfs::storage_network::types::{ConnectionState, PeerId as WormFsPeerId};
 
         let nodes = self.hub_nodes.read().await;
+
         nodes
             .keys()
             .filter(|&&id| id != self.node_id)

@@ -104,6 +104,11 @@ impl RaftLogStorageAdapter {
         let leader_id = CommittedLeaderId::new(log_entry.term, NodeId(log_entry.leader_node_id));
         let log_id = LogId::new(leader_id, log_entry.index);
 
+        debug!(
+            "Loading entry from storage: index={}, term={}, leader_node_id={}, log_id={:?}",
+            log_entry.index, log_entry.term, log_entry.leader_node_id, log_id
+        );
+
         // Create the entry with the deserialized payload
         Ok(Entry { log_id, payload })
     }
@@ -122,12 +127,14 @@ impl RaftLogStorageAdapter {
     ) -> Result<(u64, u64, u64, Vec<u8>), StorageError<NodeId>> {
         let index = entry.log_id.index;
         let term = entry.log_id.leader_id.term;
-        let leader_node_id = entry
-            .log_id
-            .leader_id
-            .voted_for()
-            .map(|nid| nid.0)
-            .unwrap_or(0); // Use 0 if no node ID is set (shouldn't happen in normal operation)
+        // Access node_id directly from LeaderId instead of using voted_for()
+        // voted_for() returns None for uncommitted entries, which would incorrectly default to 0
+        let leader_node_id = entry.log_id.leader_id.node_id.0;
+
+        debug!(
+            "Converting entry to storage: index={}, term={}, leader_node_id={}, log_id={:?}",
+            index, term, leader_node_id, entry.log_id
+        );
 
         // Serialize the entire payload (preserves Blank, Normal, Membership types)
         let data = bincode::serialize(&entry.payload).map_err(|e| {
@@ -277,7 +284,9 @@ impl RaftLogStorage<WormFsTypeConfig> for RaftLogStorageAdapter {
         let last_log_id = if last_index > 0 {
             match self.log_store.get_last_entry().await {
                 Ok(entry) => {
-                    let leader_id = CommittedLeaderId::new(entry.term, NodeId(0));
+                    // Use the actual leader_node_id from the stored entry instead of hardcoding 0
+                    let leader_id =
+                        CommittedLeaderId::new(entry.term, NodeId(entry.leader_node_id));
                     Some(LogId::new(leader_id, entry.index))
                 }
                 Err(_) => None,
