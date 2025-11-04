@@ -27,6 +27,7 @@ use super::types::{
     Config, Error, MetadataChangeEvent, MetadataChangeType, NodeId, RaftMetrics, RaftRole, TxId,
     WormFsOperation,
 };
+use super::utils::current_time_ms;
 use super::StorageRaftMember;
 
 /// Inner state for StorageRaftMemberImpl, wrapped in Arc for interior mutability.
@@ -156,10 +157,7 @@ impl StorageRaftMemberImpl {
         // For now, just store None
 
         // Record startup time for grace period tracking
-        let startup_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let startup_time = current_time_ms();
 
         Self {
             inner: Arc::new(Inner {

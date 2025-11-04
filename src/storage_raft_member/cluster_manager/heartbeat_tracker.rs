@@ -1,8 +1,9 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
+
+use super::super::utils::current_time_ms;
 
 /// Information about a node's heartbeat
 #[derive(Debug, Clone)]
@@ -25,22 +26,14 @@ pub struct NodeHeartbeat {
 impl NodeHeartbeat {
     /// Check if this heartbeat is stale (not updated recently)
     pub fn is_stale(&self, stale_threshold_ms: u64) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
+        let now = current_time_ms();
         now.saturating_sub(self.last_seen) > stale_threshold_ms
     }
 
     /// Check if this node recently started (within the grace period)
     pub fn is_in_startup_grace_period(&self, grace_period_ms: u64) -> bool {
         if let Some(startup_time) = self.startup_time {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-
+            let now = current_time_ms();
             now.saturating_sub(startup_time) < grace_period_ms
         } else {
             false
@@ -291,13 +284,6 @@ pub struct ClusterSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn current_time_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-    }
 
     #[test]
     fn test_record_and_retrieve_heartbeat() {

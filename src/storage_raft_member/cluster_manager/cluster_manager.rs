@@ -426,38 +426,54 @@ impl ClusterManager {
 
                         // Create a WormFsNode for the restarted node
                         // Generate the same deterministic peer_id that the stub network uses
-                        let keypair =
-                            libp2p::identity::Keypair::ed25519_from_bytes([node_id.0 as u8; 32])
-                                .expect("Failed to create deterministic keypair");
-                        let peer_id = libp2p::PeerId::from(keypair.public());
-                        let node_info = super::super::raft_config::WormFsNode {
-                            peer_id: peer_id.to_string(),
-                            metadata: None,
-                        };
+                        let keypair_result =
+                            libp2p::identity::Keypair::ed25519_from_bytes([node_id.0 as u8; 32]);
 
-                        // Try to re-add as learner using OpenRaft API directly
-                        match raft
-                            .inner()
-                            .raft
-                            .add_learner(node_id, node_info, true)
-                            .await
-                        {
-                            Ok(_) => {
-                                info!("Re-added discovered node {:?} as learner", node_id);
-                                info!(
-                                    "[ClusterManager HeartbeatDiscovery] Re-added node {:?} as learner",
-                                    node_id
-                                );
+                        match keypair_result {
+                            Ok(keypair) => {
+                                let peer_id = libp2p::PeerId::from(keypair.public());
+                                let node_info = super::super::raft_config::WormFsNode {
+                                    peer_id: peer_id.to_string(),
+                                    metadata: None,
+                                };
 
-                                // Emit event for the re-addition
-                                let _ =
-                                    event_sender.send(ClusterEvent::MembershipChangeCompleted {
-                                        node_id,
-                                        action: super::types::MembershipAction::Add,
-                                    });
+                                // Try to re-add as learner using OpenRaft API directly
+                                match raft
+                                    .inner()
+                                    .raft
+                                    .add_learner(node_id, node_info, true)
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        info!("Re-added discovered node {:?} as learner", node_id);
+                                        info!(
+                                            "[ClusterManager HeartbeatDiscovery] Re-added node {:?} as learner",
+                                            node_id
+                                        );
+
+                                        // Emit event for the re-addition
+                                        let _ = event_sender.send(
+                                            ClusterEvent::MembershipChangeCompleted {
+                                                node_id,
+                                                action: super::types::MembershipAction::Add,
+                                            },
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to re-add discovered node {:?}: {:?}",
+                                            node_id, e
+                                        );
+                                    }
+                                }
                             }
                             Err(e) => {
-                                warn!("Failed to re-add discovered node {:?}: {:?}", node_id, e);
+                                error!(
+                                    "Failed to create deterministic keypair for node {:?}: {:?}. \
+                                    Cannot re-add to cluster. This may indicate an issue with the \
+                                    node ID format.",
+                                    node_id, e
+                                );
                             }
                         }
                     }
