@@ -90,6 +90,7 @@ pub mod raft_config;
 pub mod raft_member;
 pub mod state_machine;
 pub mod types;
+mod utils;
 
 use async_trait::async_trait;
 pub use implementation::StorageRaftMemberImpl;

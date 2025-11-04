@@ -26,6 +26,7 @@ use super::types::{
     FileId, MetadataChangeEvent, MetadataChangeType, MetadataOperation, NodeId, TxId,
     WormFsOperation,
 };
+use super::utils::current_time_secs;
 
 /// State of a transaction during two-phase commit.
 #[derive(Debug, Clone)]
@@ -1026,10 +1027,7 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
             // Create a unique temporary filename using timestamp and random suffix
             let temp_filename = format!(
                 "snapshot-incoming-{}-{}.db.tmp",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
+                current_time_secs(),
                 rand::random::<u32>()
             );
             let temp_path = inner.snapshot_directory.join(&temp_filename);
