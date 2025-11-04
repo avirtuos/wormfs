@@ -1738,25 +1738,221 @@ async fn test_concurrent_requests() {
 /// - Partition creation/healing APIs
 /// - Network delay simulation
 ///
-/// This is deferred to a future phase when we build comprehensive chaos testing infrastructure.
+/// Tests that network partitions correctly enforce Raft's quorum requirements and prevent split-brain.
 #[tokio::test]
-#[ignore = "Requires network partition simulation infrastructure"]
+#[ntest::timeout(120000)]
 async fn test_network_partition_handling() {
-    // TODO: Implement partition simulation in StubNetworkHub:
-    // - hub.partition_nodes(vec![1,2,3], vec![4,5])
-    // - hub.heal_partition()
-    //
-    // Then test:
-    // 1. Create 5-node cluster
-    // 2. Partition into [1,2,3] and [4,5]
-    // 3. Verify nodes 1-3 maintain/elect leader
-    // 4. Verify nodes 4-5 have no leader (no quorum)
-    // 5. Submit operation to majority partition - should succeed
-    // 6. Submit operation to minority partition - should fail
-    // 7. Heal partition
-    // 8. Verify all 5 nodes converge on same state
-    eprintln!("⚠️  Network partition test requires partition simulation infrastructure");
-    eprintln!("   This will be implemented in a future chaos testing phase");
+    use wormfs::storage_raft_member::types::{TxId, WormFsOperation};
+
+    eprintln!("\n=== test_network_partition_handling ===");
+
+    // ============================================================================
+    // STEP 1: Create 5-node cluster
+    // ============================================================================
+    eprintln!("\n📦 Creating 5-node cluster...");
+    let mut cluster = RaftTestCluster::new(5)
+        .await
+        .expect("Failed to create cluster");
+    cluster
+        .initialize()
+        .await
+        .expect("Failed to initialize cluster");
+
+    // Wait for cluster to stabilize
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let leader = cluster.leader().expect("Should have a leader");
+    eprintln!("✅ Cluster initialized with leader: Node {}", leader.id);
+
+    // Submit initial operation to build some log history
+    let operation_0 = WormFsOperation::TransactionPrepare {
+        tx_id: TxId(1000),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+    leader
+        .raft
+        .propose_operation(operation_0)
+        .await
+        .expect("Initial operation should succeed");
+    eprintln!("✅ Initial operation committed");
+
+    // ============================================================================
+    // STEP 2: Partition cluster into [1,2,3] (majority) and [4,5] (minority)
+    // ============================================================================
+    eprintln!("\n🔨 Creating network partition: [1,2,3] vs [4,5]");
+    cluster
+        .hub
+        .partition_nodes(vec![vec![1, 2, 3], vec![4, 5]])
+        .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // ============================================================================
+    // STEP 3: Verify majority partition [1,2,3] maintains a leader
+    // ============================================================================
+    eprintln!("\n✓ Verifying majority partition [1,2,3] has a leader...");
+    let mut majority_has_leader = false;
+    let mut majority_leader_id = None;
+
+    for node in cluster.nodes.iter().filter(|n| n.id <= 3) {
+        let metrics = node.raft.inner().raft.metrics().borrow().clone();
+        if metrics.state == openraft::ServerState::Leader {
+            majority_has_leader = true;
+            majority_leader_id = Some(node.id);
+            eprintln!("   Node {} is the leader in majority partition", node.id);
+        }
+    }
+
+    assert!(
+        majority_has_leader,
+        "Majority partition [1,2,3] should have a leader"
+    );
+    eprintln!(
+        "✅ Majority partition has leader: Node {}",
+        majority_leader_id.unwrap()
+    );
+
+    // ============================================================================
+    // STEP 4: Verify minority partition [4,5] has NO leader (lacks quorum)
+    // ============================================================================
+    eprintln!("\n✓ Verifying minority partition [4,5] has NO leader (lacks quorum)...");
+    for node in cluster.nodes.iter().filter(|n| n.id >= 4) {
+        let metrics = node.raft.inner().raft.metrics().borrow().clone();
+        assert_ne!(
+            metrics.state,
+            openraft::ServerState::Leader,
+            "Node {} in minority partition should NOT be leader",
+            node.id
+        );
+        eprintln!(
+            "   Node {} state: {:?} (correctly not a leader)",
+            node.id, metrics.state
+        );
+    }
+    eprintln!("✅ Minority partition has no leader (as expected)");
+
+    // ============================================================================
+    // STEP 5: Submit operation to majority partition - should SUCCEED
+    // ============================================================================
+    eprintln!("\n⏩ Submitting operation to majority partition [1,2,3]...");
+    let majority_leader_node = cluster
+        .nodes
+        .iter()
+        .find(|n| Some(n.id) == majority_leader_id)
+        .expect("Majority leader node should exist");
+
+    let operation_1 = WormFsOperation::TransactionPrepare {
+        tx_id: TxId(1001),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+
+    majority_leader_node
+        .raft
+        .propose_operation(operation_1)
+        .await
+        .expect("Operation on majority partition should succeed");
+    eprintln!("✅ Operation on majority partition succeeded");
+
+    // ============================================================================
+    // STEP 6: Submit operation to minority partition - should FAIL/TIMEOUT
+    // ============================================================================
+    eprintln!("\n⏩ Attempting operation on minority partition [4,5]...");
+    let minority_node = cluster
+        .nodes
+        .iter()
+        .find(|n| n.id == 4)
+        .expect("Node 4 should exist");
+
+    let operation_2 = WormFsOperation::TransactionPrepare {
+        tx_id: TxId(1002),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(5),
+    };
+
+    // This should timeout because minority partition cannot achieve quorum
+    let result = tokio::time::timeout(
+        Duration::from_secs(7),
+        minority_node.raft.propose_operation(operation_2),
+    )
+    .await;
+
+    match result {
+        Err(_timeout) => {
+            eprintln!("✅ Operation on minority partition correctly timed out");
+        }
+        Ok(Err(e)) => {
+            eprintln!(
+                "✅ Operation on minority partition correctly failed: {:?}",
+                e
+            );
+        }
+        Ok(Ok(_)) => {
+            panic!("Operation on minority partition should NOT succeed - lacks quorum!");
+        }
+    }
+
+    // ============================================================================
+    // STEP 7: Heal the network partition
+    // ============================================================================
+    eprintln!("\n🔧 Healing network partition...");
+    cluster.hub.heal_partition().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    eprintln!("✅ Network partition healed");
+
+    // ============================================================================
+    // STEP 8: Verify all 5 nodes converge on the same state
+    // ============================================================================
+    eprintln!("\n📊 Verifying all nodes converge on same state...");
+
+    // Give nodes time to sync after partition heals
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Submit a final operation to force log replication to all nodes
+    let final_leader = cluster
+        .leader()
+        .expect("Should have a leader after healing");
+    let operation_final = WormFsOperation::TransactionPrepare {
+        tx_id: TxId(1003),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+    final_leader
+        .raft
+        .propose_operation(operation_final)
+        .await
+        .expect("Final operation should succeed");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Check that all nodes have similar log state
+    let mut log_indices = Vec::new();
+    for node in &cluster.nodes {
+        let metrics = node.raft.inner().raft.metrics().borrow().clone();
+        let log_index = metrics.last_log_index.unwrap_or(0);
+        log_indices.push((node.id, log_index));
+        eprintln!("   Node {}: log_index={}", node.id, log_index);
+    }
+
+    // Verify all nodes have converged (within reasonable range)
+    let max_log_index = log_indices.iter().map(|(_, idx)| idx).max().unwrap();
+    for (node_id, log_index) in &log_indices {
+        // Allow up to 2 entries difference for replication lag
+        assert!(
+            max_log_index - log_index <= 2,
+            "Node {} log_index={} is too far behind max={}",
+            node_id,
+            log_index,
+            max_log_index
+        );
+    }
+
+    eprintln!("✅ All nodes have converged on consistent state");
+    eprintln!("\n=== test_network_partition_handling PASSED ===");
 }
 
 /// Test: Node restart and recovery
