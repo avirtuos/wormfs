@@ -404,11 +404,12 @@ pub enum MetadataOperation {
     /// Update file metadata
     FileUpdate {
         file_id: FileId,
+        inode: u64,
         metadata: FileMetadata,
         policy: StoragePolicy,
     },
     /// Delete a file
-    FileDelete { file_id: FileId },
+    FileDelete { file_id: FileId, inode: u64 },
     /// Create a stripe for a file
     CreateStripe {
         file_id: FileId,
@@ -420,7 +421,10 @@ pub enum MetadataOperation {
         chunks: Vec<ChunkId>,
     },
     /// Delete a stripe
-    DeleteStripe { stripe_id: StripeId },
+    DeleteStripe {
+        stripe_id: StripeId,
+        file_id: FileId,
+    },
     /// Create a chunk location record
     CreateChunk {
         node_id: NodeId,

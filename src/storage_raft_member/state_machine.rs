@@ -350,6 +350,7 @@ impl WormFsStateMachine {
 
             MetadataOperation::FileUpdate {
                 file_id,
+                inode,
                 metadata,
                 policy: _,
             } => {
@@ -359,15 +360,15 @@ impl WormFsStateMachine {
                     .update_file(*file_id, store_metadata)
                     .await
                     .map_err(|e| format!("Failed to update file: {:?}", e))?;
-                info!("Updated file {:?}", file_id);
+                info!("Updated file {:?} (inode {})", file_id, inode);
             }
 
-            MetadataOperation::FileDelete { file_id } => {
+            MetadataOperation::FileDelete { file_id, inode } => {
                 metadata_store
                     .delete_file(*file_id)
                     .await
                     .map_err(|e| format!("Failed to delete file: {:?}", e))?;
-                info!("Deleted file {:?}", file_id);
+                info!("Deleted file {:?} (inode {})", file_id, inode);
             }
 
             MetadataOperation::CreateStripe {
@@ -400,12 +401,12 @@ impl WormFsStateMachine {
                 info!("Created stripe {:?} for file {:?}", stripe_id, file_id);
             }
 
-            MetadataOperation::DeleteStripe { stripe_id } => {
+            MetadataOperation::DeleteStripe { stripe_id, file_id } => {
                 metadata_store
                     .delete_stripe(*stripe_id)
                     .await
                     .map_err(|e| format!("Failed to delete stripe: {:?}", e))?;
-                info!("Deleted stripe {:?}", stripe_id);
+                info!("Deleted stripe {:?} from file {:?}", stripe_id, file_id);
             }
 
             MetadataOperation::CreateChunk {
@@ -706,17 +707,16 @@ impl WormFsStateMachine {
                 None
             }
             MetadataOperation::FileUpdate {
-                file_id, metadata, ..
+                file_id,
+                inode,
+                metadata,
+                ..
             } => {
-                // Note: inode is set to 0 because FileUpdate operations don't include it.
-                // To populate inode, we would need to query MetadataStore which would
-                // make event emission async. Subscribers can match on file_id instead.
-                //
                 // We report all metadata fields as changed since we don't track deltas.
                 // A more sophisticated implementation could compare before/after state.
                 Some(MetadataChange::FileUpdated {
                     file_id: *file_id,
-                    inode: 0,
+                    inode: *inode,
                     changed_attrs: FileAttributeChanges {
                         size: Some(metadata.size),
                         mtime: Some(metadata.modified),
@@ -727,14 +727,10 @@ impl WormFsStateMachine {
                     },
                 })
             }
-            MetadataOperation::FileDelete { file_id } => {
-                // Note: inode is set to 0 because FileDelete operations don't include it.
-                // Subscribers can match on file_id for cache invalidation.
-                Some(MetadataChange::FileDeleted {
-                    file_id: *file_id,
-                    inode: 0,
-                })
-            }
+            MetadataOperation::FileDelete { file_id, inode } => Some(MetadataChange::FileDeleted {
+                file_id: *file_id,
+                inode: *inode,
+            }),
             MetadataOperation::CreateStripe {
                 file_id,
                 stripe_id,
@@ -747,17 +743,11 @@ impl WormFsStateMachine {
                 offset: *offset,
                 size: *size,
             }),
-            MetadataOperation::DeleteStripe { stripe_id } => {
-                // StripeDeleted events are not emitted because DeleteStripe operations don't
-                // include the file_id (only stripe_id is available).
-                //
-                // To emit StripeDeleted events, we would need to either:
-                // 1. Include file_id in DeleteStripe operations (recommended), or
-                // 2. Make event emission async and query MetadataStore for the file_id
-                //
-                // Subscribers can infer stripe deletion from FileDeleted events or track
-                // stripes at a higher level where file context is available.
-                None
+            MetadataOperation::DeleteStripe { stripe_id, file_id } => {
+                Some(MetadataChange::StripeDeleted {
+                    file_id: *file_id,
+                    stripe_id: *stripe_id,
+                })
             }
             MetadataOperation::MoveChunk {
                 chunk_id,
@@ -1551,6 +1541,7 @@ mod tests {
         // Create a transaction with file update operation
         let file_update_op = MetadataOperation::FileUpdate {
             file_id: FileId::new(Uuid::new_v4()),
+            inode: 12345,
             metadata: FileMetadata {
                 size: 1024,
                 created: SystemTime::now(),
