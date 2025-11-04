@@ -197,6 +197,7 @@ impl super::StorageNetworkFactory {
             peer_id_store,
             heartbeat_sequence: RwLock::new(0),
             raft_handler: RwLock::new(None),
+            raft_heartbeat_data: RwLock::new(RaftHeartbeatData::default()),
         };
 
         // Create cloneable handle (no reference to inner state)
@@ -214,6 +215,20 @@ impl super::StorageNetworkFactory {
 pub(crate) struct TopicState {
     /// Sender for routing messages to subscribers
     pub(crate) tx: mpsc::UnboundedSender<TopicMessage>,
+}
+
+/// Raft state information for heartbeat broadcasting.
+/// This allows the network layer to include Raft cluster information in heartbeats
+/// without creating a direct dependency on the Raft implementation.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RaftHeartbeatData {
+    pub raft_state: Option<String>,
+    pub raft_term: Option<u64>,
+    pub last_log_index: Option<u64>,
+    pub last_log_term: Option<u64>,
+    pub current_leader: Option<u64>,
+    pub is_voter: Option<bool>,
+    pub startup_time: Option<u64>,
 }
 
 /// Internal state shared between event loop and network handle.
@@ -255,6 +270,10 @@ pub struct InnerState {
 
     /// Optional Raft handler for processing incoming Raft RPCs (trait object for flexibility)
     pub(crate) raft_handler: RwLock<Option<Arc<dyn crate::storage_raft_member::RaftRpcHandler>>>,
+
+    /// Raft heartbeat data for inclusion in gossipsub heartbeats
+    /// Updated by the Raft layer, read by the heartbeat broadcaster
+    pub(crate) raft_heartbeat_data: RwLock<RaftHeartbeatData>,
 }
 
 // InnerState is no longer shared via Arc, so no need for unsafe impl Sync.
@@ -762,11 +781,21 @@ impl super::StorageNetworkInner {
             *seq
         };
 
-        // Create heartbeat message
-        let heartbeat = HeartbeatMessage::with_admin_url(
+        // Get current Raft heartbeat data
+        let raft_data = self.state.raft_heartbeat_data.read().await.clone();
+
+        // Create heartbeat message with Raft state
+        let heartbeat = HeartbeatMessage::with_raft_state(
             self.state.node_id.clone(),
             sequence,
             self.state.config.admin_url.clone(),
+            raft_data.raft_state,
+            raft_data.raft_term,
+            raft_data.last_log_index,
+            raft_data.last_log_term,
+            raft_data.current_leader,
+            raft_data.is_voter,
+            raft_data.startup_time,
         );
 
         match heartbeat.to_bytes() {
@@ -1100,6 +1129,27 @@ impl super::StorageNetworkInner {
             NetworkCommand::RegisterRaftHandler { handler } => {
                 *self.state.raft_handler.write().await = Some(handler);
                 info!("Raft handler registered successfully");
+                true
+            }
+            NetworkCommand::UpdateRaftHeartbeatData {
+                raft_state,
+                raft_term,
+                last_log_index,
+                last_log_term,
+                current_leader,
+                is_voter,
+                startup_time,
+            } => {
+                let mut data = self.state.raft_heartbeat_data.write().await;
+                data.raft_state = raft_state;
+                data.raft_term = raft_term;
+                data.last_log_index = last_log_index;
+                data.last_log_term = last_log_term;
+                data.current_leader = current_leader;
+                data.is_voter = is_voter;
+                data.startup_time = startup_time;
+                debug!("Updated Raft heartbeat data: state={:?}, term={:?}, last_log={:?}",
+                    data.raft_state, data.raft_term, data.last_log_index);
                 true
             }
         }
