@@ -21,6 +21,8 @@ pub struct StubNetworkHub {
     peer_to_node: Arc<RwLock<HashMap<Vec<u8>, u64>>>,
     /// Set of nodes that are currently offline (for simulating node failures)
     offline_nodes: Arc<RwLock<HashSet<u64>>>,
+    /// Network partition groups (nodes in different groups cannot communicate)
+    partition_groups: Arc<RwLock<Vec<HashSet<u64>>>>,
 }
 
 impl StubNetworkHub {
@@ -30,6 +32,7 @@ impl StubNetworkHub {
             raft_handlers: Arc::new(RwLock::new(HashMap::new())),
             peer_to_node: Arc::new(RwLock::new(HashMap::new())),
             offline_nodes: Arc::new(RwLock::new(HashSet::new())),
+            partition_groups: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -51,6 +54,63 @@ impl StubNetworkHub {
     pub async fn is_node_offline(&self, node_id: u64) -> bool {
         let offline = self.offline_nodes.read().await;
         offline.contains(&node_id)
+    }
+
+    /// Create network partitions between groups of nodes
+    ///
+    /// Nodes in different groups cannot communicate with each other.
+    /// Nodes within the same group can still communicate freely.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Partition into [1,2,3] and [4,5]
+    /// hub.partition_nodes(vec![vec![1,2,3], vec![4,5]]).await;
+    /// ```
+    pub async fn partition_nodes(&self, groups: Vec<Vec<u64>>) {
+        let mut partition_groups = self.partition_groups.write().await;
+        partition_groups.clear();
+
+        for group in groups {
+            if !group.is_empty() {
+                partition_groups.push(group.into_iter().collect());
+            }
+        }
+
+        info!(
+            "[StubNetwork] Created {} partition groups: {:?}",
+            partition_groups.len(),
+            partition_groups
+        );
+    }
+
+    /// Heal all network partitions
+    ///
+    /// After calling this, all nodes can communicate with each other again.
+    pub async fn heal_partition(&self) {
+        let mut partition_groups = self.partition_groups.write().await;
+        partition_groups.clear();
+        info!("[StubNetwork] Healed all partitions");
+    }
+
+    /// Check if two nodes are in different partition groups (cannot communicate)
+    async fn is_partitioned(&self, from_node: u64, to_node: u64) -> bool {
+        let groups = self.partition_groups.read().await;
+
+        // If no partitions exist, nodes can communicate
+        if groups.is_empty() {
+            return false;
+        }
+
+        // Find which group each node belongs to
+        let from_group = groups.iter().position(|g| g.contains(&from_node));
+        let to_group = groups.iter().position(|g| g.contains(&to_node));
+
+        // If both nodes are in the same group, they can communicate
+        // If they're in different groups (or not in any group), check accordingly
+        match (from_group, to_group) {
+            (Some(a), Some(b)) => a != b, // Partitioned if in different groups
+            _ => false,                   // If node not in any group, allow communication
+        }
     }
 
     /// Unregister a Raft handler for a node (for clean shutdown/restart)
@@ -87,6 +147,7 @@ impl StubNetworkHub {
             hub_handlers: self.raft_handlers.clone(),
             hub_peer_to_node: self.peer_to_node.clone(),
             hub_offline_nodes: self.offline_nodes.clone(),
+            hub_partition_groups: self.partition_groups.clone(),
         }
     }
 }
@@ -103,12 +164,34 @@ pub struct StubStorageNetworkHandle {
     hub_handlers: Arc<RwLock<HashMap<u64, Arc<dyn RaftRpcHandler>>>>,
     hub_peer_to_node: Arc<RwLock<HashMap<Vec<u8>, u64>>>,
     hub_offline_nodes: Arc<RwLock<HashSet<u64>>>,
+    hub_partition_groups: Arc<RwLock<Vec<HashSet<u64>>>>,
 }
 
 impl StubStorageNetworkHandle {
     /// Get this node's PeerId as a string (for use in Raft configuration)
     pub fn peer_id_string(&self) -> String {
         self.peer_id.to_string()
+    }
+
+    /// Check if two nodes are in different partition groups (cannot communicate)
+    async fn is_partitioned_internal(&self, from_node: u64, to_node: u64) -> bool {
+        let groups = self.hub_partition_groups.read().await;
+
+        // If no partitions exist, nodes can communicate
+        if groups.is_empty() {
+            return false;
+        }
+
+        // Find which group each node belongs to
+        let from_group = groups.iter().position(|g| g.contains(&from_node));
+        let to_group = groups.iter().position(|g| g.contains(&to_node));
+
+        // If both nodes are in the same group, they can communicate
+        // If they're in different groups (or not in any group), check accordingly
+        match (from_group, to_group) {
+            (Some(a), Some(b)) => a != b, // Partitioned if in different groups
+            _ => false,                   // If node not in any group, allow communication
+        }
     }
 
     /// Register this node in the hub
@@ -130,7 +213,23 @@ impl StubStorageNetworkHandle {
         use wormfs::storage_network::types::PeerId as WormFsPeerId;
         use wormfs::storage_raft_member::raft_member::{RaftRpcMessage, RaftRpcResponse};
 
-        // Check if target node is offline (simulates network partition)
+        // Check 1: Is there a network partition between sender and target?
+        if self
+            .is_partitioned_internal(self.node_id, target_node_id)
+            .await
+        {
+            debug!(
+                "[StubNetwork] Node {} → Node {}: PARTITIONED (different network segments)",
+                self.node_id, target_node_id
+            );
+            // Simulate a realistic network timeout delay (100ms)
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            return Err(Error::PeerNotConnected(WormFsPeerId::new(
+                target_node_id.to_le_bytes().to_vec(),
+            )));
+        }
+
+        // Check 2: Is target node offline (simulates node failure)
         let offline_nodes = self.hub_offline_nodes.read().await;
         if offline_nodes.contains(&target_node_id) {
             drop(offline_nodes); // Release lock
