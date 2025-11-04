@@ -413,6 +413,7 @@ pub enum MetadataOperation {
     CreateStripe {
         file_id: FileId,
         stripe_id: StripeId,
+        stripe_index: u32,
         policy: StoragePolicy,
         offset: u64,
         size: u64,

@@ -373,6 +373,7 @@ impl WormFsStateMachine {
             MetadataOperation::CreateStripe {
                 file_id,
                 stripe_id,
+                stripe_index,
                 policy: _,
                 offset,
                 size,
@@ -382,17 +383,13 @@ impl WormFsStateMachine {
                 let stripe = crate::metadata_store::StripeRecord {
                     stripe_id: *stripe_id,
                     file_id: *file_id,
-                    // Stripe index should be included in the CreateStripe operation itself
-                    // rather than calculated here. For now, use 0 as a placeholder.
-                    // Fix: Add stripe_index field to MetadataOperation::CreateStripe
-                    stripe_index: 0,
+                    stripe_index: *stripe_index,
                     offset: *offset,
                     size: *size,
-                    // Checksum cannot be calculated at stripe creation time because the
-                    // actual data hasn't been written yet. This should either be:
-                    // 1. Set to 0 and updated later when stripe is finalized, or
-                    // 2. Made optional (Option<u32>) in StripeRecord
-                    // For now, use 0 as a placeholder.
+                    // Checksum is initialized to 0 because data hasn't been written yet.
+                    // The workflow is: CreateStripe -> write chunks -> UpdateStripe with checksum.
+                    // The filesystem_service layer will issue an UpdateStripe command once
+                    // chunks are written and the checksum can be calculated.
                     checksum: 0,
                     created_at: std::time::SystemTime::now(),
                 };
