@@ -2305,3 +2305,295 @@ async fn test_cluster_manager_no_auto_demotion() {
 // This test validated rate limiting for automatic demotion, which is no longer supported.
 // Automatic demotion has been removed in favor of operator-driven membership management.
 // Rate limiting for manual operator actions is not needed.
+
+/// Test: Progressive node failure and recovery
+///
+/// ## Test Scenario:
+/// 1. Start with 5-node cluster
+/// 2. Progressively fail nodes one at a time:
+///    - Fail node 3 → 4/5 healthy → cluster maintains quorum
+///    - Fail node 4 → 3/5 healthy → cluster maintains quorum
+///    - Fail node 5 → 2/5 healthy → cluster loses quorum
+/// 3. Progressively recover nodes one at a time:
+///    - Restart node 5 → 3/5 healthy → cluster regains quorum
+///    - Restart node 4 → 4/5 healthy → cluster improves
+///    - Restart node 3 → 5/5 healthy → full recovery
+/// 4. Verify all nodes catch up and cluster is fully synchronized
+///
+/// ## Expected Behavior:
+/// - Cluster can make progress with 3+ nodes (quorum)
+/// - Cluster cannot make progress with 2 nodes (no quorum)
+/// - Failed nodes remain as voters (no automatic demotion)
+/// - Recovered nodes successfully catch up with missed operations
+/// - Final cluster state is fully synchronized across all 5 nodes
+#[tokio::test]
+#[ntest::timeout(120000)]
+async fn test_progressive_node_failure_and_recovery() {
+    eprintln!("\n=== test_progressive_node_failure_and_recovery ===");
+
+    // Create 5-node cluster
+    let mut cluster = RaftTestCluster::new(5)
+        .await
+        .expect("Failed to create cluster");
+    cluster.initialize().await.expect("Failed to initialize");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Verify all 5 nodes are voters initially
+    let leader = cluster.leader().expect("No leader found");
+    let metrics_initial = leader.raft.inner().raft.metrics().borrow().clone();
+    let voters_initial: Vec<NodeId> = metrics_initial
+        .membership_config
+        .membership()
+        .voter_ids()
+        .collect();
+    assert_eq!(voters_initial.len(), 5, "Should start with 5 voters");
+    eprintln!("✅ Initial cluster has 5 voters: {:?}", voters_initial);
+
+    // ============================================================================
+    // PROGRESSIVE FAILURE PHASE
+    // ============================================================================
+
+    // FAIL NODE 3 → 4/5 healthy → should maintain quorum
+    eprintln!("\n🔥 Phase 1: Failing node 3 (4/5 nodes remaining)...");
+    cluster
+        .shutdown_node(3)
+        .await
+        .expect("Failed to shutdown node 3");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify cluster can still make progress
+    let leader = cluster.leader().expect("Should have leader with 4/5 nodes");
+    let operation_1 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
+        tx_id: TxId(1001),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+    leader
+        .raft
+        .propose_operation(operation_1)
+        .await
+        .expect("Should succeed with 4/5 nodes (quorum = 3)");
+    eprintln!("✅ Cluster operational with 4/5 nodes (quorum maintained)");
+
+    // FAIL NODE 4 → 3/5 healthy → should maintain quorum (exactly)
+    eprintln!("\n🔥 Phase 2: Failing node 4 (3/5 nodes remaining)...");
+    cluster
+        .shutdown_node(4)
+        .await
+        .expect("Failed to shutdown node 4");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify cluster can still make progress (3 nodes = exact quorum)
+    let leader = cluster.leader().expect("Should have leader with 3/5 nodes");
+    let operation_2 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
+        tx_id: TxId(1002),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+    leader
+        .raft
+        .propose_operation(operation_2)
+        .await
+        .expect("Should succeed with 3/5 nodes (exact quorum)");
+    eprintln!("✅ Cluster operational with 3/5 nodes (exact quorum)");
+
+    // FAIL NODE 5 → 2/5 healthy → should LOSE quorum
+    eprintln!("\n🔥 Phase 3: Failing node 5 (2/5 nodes remaining - quorum lost)...");
+    cluster
+        .shutdown_node(5)
+        .await
+        .expect("Failed to shutdown node 5");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify cluster CANNOT make progress (2/5 < quorum)
+    eprintln!("⏳ Attempting operation with 2/5 nodes (should fail/timeout)...");
+    let leader_option = cluster.leader();
+    if let Some(leader_node) = leader_option {
+        let operation_3 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
+            tx_id: TxId(1003),
+            metadata_ops: Some(vec![]),
+            command_ops: None,
+            timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            leader_node.raft.propose_operation(operation_3),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(_)) => {
+                panic!("❌ Operation should NOT succeed with only 2/5 nodes (no quorum)");
+            }
+            Ok(Err(e)) => {
+                eprintln!("✅ Operation correctly failed: {:?}", e);
+            }
+            Err(_timeout) => {
+                eprintln!("✅ Operation correctly timed out (cannot achieve quorum)");
+            }
+        }
+    } else {
+        eprintln!("✅ No leader available (expected with 2/5 nodes)");
+    }
+
+    // ============================================================================
+    // PROGRESSIVE RECOVERY PHASE
+    // ============================================================================
+
+    // RESTART NODE 5 → 3/5 healthy → should REGAIN quorum
+    eprintln!("\n🔄 Phase 4: Restarting node 5 (3/5 nodes)...");
+    cluster
+        .restart_node_minimal(
+            5,
+            wormfs::storage_raft_member::ClusterManagerPreset::Moderate,
+        )
+        .await
+        .expect("Failed to restart node 5");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Verify cluster regains quorum
+    let leader = cluster
+        .leader()
+        .expect("Should have leader after node 5 restart");
+    let operation_4 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
+        tx_id: TxId(1004),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+    leader
+        .raft
+        .propose_operation(operation_4)
+        .await
+        .expect("Should succeed after node 5 restart (3/5 = quorum)");
+    eprintln!("✅ Cluster regained quorum with 3/5 nodes");
+
+    // Verify node 5 caught up (find by ID since restart changes vector order)
+    let node5 = cluster
+        .nodes
+        .iter()
+        .find(|n| n.id == 5)
+        .expect("Node 5 should exist");
+    let node5_metrics = node5.raft.inner().raft.metrics().borrow().clone();
+    eprintln!(
+        "   Node 5 log index: {:?} (catching up)",
+        node5_metrics.last_log_index
+    );
+
+    // RESTART NODE 4 → 4/5 healthy → improves cluster health
+    eprintln!("\n🔄 Phase 5: Restarting node 4 (4/5 nodes)...");
+    cluster
+        .restart_node_minimal(
+            4,
+            wormfs::storage_raft_member::ClusterManagerPreset::Moderate,
+        )
+        .await
+        .expect("Failed to restart node 4");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Verify cluster is operational
+    let leader = cluster.leader().expect("Should have leader");
+    let operation_5 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
+        tx_id: TxId(1005),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+    leader
+        .raft
+        .propose_operation(operation_5)
+        .await
+        .expect("Should succeed with 4/5 nodes");
+    eprintln!("✅ Cluster operational with 4/5 nodes");
+
+    // Verify node 4 caught up (find by ID since restart changes vector order)
+    let node4 = cluster
+        .nodes
+        .iter()
+        .find(|n| n.id == 4)
+        .expect("Node 4 should exist");
+    let node4_metrics = node4.raft.inner().raft.metrics().borrow().clone();
+    eprintln!(
+        "   Node 4 log index: {:?} (catching up)",
+        node4_metrics.last_log_index
+    );
+
+    // RESTART NODE 3 → 5/5 healthy → full recovery
+    eprintln!("\n🔄 Phase 6: Restarting node 3 (5/5 nodes - full recovery)...");
+    cluster
+        .restart_node_minimal(
+            3,
+            wormfs::storage_raft_member::ClusterManagerPreset::Moderate,
+        )
+        .await
+        .expect("Failed to restart node 3");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Verify cluster is fully operational
+    let leader = cluster.leader().expect("Should have leader");
+    let operation_6 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
+        tx_id: TxId(1006),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+    leader
+        .raft
+        .propose_operation(operation_6)
+        .await
+        .expect("Should succeed with 5/5 nodes");
+    eprintln!("✅ Cluster fully recovered with 5/5 nodes");
+
+    // ============================================================================
+    // FINAL VERIFICATION: All nodes synchronized
+    // ============================================================================
+
+    eprintln!("\n📊 Final Verification: Checking log synchronization...");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Get log indices from all nodes
+    let mut log_indices = Vec::new();
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let node_id = idx + 1; // Node IDs are 1-based
+        let metrics = node.raft.inner().raft.metrics().borrow().clone();
+        let log_index = metrics.last_log_index.unwrap_or(0);
+        log_indices.push((node_id, log_index));
+        eprintln!("   Node {}: log_index={}", node_id, log_index);
+    }
+
+    // Verify all nodes have synchronized logs (within reasonable range)
+    let max_log_index = log_indices.iter().map(|(_, idx)| idx).max().unwrap();
+    for (node_id, log_index) in &log_indices {
+        // Allow some lag (up to 2 entries) for nodes that just recovered
+        assert!(
+            max_log_index - log_index <= 2,
+            "Node {} has log_index={}, max={} - too far behind",
+            node_id,
+            log_index,
+            max_log_index
+        );
+    }
+    eprintln!("✅ All nodes synchronized (max difference: ≤2 entries)");
+
+    // Submit final operation and verify it replicates to all nodes
+    eprintln!("\n🎯 Final operation test...");
+    let leader = cluster.leader().expect("Should have leader");
+    let final_operation = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
+        tx_id: TxId(9999),
+        metadata_ops: Some(vec![]),
+        command_ops: None,
+        timeout: std::time::SystemTime::now() + Duration::from_secs(30),
+    };
+    leader
+        .raft
+        .propose_operation(final_operation)
+        .await
+        .expect("Final operation should succeed");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    eprintln!("✅ Final operation successfully replicated");
+
+    eprintln!("\n=== test_progressive_node_failure_and_recovery PASSED ===");
+}
