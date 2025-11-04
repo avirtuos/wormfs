@@ -17,6 +17,7 @@ use crate::file_store::{FileStore, FileStoreImpl};
 use crate::filesystem_service::implementation::FileSystemServiceImpl;
 use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
 use crate::storage_network::{StorageNetworkFactory, StorageNetworkHandle};
+use crate::storage_raft_member::{RaftRpcHandler, StorageRaftMember, StorageRaftMemberImpl};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -41,6 +42,9 @@ pub struct StorageNodeImpl {
 
     /// StorageNetwork for peer-to-peer communication (Phase 2+)
     storage_network: Option<StorageNetworkHandle>,
+
+    /// StorageRaftMember for distributed consensus (Phase 2+)
+    storage_raft_member: Option<Arc<StorageRaftMemberImpl>>,
 
     /// Network event loop thread handle (Phase 2+)
     /// The event loop runs in a dedicated thread with LocalSet due to !Send constraints
@@ -195,12 +199,65 @@ impl StorageNodeImpl {
 
         info!("StorageNetwork event loop thread started successfully");
 
+        // Step 5: Initialize StorageRaftMember (Phase 2+) - only if configured
+        // Raft requires numeric node IDs, so only initialize if all conditions are met:
+        // 1. Paths are configured
+        // 2. node_id can be parsed as u64
+        let storage_raft_member = if !config.transaction_log_path.as_os_str().is_empty()
+            && !config.snapshot_dir.as_os_str().is_empty()
+            && config.node_id.parse::<u64>().is_ok()
+        {
+            info!("Initializing StorageRaftMember...");
+
+            let mut raft_config = crate::storage_raft_member::Config::default();
+            raft_config.transaction_log_path = config.transaction_log_path.clone();
+            raft_config.metadata_db_path = config.metadata_db_path.clone();
+            raft_config.snapshot_directory = config.snapshot_dir.clone();
+            raft_config.network_address = config.listen_address;
+            raft_config.enable_cluster_manager = true;
+
+            // Parse node_id as u64 for Raft NodeId (safe because we checked is_ok() above)
+            let node_id_num = config
+                .node_id
+                .parse::<u64>()
+                .expect("node_id should parse as u64 - validated above");
+
+            let raft_member = StorageRaftMemberImpl::new(
+                crate::storage_raft_member::types::NodeId(node_id_num),
+                raft_config,
+            )
+            .await
+            .map_err(|e| Error::ComponentInitFailed {
+                component: "StorageRaftMember".to_string(),
+                reason: e.to_string(),
+            })?;
+
+            let raft_member = Arc::new(raft_member);
+
+            // Wire up Raft RPC handler with network
+            network_handle
+                .register_raft_handler(raft_member.clone() as Arc<dyn RaftRpcHandler>)
+                .await
+                .map_err(|e| Error::ComponentInitFailed {
+                    component: "StorageRaftMember".to_string(),
+                    reason: format!("Failed to register Raft handler: {}", e),
+                })?;
+
+            info!("StorageRaftMember initialized and wired to network successfully");
+
+            Some(raft_member)
+        } else {
+            info!("StorageRaftMember initialization skipped (not configured)");
+            None
+        };
+
         Ok(Self {
             config,
             metadata_store,
             file_store,
             filesystem_service: Some(filesystem_service),
             storage_network: Some(network_handle),
+            storage_raft_member,
             network_thread: Some(network_thread),
             started: false,
         })
@@ -214,6 +271,11 @@ impl StorageNodeImpl {
     /// Get reference to StorageNetwork (for network operations)
     pub fn storage_network(&self) -> Option<&StorageNetworkHandle> {
         self.storage_network.as_ref()
+    }
+
+    /// Get reference to StorageRaftMember (for consensus operations)
+    pub fn storage_raft_member(&self) -> Option<&Arc<StorageRaftMemberImpl>> {
+        self.storage_raft_member.as_ref()
     }
 
     /// Get list of currently connected peers.
@@ -390,7 +452,7 @@ impl StorageNode for StorageNodeImpl {
                 metadata_store: true,
                 file_store: true,
                 filesystem_service: self.filesystem_service.is_some(),
-                raft_member: false, // Phase 2+
+                raft_member: self.storage_raft_member.is_some(),
                 network: self.storage_network.is_some(),
                 endpoint: false, // Phase 3+
                 watchdog: false, // Phase 4+
