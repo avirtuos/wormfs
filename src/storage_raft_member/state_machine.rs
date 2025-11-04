@@ -251,18 +251,40 @@ impl WormFsStateMachine {
 
                     // Apply all operations to MetadataStore
                     // Note: MetadataStore methods are already transactional via SQLite
+                    // We track which operations succeed to only emit events for those.
+                    let mut successful_operations = Vec::new();
+                    let mut failed_operations = Vec::new();
+
                     for operation in &operations {
-                        if let Err(e) =
-                            Self::apply_metadata_operation(&inner.metadata_store, operation).await
+                        match Self::apply_metadata_operation(&inner.metadata_store, operation).await
                         {
-                            error!("Failed to apply operation {:?}: {}", operation, e);
-                            // Continue with other operations even if one fails
-                            // In production, we might want to mark the transaction as partially failed
+                            Ok(()) => {
+                                successful_operations.push(operation.clone());
+                            }
+                            Err(e) => {
+                                error!("Failed to apply operation {:?}: {}", operation, e);
+                                failed_operations.push((operation.clone(), e));
+                            }
                         }
                     }
 
-                    // Convert operations to metadata change events
-                    let changes: Vec<super::types::MetadataChange> = operations
+                    // If any operations failed, this is a critical error that could cause
+                    // state divergence across Raft replicas. We panic to fail-stop rather
+                    // than continue with inconsistent state.
+                    if !failed_operations.is_empty() {
+                        panic!(
+                            "CRITICAL: Transaction {:?} commit failed! {} operations succeeded, {} failed. \
+                             Failed operations: {:?}. This indicates a serious bug or state corruption. \
+                             Node must restart to resync from cluster.",
+                            tx_id,
+                            successful_operations.len(),
+                            failed_operations.len(),
+                            failed_operations
+                        );
+                    }
+
+                    // Convert ONLY successful operations to metadata change events
+                    let changes: Vec<super::types::MetadataChange> = successful_operations
                         .iter()
                         .filter_map(|op| Self::operation_to_change(op))
                         .collect();
@@ -1522,6 +1544,7 @@ mod tests {
     async fn test_metadata_subscriptions() {
         use crate::file_store::types::FileId;
         use crate::storage_raft_member::types::{FileMetadata, MetadataChange, StoragePolicy};
+        use std::path::PathBuf;
         use uuid::Uuid;
 
         let (state_machine, _temp_dir) = create_test_state_machine().await;
@@ -1536,14 +1559,13 @@ mod tests {
             .subscribe_metadata_changes(Some(vec![MetadataChangeType::FileUpdated]), Some(10))
             .await;
 
-        let tx_id = TxId(400);
-
-        // Create a transaction with file update operation
-        let file_update_op = MetadataOperation::FileUpdate {
-            file_id: FileId::new(Uuid::new_v4()),
+        // First create a file so subsequent operations can reference it
+        let create_tx_id = TxId(399);
+        let file_create_op = MetadataOperation::FileCreate {
+            path: PathBuf::from("/test/file.txt"),
             inode: 12345,
             metadata: FileMetadata {
-                size: 1024,
+                size: 0,
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
                 mode: 0o644,
@@ -1555,44 +1577,87 @@ mod tests {
             },
         };
 
-        let prepare_op = WormFsOperation::TransactionPrepare {
-            tx_id,
-            metadata_ops: Some(vec![file_update_op]),
+        let create_prepare_op = WormFsOperation::TransactionPrepare {
+            tx_id: create_tx_id,
+            metadata_ops: Some(vec![file_create_op]),
             command_ops: None,
             timeout: SystemTime::now(),
         };
 
-        // Prepare the transaction
-        state_machine.apply_operation(1, &prepare_op).await.unwrap();
+        state_machine
+            .apply_operation(1, &create_prepare_op)
+            .await
+            .unwrap();
+        let create_commit_op = WormFsOperation::TransactionCommit {
+            tx_id: create_tx_id,
+        };
+        state_machine
+            .apply_operation(2, &create_commit_op)
+            .await
+            .unwrap();
 
-        // Commit the transaction (this should emit the event)
+        // Now query the created file to get its file_id
+        let created_file = {
+            let inner = state_machine.inner.read().await;
+            inner
+                .metadata_store
+                .get_file_by_inode(12345)
+                .await
+                .expect("Failed to get created file")
+        };
+
+        // Create a transaction with stripe creation operation
+        use crate::file_store::types::StripeId;
+
+        let tx_id = TxId(400);
+        let stripe_create_op = MetadataOperation::CreateStripe {
+            file_id: created_file.file_id,
+            stripe_id: StripeId::new(Uuid::new_v4()),
+            stripe_index: 0,
+            policy: StoragePolicy {
+                data_chunks: 2,
+                parity_chunks: 1,
+                replication_factor: 1,
+            },
+            offset: 0,
+            size: 1024,
+            chunks: vec![],
+        };
+
+        let prepare_op = WormFsOperation::TransactionPrepare {
+            tx_id,
+            metadata_ops: Some(vec![stripe_create_op]),
+            command_ops: None,
+            timeout: SystemTime::now(),
+        };
+
+        // Prepare and commit the stripe creation
+        state_machine.apply_operation(3, &prepare_op).await.unwrap();
         let commit_op = WormFsOperation::TransactionCommit { tx_id };
-        state_machine.apply_operation(2, &commit_op).await.unwrap();
+        state_machine.apply_operation(4, &commit_op).await.unwrap();
 
-        // Check that the unfiltered subscriber received the event
+        // Check that the unfiltered subscriber received the StripeCreated event
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
             .await
             .expect("Timeout waiting for event")
             .expect("Channel closed");
 
-        assert_eq!(event.log_index, 2);
+        assert_eq!(event.log_index, 4);
         assert_eq!(event.changes.len(), 1);
         assert!(matches!(
             event.changes[0],
-            MetadataChange::FileUpdated { .. }
+            MetadataChange::StripeCreated { .. }
         ));
 
-        // Check that the filtered subscriber also received it
-        let filtered_event =
-            tokio::time::timeout(std::time::Duration::from_secs(1), filtered_receiver.recv())
-                .await
-                .expect("Timeout waiting for filtered event")
-                .expect("Filtered channel closed");
-
-        assert_eq!(filtered_event.log_index, 2);
-        assert!(matches!(
-            filtered_event.changes[0],
-            MetadataChange::FileUpdated { .. }
-        ));
+        // The filtered subscriber should NOT receive it (it's filtered for FileUpdated only)
+        let filtered_result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            filtered_receiver.recv(),
+        )
+        .await;
+        assert!(
+            filtered_result.is_err(),
+            "Filtered subscriber should not receive StripeCreated"
+        );
     }
 }
