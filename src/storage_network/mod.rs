@@ -419,6 +419,45 @@ impl StorageNetworkHandle {
 
         Ok(())
     }
+
+    /// Update Raft heartbeat data for inclusion in gossipsub heartbeats.
+    ///
+    /// This allows the Raft layer to provide its current state to the network layer,
+    /// which will include it in periodic heartbeat broadcasts for cluster discovery.
+    ///
+    /// # Arguments
+    ///
+    /// * `raft_state` - Current Raft state ("Leader", "Follower", "Candidate", "Learner", "Shutdown")
+    /// * `raft_term` - Current Raft term
+    /// * `last_log_index` - Index of the last log entry
+    /// * `last_log_term` - Term of the last log entry
+    /// * `current_leader` - NodeId of the known current leader
+    /// * `is_voter` - Whether this node is a voter (true) or learner (false)
+    /// * `startup_time` - When this node started up (milliseconds since Unix epoch)
+    pub async fn update_raft_heartbeat_data(
+        &self,
+        raft_state: Option<String>,
+        raft_term: Option<u64>,
+        last_log_index: Option<u64>,
+        last_log_term: Option<u64>,
+        current_leader: Option<u64>,
+        is_voter: Option<bool>,
+        startup_time: Option<u64>,
+    ) -> Result<(), Error> {
+        self.event_tx
+            .send(NetworkCommand::UpdateRaftHeartbeatData {
+                raft_state,
+                raft_term,
+                last_log_index,
+                last_log_term,
+                current_leader,
+                is_voter,
+                startup_time,
+            })
+            .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+
+        Ok(())
+    }
 }
 
 /// Implementation of the StorageNetwork trait for StorageNetworkHandle.

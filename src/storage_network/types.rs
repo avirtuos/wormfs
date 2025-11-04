@@ -291,6 +291,24 @@ pub enum NetworkCommand {
         /// The Raft handler to register (trait object for flexibility)
         handler: std::sync::Arc<dyn crate::storage_raft_member::RaftRpcHandler>,
     },
+
+    /// Update Raft heartbeat data for inclusion in gossipsub heartbeats
+    UpdateRaftHeartbeatData {
+        /// Raft state: "Leader", "Follower", "Candidate", "Learner", "Shutdown"
+        raft_state: Option<String>,
+        /// Current Raft term
+        raft_term: Option<u64>,
+        /// Last log index
+        last_log_index: Option<u64>,
+        /// Last log term
+        last_log_term: Option<u64>,
+        /// Current leader node ID
+        current_leader: Option<u64>,
+        /// Whether this node is a voter
+        is_voter: Option<bool>,
+        /// Node startup time (milliseconds since Unix epoch)
+        startup_time: Option<u64>,
+    },
 }
 
 impl std::fmt::Debug for NetworkCommand {
@@ -353,6 +371,17 @@ impl std::fmt::Debug for NetworkCommand {
             Self::RegisterRaftHandler { .. } => f
                 .debug_struct("RegisterRaftHandler")
                 .field("handler", &"<raft_handler>")
+                .finish(),
+            Self::UpdateRaftHeartbeatData {
+                raft_state,
+                raft_term,
+                last_log_index,
+                ..
+            } => f
+                .debug_struct("UpdateRaftHeartbeatData")
+                .field("raft_state", raft_state)
+                .field("raft_term", raft_term)
+                .field("last_log_index", last_log_index)
                 .finish(),
         }
     }
@@ -527,6 +556,37 @@ pub struct HeartbeatMessage {
     /// Admin UI URL of the sender (optional)
     #[serde(default)]
     pub admin_url: Option<String>,
+
+    // ==== Raft-Specific Fields for Cluster Discovery ====
+
+    /// Current Raft state: "Leader", "Follower", "Candidate", "Learner", "Shutdown"
+    #[serde(default)]
+    pub raft_state: Option<String>,
+
+    /// Current Raft term number
+    #[serde(default)]
+    pub raft_term: Option<u64>,
+
+    /// Index of the last log entry
+    #[serde(default)]
+    pub last_log_index: Option<u64>,
+
+    /// Term of the last log entry
+    #[serde(default)]
+    pub last_log_term: Option<u64>,
+
+    /// Node ID of the known current leader
+    #[serde(default)]
+    pub current_leader: Option<u64>,
+
+    /// Whether this node is a voter (true) or learner (false)
+    #[serde(default)]
+    pub is_voter: Option<bool>,
+
+    /// When this node started up (milliseconds since Unix epoch)
+    /// Used to detect node restarts
+    #[serde(default)]
+    pub startup_time: Option<u64>,
 }
 
 impl HeartbeatMessage {
@@ -542,6 +602,13 @@ impl HeartbeatMessage {
             timestamp_ms,
             sequence,
             admin_url: None,
+            raft_state: None,
+            raft_term: None,
+            last_log_index: None,
+            last_log_term: None,
+            current_leader: None,
+            is_voter: None,
+            startup_time: None,
         }
     }
 
@@ -557,6 +624,47 @@ impl HeartbeatMessage {
             timestamp_ms,
             sequence,
             admin_url,
+            raft_state: None,
+            raft_term: None,
+            last_log_index: None,
+            last_log_term: None,
+            current_leader: None,
+            is_voter: None,
+            startup_time: None,
+        }
+    }
+
+    /// Create a heartbeat message with full Raft state information.
+    /// This is the primary constructor used by Raft-aware nodes for cluster discovery.
+    pub fn with_raft_state(
+        node_id: String,
+        sequence: u64,
+        admin_url: Option<String>,
+        raft_state: Option<String>,
+        raft_term: Option<u64>,
+        last_log_index: Option<u64>,
+        last_log_term: Option<u64>,
+        current_leader: Option<u64>,
+        is_voter: Option<bool>,
+        startup_time: Option<u64>,
+    ) -> Self {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        Self {
+            node_id,
+            timestamp_ms,
+            sequence,
+            admin_url,
+            raft_state,
+            raft_term,
+            last_log_index,
+            last_log_term,
+            current_leader,
+            is_voter,
+            startup_time,
         }
     }
 
