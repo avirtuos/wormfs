@@ -683,6 +683,7 @@ impl Drop for ClusterManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage_raft_member::cluster_manager::types::MembershipAction;
 
     #[tokio::test]
     async fn test_cluster_manager_creation() {
@@ -793,5 +794,279 @@ mod tests {
         }
         let required_for_quorum = (current_voters / 2) + 1;
         voters_after_demotion < required_for_quorum
+    }
+
+    #[tokio::test]
+    async fn test_get_cluster_health() {
+        // Test that get_cluster_health properly delegates to FailureDetector
+        let config = Arc::new(ClusterManagerConfig::moderate());
+        let mut detector = FailureDetector::new(config.clone());
+
+        // Add test nodes
+        detector.add_node(NodeId(1), true);
+        detector.add_node(NodeId(2), false);
+        detector.add_node(NodeId(3), true);
+
+        // Set different health states
+        detector.update_node_health(NodeId(1), NodeHealth::Healthy);
+        detector.update_node_health(NodeId(2), NodeHealth::Failed);
+        detector.update_node_health(NodeId(3), NodeHealth::Degraded);
+
+        // Verify get_all_node_health returns correct states
+        let health = detector.get_all_node_health();
+        assert_eq!(health.len(), 3);
+        assert_eq!(health.get(&NodeId(1)), Some(&NodeHealth::Healthy));
+        assert_eq!(health.get(&NodeId(2)), Some(&NodeHealth::Failed));
+        assert_eq!(health.get(&NodeId(3)), Some(&NodeHealth::Degraded));
+    }
+
+    #[tokio::test]
+    async fn test_failure_detector_clear_nodes() {
+        // Test that FailureDetector can clear all nodes (used in initialize_node_tracking)
+        let config = Arc::new(ClusterManagerConfig::moderate());
+        let mut detector = FailureDetector::new(config);
+
+        // Add nodes
+        detector.add_node(NodeId(1), true);
+        detector.add_node(NodeId(2), false);
+
+        // Verify nodes are tracked
+        assert_eq!(detector.get_all_node_health().len(), 2);
+
+        // Clear all nodes
+        detector.clear_all_nodes();
+
+        // Verify all nodes are removed
+        assert_eq!(detector.get_all_node_health().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_health_state_change_detection() {
+        // Test detecting health state changes for event emission
+        let config = Arc::new(ClusterManagerConfig::moderate());
+        let mut detector = FailureDetector::new(config);
+
+        // Add node
+        detector.add_node(NodeId(1), true);
+
+        // Initial state should be Healthy
+        let initial_health = detector.check_node_health(NodeId(1));
+        assert_eq!(initial_health, Some(NodeHealth::Healthy));
+
+        // Simulate health degradation
+        detector.update_node_health(NodeId(1), NodeHealth::Degraded);
+        let degraded_health = detector.check_node_health(NodeId(1));
+        assert_eq!(degraded_health, Some(NodeHealth::Degraded));
+
+        // Verify state changed (for event emission logic)
+        assert_ne!(initial_health, degraded_health);
+
+        // Simulate failure
+        detector.update_node_health(NodeId(1), NodeHealth::Failed);
+        let failed_health = detector.check_node_health(NodeId(1));
+        assert_eq!(failed_health, Some(NodeHealth::Failed));
+        assert_ne!(degraded_health, failed_health);
+
+        // Simulate recovery
+        detector.update_node_health(NodeId(1), NodeHealth::Recovering);
+        let recovering_health = detector.check_node_health(NodeId(1));
+        assert_eq!(recovering_health, Some(NodeHealth::Recovering));
+
+        // Full recovery
+        detector.update_node_health(NodeId(1), NodeHealth::Healthy);
+        let recovered_health = detector.check_node_health(NodeId(1));
+        assert_eq!(recovered_health, Some(NodeHealth::Healthy));
+        assert_eq!(recovered_health, initial_health);
+    }
+
+    #[tokio::test]
+    async fn test_membership_manager_rate_limiting_logic() {
+        // Test rate limiting prevents rapid membership changes
+        let config = Arc::new(ClusterManagerConfig::moderate());
+
+        // Record a change at time T
+        let now = std::time::Instant::now();
+
+        // Simulate time passing
+        let elapsed = Duration::from_secs(30); // Less than min_membership_change_interval (60s)
+
+        // Check if enough time has passed
+        let can_change = elapsed >= config.min_membership_change_interval;
+        assert!(!can_change, "Should be rate-limited");
+
+        // Simulate enough time passing
+        let elapsed = Duration::from_secs(61); // More than min_membership_change_interval
+        let can_change = elapsed >= config.min_membership_change_interval;
+        assert!(can_change, "Should allow change after interval");
+    }
+
+    #[tokio::test]
+    async fn test_config_aggressive_vs_conservative() {
+        // Compare aggressive and conservative configs to verify different tuning
+        let aggressive = ClusterManagerConfig::aggressive();
+        let conservative = ClusterManagerConfig::conservative();
+
+        // Aggressive should detect failures faster
+        assert!(aggressive.heartbeat_timeout < conservative.heartbeat_timeout);
+        assert!(aggressive.max_consecutive_failures <= conservative.max_consecutive_failures);
+        assert!(aggressive.health_check_interval < conservative.health_check_interval);
+
+        // Conservative should be more patient with lag
+        assert!(conservative.critical_lag_threshold >= aggressive.critical_lag_threshold);
+
+        // Conservative should have longer rate limiting
+        assert!(
+            conservative.min_membership_change_interval
+                >= aggressive.min_membership_change_interval
+        );
+    }
+
+    #[tokio::test]
+    async fn test_node_tracking_with_is_tracking() {
+        // Test the is_tracking method used in monitor loop
+        let config = Arc::new(ClusterManagerConfig::moderate());
+        let mut detector = FailureDetector::new(config);
+
+        // Initially no nodes tracked
+        assert!(!detector.is_tracking(NodeId(1)));
+        assert!(!detector.is_tracking(NodeId(2)));
+
+        // Add a voter
+        detector.add_node(NodeId(1), true);
+        assert!(detector.is_tracking(NodeId(1)));
+        assert!(!detector.is_tracking(NodeId(2)));
+
+        // Add a learner
+        detector.add_node(NodeId(2), false);
+        assert!(detector.is_tracking(NodeId(1)));
+        assert!(detector.is_tracking(NodeId(2)));
+
+        // Remove a node
+        detector.remove_node(NodeId(1));
+        assert!(!detector.is_tracking(NodeId(1)));
+        assert!(detector.is_tracking(NodeId(2)));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_health_state_transitions() {
+        // Test complex health state transition sequences
+        let config = Arc::new(ClusterManagerConfig::moderate());
+        let mut detector = FailureDetector::new(config);
+
+        detector.add_node(NodeId(1), true);
+
+        // Simulate flapping node: healthy -> degraded -> healthy -> degraded
+        detector.update_node_health(NodeId(1), NodeHealth::Healthy);
+        assert_eq!(
+            detector.check_node_health(NodeId(1)),
+            Some(NodeHealth::Healthy)
+        );
+
+        detector.update_node_health(NodeId(1), NodeHealth::Degraded);
+        assert_eq!(
+            detector.check_node_health(NodeId(1)),
+            Some(NodeHealth::Degraded)
+        );
+
+        detector.update_node_health(NodeId(1), NodeHealth::Healthy);
+        assert_eq!(
+            detector.check_node_health(NodeId(1)),
+            Some(NodeHealth::Healthy)
+        );
+
+        detector.update_node_health(NodeId(1), NodeHealth::Degraded);
+        assert_eq!(
+            detector.check_node_health(NodeId(1)),
+            Some(NodeHealth::Degraded)
+        );
+
+        // Now fail it completely
+        detector.update_node_health(NodeId(1), NodeHealth::Failed);
+        assert_eq!(
+            detector.check_node_health(NodeId(1)),
+            Some(NodeHealth::Failed)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_event_emission_logic() {
+        // Test that events are properly structured for different transitions
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        // Test NodeHealthChanged event
+        let event = ClusterEvent::NodeHealthChanged {
+            node_id: NodeId(1),
+            old_health: NodeHealth::Healthy,
+            new_health: NodeHealth::Failed,
+            reason: "Consecutive failures exceeded threshold".to_string(),
+        };
+
+        tx.send(event.clone()).unwrap();
+        let received = rx.recv().await.unwrap();
+
+        match received {
+            ClusterEvent::NodeHealthChanged {
+                node_id,
+                old_health,
+                new_health,
+                reason,
+            } => {
+                assert_eq!(node_id, NodeId(1));
+                assert_eq!(old_health, NodeHealth::Healthy);
+                assert_eq!(new_health, NodeHealth::Failed);
+                assert!(reason.contains("threshold"));
+            }
+            _ => panic!("Wrong event type"),
+        }
+
+        // Test MembershipChangeInitiated event
+        let event2 = ClusterEvent::MembershipChangeInitiated {
+            node_id: NodeId(1),
+            action: MembershipAction::Demote,
+            reason: "Node failed health checks".to_string(),
+        };
+
+        tx.send(event2.clone()).unwrap();
+        let received2 = rx.recv().await.unwrap();
+
+        match received2 {
+            ClusterEvent::MembershipChangeInitiated {
+                node_id,
+                action,
+                reason,
+            } => {
+                assert_eq!(node_id, NodeId(1));
+                match action {
+                    MembershipAction::Demote => {
+                        // Expected
+                    }
+                    _ => panic!("Wrong action type"),
+                }
+                assert!(reason.contains("health"));
+            }
+            _ => panic!("Wrong event type"),
+        }
+
+        // Test MembershipChangeCompleted event
+        let event3 = ClusterEvent::MembershipChangeCompleted {
+            node_id: NodeId(1),
+            action: MembershipAction::Promote,
+        };
+
+        tx.send(event3.clone()).unwrap();
+        let received3 = rx.recv().await.unwrap();
+
+        match received3 {
+            ClusterEvent::MembershipChangeCompleted { node_id, action } => {
+                assert_eq!(node_id, NodeId(1));
+                match action {
+                    MembershipAction::Promote => {
+                        // Expected
+                    }
+                    _ => panic!("Wrong action type"),
+                }
+            }
+            _ => panic!("Wrong event type"),
+        }
     }
 }

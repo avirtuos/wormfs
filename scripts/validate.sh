@@ -18,17 +18,41 @@ FAILED=0
 STEP_NAMES=()
 STEP_RESULTS=()
 STEP_DURATIONS=()
+STEP_LOG_FILES=()
 TOTAL_START_TIME=$(date +%s)
+
+# Track failing tests
+FAILING_TESTS=()
 
 echo "=========================================="
 echo "WormFS Cargo Quality Validation"
 echo "=========================================="
 echo ""
 
+# Function to extract failing test names from a log file
+extract_failing_tests() {
+    local log_file="$1"
+    local step_name="$2"
+
+    if [ ! -f "$log_file" ]; then
+        return
+    fi
+
+    # Extract lines like "test module::test_name ... FAILED"
+    local failures=$(grep -E "^test .* \.\.\. FAILED$" "$log_file" | sed 's/test \(.*\) \.\.\. FAILED/\1/')
+
+    if [ -n "$failures" ]; then
+        while IFS= read -r test_name; do
+            FAILING_TESTS+=("[$step_name] $test_name")
+        done <<< "$failures"
+    fi
+}
+
 # Function to run a command and check for failure
 run_check() {
     local name="$1"
     local cmd="$2"
+    local log_file="$3"  # Optional log file parameter
     local start_time=$(date +%s)
 
     echo -e "${BLUE}Running: $name${NC}"
@@ -41,6 +65,7 @@ run_check() {
         STEP_NAMES+=("$name")
         STEP_RESULTS+=("PASS")
         STEP_DURATIONS+=("$duration")
+        STEP_LOG_FILES+=("$log_file")
         echo -e "${GREEN}✓ $name passed (${duration}s)${NC}"
         echo ""
         return 0
@@ -50,9 +75,16 @@ run_check() {
         STEP_NAMES+=("$name")
         STEP_RESULTS+=("FAIL")
         STEP_DURATIONS+=("$duration")
+        STEP_LOG_FILES+=("$log_file")
         echo -e "${RED}✗ $name failed (${duration}s)${NC}"
         echo ""
         FAILED=1
+
+        # Extract failing test names if this is a test step
+        if [ -n "$log_file" ] && [[ "$name" == *"Test"* ]]; then
+            extract_failing_tests "$log_file" "$name"
+        fi
+
         return 1
     fi
 }
@@ -63,31 +95,31 @@ sleep 2
 
 # 1. Cargo Build - Check for errors and warnings
 echo -e "${YELLOW}Step 1/7: Building project...${NC}"
-run_check "Cargo Build" "cargo build 2>&1 | tee /tmp/wormfs_build.log && ! grep 'error:' /tmp/wormfs_build.log"
+run_check "Cargo Build" "cargo build 2>&1 | tee /tmp/wormfs_build.log && ! grep 'error:' /tmp/wormfs_build.log" "/tmp/wormfs_build.log"
 
 # 2. Cargo Test - Run all tests (check for compilation errors first, then run tests)
 echo -e "${YELLOW}Step 2/7: Running tests...${NC}"
-run_check "Cargo Test" "cargo test 2>&1 | tee /tmp/wormfs_test.log && ! grep -E '^error:|^error\[E[0-9]+\]|could not compile' /tmp/wormfs_test.log"
+run_check "Cargo Test" "cargo test 2>&1 | tee /tmp/wormfs_test.log && ! grep -E '^error:|^error\[E[0-9]+\]|could not compile' /tmp/wormfs_test.log" "/tmp/wormfs_test.log"
 
 # 3. Cargo Test (Integration Tests) - Run integration tests with test-utils feature
 echo -e "${YELLOW}Step 3/7: Running integration tests...${NC}"
-run_check "Cargo Integration Tests" "cargo test --tests --features test-utils 2>&1 | tee /tmp/wormfs_integration_test.log && ! grep -E '^error:|^error\[E[0-9]+\]|could not compile' /tmp/wormfs_integration_test.log"
+run_check "Cargo Integration Tests" "cargo test --tests --features test-utils 2>&1 | tee /tmp/wormfs_integration_test.log && ! grep -E '^error:|^error\[E[0-9]+\]|could not compile' /tmp/wormfs_integration_test.log" "/tmp/wormfs_integration_test.log"
 
 # 4. FUSE Integration Tests - Run ignored integration tests that mount filesystems
 echo -e "${YELLOW}Step 4/7: Running FUSE integration tests (ignored)...${NC}"
-run_check "FUSE Integration Tests" "./scripts/run_fuse_integration_tests.sh"
+run_check "FUSE Integration Tests" "./scripts/run_fuse_integration_tests.sh" ""
 
 # 5. Cargo Check (test-utils feature) - Verify test utilities compile
 echo -e "${YELLOW}Step 5/7: Checking test-utils feature...${NC}"
-run_check "Cargo Check test-utils" "cargo check --features test-utils"
+run_check "Cargo Check test-utils" "cargo check --features test-utils" ""
 
 # 6. Cargo Fmt Check - Verify code formatting
 echo -e "${YELLOW}Step 6/7: Checking code format...${NC}"
-run_check "Cargo Format Check" "cargo fmt --all -- --check"
+run_check "Cargo Format Check" "cargo fmt --all -- --check" ""
 
 # 7. Cargo Clippy - Lint with warnings as errors
 echo -e "${YELLOW}Step 7/7: Running clippy linter...${NC}"
-run_check "Cargo Clippy" "cargo clippy --all-targets --all-features -- -D warnings"
+run_check "Cargo Clippy" "cargo clippy --all-targets --all-features -- -D warnings" ""
 
 # Print summary table function
 print_summary_table() {
@@ -123,6 +155,17 @@ print_summary_table() {
 
 # Print summary table
 print_summary_table
+
+# Print failing tests if any
+if [ ${#FAILING_TESTS[@]} -gt 0 ]; then
+    echo "=========================================="
+    echo "Failing Tests"
+    echo "=========================================="
+    for test in "${FAILING_TESTS[@]}"; do
+        echo -e "${RED}✗${NC} $test"
+    done
+    echo ""
+fi
 
 # Final result
 if [ $FAILED -eq 0 ]; then
