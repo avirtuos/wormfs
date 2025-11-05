@@ -391,17 +391,31 @@ pub struct TxId(pub u64);
 /// Operations that can be proposed through Raft consensus.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum WormFsOperation {
-    /// Prepare phase of two-phase commit transaction
+    /// Prepare phase of two-phase commit transaction (legacy, prefer AtomicTransaction)
     TransactionPrepare {
         tx_id: TxId,
         metadata_ops: Option<Vec<MetadataOperation>>,
         command_ops: Option<Vec<CommandOperation>>,
         timeout: SystemTime,
     },
-    /// Commit phase of two-phase commit transaction
+    /// Commit phase of two-phase commit transaction (legacy, prefer AtomicTransaction)
     TransactionCommit { tx_id: TxId },
-    /// Abort phase of two-phase commit transaction
+    /// Abort phase of two-phase commit transaction (legacy, prefer AtomicTransaction)
     TransactionAbort { tx_id: TxId, reason: Option<String> },
+    /// Atomic transaction - all operations commit together in a single Raft round
+    ///
+    /// This is the preferred way to execute transactions, as it leverages Raft's native
+    /// atomicity guarantees without requiring separate prepare/commit phases. All operations
+    /// in the list are applied atomically - either all succeed or the node panics to prevent
+    /// state divergence.
+    AtomicTransaction {
+        /// Unique transaction identifier
+        tx_id: TxId,
+        /// List of metadata operations to apply atomically
+        operations: Vec<MetadataOperation>,
+        /// Transaction timeout (for cleanup if node crashes)
+        timeout: SystemTime,
+    },
 }
 
 /// Metadata operations that can be proposed through Raft.

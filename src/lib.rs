@@ -7,7 +7,7 @@
 //!
 //! ## Architecture
 //!
-//! The system is built around 12 key components:
+//! The system is built around 13 key components:
 //!
 //! - **StorageNode**: Top-level orchestrator that initializes and wires together all components
 //! - **StorageRaftMember**: Raft consensus implementation for metadata consistency
@@ -16,6 +16,7 @@
 //! - **MetadataStore**: SQLite-based metadata persistence layer
 //! - **SnapshotStore**: Metadata snapshot management for Raft log compaction
 //! - **TransactionLogStore**: Persistent Raft log storage
+//! - **TransactionManager**: High-level API for atomic metadata transactions
 //! - **StorageEndpoint**: gRPC API server for client and node-to-node communication
 //! - **StorageWatchdog**: Data integrity monitoring and repair
 //! - **MetricService**: Centralized metrics collection and aggregation
@@ -42,6 +43,7 @@ pub mod storage_node;
 pub mod storage_raft_member;
 pub mod storage_watchdog;
 pub mod transaction_log_store;
+pub mod transaction_manager;
 pub mod utils;
 pub mod worm_validator;
 
@@ -57,6 +59,7 @@ pub use storage_node::StorageNode;
 pub use storage_raft_member::StorageRaftMember;
 pub use storage_watchdog::StorageWatchdog;
 pub use transaction_log_store::TransactionLogStore;
+pub use transaction_manager::TransactionManager;
 pub use worm_validator::WormValidator;
 
 // Test utilities module (only available with test-utils feature or during testing)
