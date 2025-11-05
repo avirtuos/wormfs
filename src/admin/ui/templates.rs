@@ -1051,6 +1051,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                         if (response.ok) {
                             const data = await response.json();
                             if (data && !data.error) {
+                                console.log('Raft metrics received:', data);
+                                console.log('Cluster members:', data.cluster_members);
+                                console.log('Role:', data.role);
                                 this.raftMetrics = data;
                             }
                         } else if (response.status === 404) {
