@@ -28,6 +28,7 @@ fn create_test_mount_config(admin_port: u16) -> MountConfig {
             ..Default::default()
         }),
         network_config: None, // No network needed for these basic tests
+        raft_config: None,    // No raft needed for these basic tests
         mount_point: std::path::PathBuf::from("/tmp/wormfs-test"),
         mount_options: Default::default(),
     }
@@ -64,6 +65,7 @@ async fn test_network_status_endpoint_no_network() {
         Arc::new(mount_config),
         metrics,
         None, // No network
+        None, // No raft member
     );
 
     let server_handle = admin_server.start().expect("Failed to start admin server");
@@ -123,7 +125,8 @@ async fn test_peers_endpoint_no_network() {
         },
         Arc::new(mount_config),
         metrics,
-        None,
+        None, // No network
+        None, // No raft member
     );
 
     let server_handle = admin_server.start().expect("Failed to start admin server");
@@ -177,7 +180,8 @@ async fn test_admin_server_health_endpoint() {
         },
         Arc::new(mount_config),
         metrics,
-        None,
+        None, // No network
+        None, // No raft member
     );
 
     let server_handle = admin_server.start().expect("Failed to start admin server");
@@ -228,7 +232,8 @@ async fn test_concurrent_admin_requests() {
         },
         Arc::new(mount_config),
         metrics,
-        None,
+        None, // No network
+        None, // No raft member
     );
 
     let server_handle = admin_server.start().expect("Failed to start admin server");
