@@ -335,6 +335,78 @@ impl WormFsStateMachine {
 
                 debug!("Transaction {:?} aborted", tx_id);
             }
+
+            WormFsOperation::AtomicTransaction {
+                tx_id,
+                operations,
+                timeout: _,
+            } => {
+                info!(
+                    "Applying AtomicTransaction {:?} with {} operations at index {}",
+                    tx_id,
+                    operations.len(),
+                    log_index
+                );
+
+                // Apply all operations atomically
+                // Track which operations succeed to emit events only for those.
+                let mut successful_operations = Vec::new();
+                let mut failed_operations = Vec::new();
+
+                for operation in operations {
+                    match Self::apply_metadata_operation(&inner.metadata_store, operation).await {
+                        Ok(()) => {
+                            successful_operations.push(operation.clone());
+                        }
+                        Err(e) => {
+                            error!("Failed to apply operation {:?}: {}", operation, e);
+                            failed_operations.push((operation.clone(), e));
+                        }
+                    }
+                }
+
+                // If any operations failed, this is a critical error that could cause
+                // state divergence across Raft replicas. We panic to fail-stop rather
+                // than continue with inconsistent state.
+                if !failed_operations.is_empty() {
+                    panic!(
+                        "CRITICAL: AtomicTransaction {:?} failed! {} operations succeeded, {} failed. \
+                         Failed operations: {:?}. This indicates a serious bug or state corruption. \
+                         Node must restart to resync from cluster.",
+                        tx_id,
+                        successful_operations.len(),
+                        failed_operations.len(),
+                        failed_operations
+                    );
+                }
+
+                // Convert successful operations to metadata change events
+                let changes: Vec<super::types::MetadataChange> = successful_operations
+                    .iter()
+                    .filter_map(|op| Self::operation_to_change(op))
+                    .collect();
+
+                // Emit change event if there are any changes
+                if !changes.is_empty() {
+                    let event = MetadataChangeEvent {
+                        committed_at: SystemTime::now(),
+                        log_index,
+                        changes,
+                    };
+                    Self::emit_metadata_change(&mut inner, log_index, event);
+                }
+
+                // Store transaction as committed for tracking
+                inner
+                    .transactions
+                    .insert(*tx_id, TransactionPhase::Committed);
+
+                info!(
+                    "AtomicTransaction {:?} committed successfully with {} operations",
+                    tx_id,
+                    successful_operations.len()
+                );
+            }
         }
 
         // Update last applied index
@@ -976,6 +1048,9 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
                                 reason: reason.clone(),
                             }
                         }
+                        WormFsOperation::AtomicTransaction { tx_id, .. } => {
+                            WormFsResponse::TransactionCommitted { tx_id: *tx_id }
+                        }
                     };
                     responses.push(response);
                 }
@@ -990,7 +1065,8 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
                             }
                         }
                         WormFsOperation::TransactionCommit { tx_id }
-                        | WormFsOperation::TransactionAbort { tx_id, .. } => {
+                        | WormFsOperation::TransactionAbort { tx_id, .. }
+                        | WormFsOperation::AtomicTransaction { tx_id, .. } => {
                             WormFsResponse::TransactionAborted {
                                 tx_id: *tx_id,
                                 reason: Some(e),

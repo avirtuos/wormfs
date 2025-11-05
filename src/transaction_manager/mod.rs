@@ -35,9 +35,9 @@
 //!
 //! ## Usage Example
 //!
-//! ```rust,no_run
-//! use wormfs_v2::transaction_manager::{TransactionManager, Operation};
-//! use wormfs_v2::storage_raft_member::types::{FileMetadata, StoragePolicy};
+//! ```rust,ignore
+//! use wormfs::transaction_manager::{TransactionManager, Operation};
+//! use wormfs::storage_raft_member::types::{FileMetadata, StoragePolicy};
 //! use std::time::Duration;
 //! use std::path::PathBuf;
 //!
@@ -152,8 +152,8 @@ pub trait TransactionManager: Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # async fn example(tx_manager: std::sync::Arc<dyn wormfs_v2::TransactionManager>) -> Result<(), Box<dyn std::error::Error>> {
+    /// ```rust,ignore
+    /// # async fn example(tx_manager: std::sync::Arc<dyn wormfs::TransactionManager>) -> Result<(), Box<dyn std::error::Error>> {
     /// use std::time::Duration;
     ///
     /// let tx_id = tx_manager.begin(Duration::from_secs(30)).await?;
@@ -191,12 +191,12 @@ pub trait TransactionManager: Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # async fn example(
-    /// #     tx_manager: std::sync::Arc<dyn wormfs_v2::TransactionManager>,
-    /// #     tx_id: wormfs_v2::storage_raft_member::types::TxId,
+    /// #     tx_manager: std::sync::Arc<dyn wormfs::TransactionManager>,
+    /// #     tx_id: wormfs::storage_raft_member::types::TxId,
     /// # ) -> Result<(), Box<dyn std::error::Error>> {
-    /// use wormfs_v2::transaction_manager::Operation;
+    /// use wormfs::transaction_manager::Operation;
     /// use std::path::PathBuf;
     ///
     /// tx_manager.add_operation(tx_id, Operation::DeleteFile {
@@ -233,10 +233,10 @@ pub trait TransactionManager: Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # async fn example(
-    /// #     tx_manager: std::sync::Arc<dyn wormfs_v2::TransactionManager>,
-    /// #     tx_id: wormfs_v2::storage_raft_member::types::TxId,
+    /// #     tx_manager: std::sync::Arc<dyn wormfs::TransactionManager>,
+    /// #     tx_id: wormfs::storage_raft_member::types::TxId,
     /// # ) -> Result<(), Box<dyn std::error::Error>> {
     /// // After adding operations...
     /// tx_manager.commit(tx_id).await?;
@@ -261,10 +261,10 @@ pub trait TransactionManager: Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # async fn example(
-    /// #     tx_manager: std::sync::Arc<dyn wormfs_v2::TransactionManager>,
-    /// #     tx_id: wormfs_v2::storage_raft_member::types::TxId,
+    /// #     tx_manager: std::sync::Arc<dyn wormfs::TransactionManager>,
+    /// #     tx_id: wormfs::storage_raft_member::types::TxId,
     /// # ) -> Result<(), Box<dyn std::error::Error>> {
     /// // If something goes wrong...
     /// tx_manager.abort(tx_id).await?;

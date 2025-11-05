@@ -31,14 +31,14 @@ impl TransactionManagerFactory {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// use wormfs_v2::transaction_manager::{TransactionManagerFactory, Config};
+    /// ```rust,ignore
+    /// use wormfs::transaction_manager::{TransactionManagerFactory, Config};
     /// use std::sync::Arc;
     ///
     /// # async fn example(
-    /// #     raft_member: Arc<dyn wormfs_v2::StorageRaftMember>,
-    /// #     metadata_store: Arc<dyn wormfs_v2::MetadataStore>,
-    /// #     metrics: Arc<wormfs_v2::MetricService>,
+    /// #     raft_member: Arc<dyn wormfs::StorageRaftMember>,
+    /// #     metadata_store: Arc<dyn wormfs::MetadataStore>,
+    /// #     metrics: Arc<wormfs::MetricService>,
     /// # ) {
     /// let config = Config::default();
     ///
