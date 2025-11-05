@@ -273,6 +273,14 @@ struct WormFsConfig {
     /// StorageNetwork configuration (optional)
     #[serde(default)]
     network: Option<wormfs::storage_network::Config>,
+
+    /// Path to transaction log for Raft (optional)
+    #[serde(default)]
+    transaction_log_path: Option<PathBuf>,
+
+    /// Directory for Raft snapshots (optional)
+    #[serde(default)]
+    snapshot_dir: Option<PathBuf>,
 }
 
 /// Load configuration from TOML file.
@@ -298,6 +306,26 @@ fn load_config_from_file(
         "mount_point must be specified in config file or via --mount-point CLI flag".to_string()
     })?;
 
+    // Construct Raft config if both transaction_log_path and snapshot_dir are provided
+    eprintln!(
+        "DEBUG: transaction_log_path = {:?}",
+        config.transaction_log_path
+    );
+    eprintln!("DEBUG: snapshot_dir = {:?}", config.snapshot_dir);
+    let raft_config = if let (Some(tx_log), Some(snapshot_dir)) =
+        (config.transaction_log_path, config.snapshot_dir)
+    {
+        eprintln!("DEBUG: Creating Raft config");
+        let mut raft_cfg = wormfs::storage_raft_member::Config::default();
+        raft_cfg.transaction_log_path = tx_log;
+        raft_cfg.snapshot_directory = snapshot_dir;
+        raft_cfg.metadata_db_path = config.metadata.database_path.clone();
+        Some(raft_cfg)
+    } else {
+        eprintln!("DEBUG: Raft config NOT created - one or both paths missing");
+        None
+    };
+
     Ok(FinalMountConfig {
         filesystem_config: config.filesystem,
         metadata_config: config.metadata,
@@ -305,6 +333,7 @@ fn load_config_from_file(
         metric_config: config.metrics,
         admin_config: config.admin,
         network_config: config.network,
+        raft_config,
         mount_point,
         mount_options: MountOptions::default(),
     })
@@ -416,6 +445,7 @@ fn create_default_config(
         metric_config: None,  // Metrics disabled by default
         admin_config: None,   // Admin server disabled by default
         network_config: None, // Network disabled by default
+        raft_config: None,    // Raft disabled by default
         mount_point,
         mount_options: MountOptions::default(),
     })

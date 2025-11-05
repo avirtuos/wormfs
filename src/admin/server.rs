@@ -6,7 +6,8 @@
 use super::{
     handlers::{
         component_metrics_handler, components_handler, config_handler, health_handler,
-        logs_handler, metrics_handler, network_status_handler, peers_handler, status_handler,
+        logs_handler, metrics_handler, network_status_handler, peers_handler, raft_metrics_handler,
+        raft_status_handler, status_handler,
     },
     types::{Config, Error},
     ui::templates::INDEX_HTML,
@@ -15,6 +16,7 @@ use super::{
 use crate::filesystem_service::mount::MountConfig;
 use crate::metric_service::MetricServiceImpl;
 use crate::storage_network::StorageNetworkHandle;
+use crate::storage_raft_member::StorageRaftMemberImpl;
 use axum::{
     response::{Html, IntoResponse},
     routing::get,
@@ -29,6 +31,7 @@ pub struct AdminServer {
     mount_config: Arc<MountConfig>,
     metrics: Arc<MetricServiceImpl>,
     network: Option<Arc<StorageNetworkHandle>>,
+    raft_member: Option<Arc<StorageRaftMemberImpl>>,
 }
 
 impl AdminServer {
@@ -38,12 +41,14 @@ impl AdminServer {
         mount_config: Arc<MountConfig>,
         metrics: Arc<MetricServiceImpl>,
         network: Option<Arc<StorageNetworkHandle>>,
+        raft_member: Option<Arc<StorageRaftMemberImpl>>,
     ) -> Self {
         Self {
             config,
             mount_config,
             metrics,
             network,
+            raft_member,
         }
     }
 
@@ -68,9 +73,12 @@ impl AdminServer {
         let mount_config = self.mount_config.clone();
         let metrics = self.metrics.clone();
         let network = self.network.clone();
+        let raft_member = self.raft_member.clone();
 
         let handle = tokio::spawn(async move {
-            if let Err(e) = Self::run_server(config, mount_config, metrics, network).await {
+            if let Err(e) =
+                Self::run_server(config, mount_config, metrics, network, raft_member).await
+            {
                 tracing::error!("Admin server error: {}", e);
             }
         });
@@ -84,13 +92,14 @@ impl AdminServer {
         mount_config: Arc<MountConfig>,
         metrics: Arc<MetricServiceImpl>,
         network: Option<Arc<StorageNetworkHandle>>,
+        raft_member: Option<Arc<StorageRaftMemberImpl>>,
     ) -> Result<(), Error> {
         // Create WebSocket state and start broadcast task
         let ws_state = WsState::new(metrics.clone());
         ws_state.start_broadcast_task();
 
         // Build the router
-        let app = Self::create_router(mount_config, metrics, ws_state, network);
+        let app = Self::create_router(mount_config, metrics, ws_state, network, raft_member);
 
         // Create bind address
         let addr = format!("{}:{}", config.bind_address, config.port);
@@ -118,6 +127,7 @@ impl AdminServer {
         metrics: Arc<MetricServiceImpl>,
         ws_state: WsState,
         network: Option<Arc<StorageNetworkHandle>>,
+        raft_member: Option<Arc<StorageRaftMemberImpl>>,
     ) -> Router {
         // Create WebSocket router with WsState
         let ws_router = Router::new()
@@ -139,6 +149,16 @@ impl AdminServer {
             Router::new()
         };
 
+        // Create Raft router with StorageRaftMemberImpl state
+        let raft_router = if let Some(raft) = raft_member {
+            Router::new()
+                .route("/api/raft/metrics", get(raft_metrics_handler))
+                .route("/api/raft/status", get(raft_status_handler))
+                .with_state(raft)
+        } else {
+            Router::new()
+        };
+
         // Create main router with metrics state
         let api_router = Router::new()
             // UI routes
@@ -156,6 +176,7 @@ impl AdminServer {
         api_router
             .merge(config_router)
             .merge(network_router)
+            .merge(raft_router)
             .merge(ws_router)
             .layer(TraceLayer::new_for_http())
     }
@@ -195,11 +216,12 @@ mod tests {
             metric_config: Some(MetricsConfig::default()),
             admin_config: Some(admin_config.clone()),
             network_config: None,
+            raft_config: None,
             mount_point: std::path::PathBuf::from("/tmp/test"),
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });
 
-        let server = AdminServer::new(admin_config.clone(), mount_config, metrics, None);
+        let server = AdminServer::new(admin_config.clone(), mount_config, metrics, None, None);
 
         assert_eq!(server.config.port, 9090);
         assert_eq!(server.config.bind_address, "127.0.0.1");
@@ -229,11 +251,12 @@ mod tests {
             metric_config: Some(MetricsConfig::default()),
             admin_config: Some(admin_config.clone()),
             network_config: None,
+            raft_config: None,
             mount_point: std::path::PathBuf::from("/tmp/test"),
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });
 
-        let server = AdminServer::new(admin_config, mount_config, metrics, None);
+        let server = AdminServer::new(admin_config, mount_config, metrics, None, None);
 
         let result = server.start();
         assert!(result.is_err());

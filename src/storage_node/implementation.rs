@@ -216,13 +216,17 @@ impl StorageNodeImpl {
             raft_config.network_address = config.listen_address;
             raft_config.enable_cluster_manager = true;
 
+            // Set storage_network reference (required for Raft RPC communication)
+            raft_config.storage_network = Some(Arc::new(network_handle.clone())
+                as Arc<dyn crate::storage_network::NetworkHandleTrait>);
+
             // Parse node_id as u64 for Raft NodeId (safe because we checked is_ok() above)
             let node_id_num = config
                 .node_id
                 .parse::<u64>()
                 .expect("node_id should parse as u64 - validated above");
 
-            let raft_member = StorageRaftMemberImpl::new(
+            let mut raft_member = StorageRaftMemberImpl::new(
                 crate::storage_raft_member::types::NodeId(node_id_num),
                 raft_config,
             )
@@ -231,6 +235,32 @@ impl StorageNodeImpl {
                 component: "StorageRaftMember".to_string(),
                 reason: e.to_string(),
             })?;
+
+            // Initialize Raft cluster
+            // IMPORTANT: Only Node 1 initializes as a single-node cluster.
+            // Other nodes do NOT initialize - they wait to be added as learners
+            // by Node 1 via the cluster formation task.
+            //
+            // This prevents creating multiple independent single-node clusters
+            // that cannot be merged (Raft doesn't support merging clusters).
+            if node_id_num == 1 {
+                info!(
+                    "Node 1: Initializing as single-node Raft cluster (will add other nodes later)"
+                );
+                raft_member
+                    .initialize(vec![])
+                    .await
+                    .map_err(|e| Error::ComponentInitFailed {
+                        component: "StorageRaftMember".to_string(),
+                        reason: format!("Raft initialization failed: {}", e),
+                    })?;
+                info!("Node 1: Raft cluster initialized successfully");
+            } else {
+                info!(
+                    "Node {}: Skipping Raft initialization (will be added to cluster by Node 1)",
+                    node_id_num
+                );
+            }
 
             let raft_member = Arc::new(raft_member);
 
@@ -385,8 +415,8 @@ impl StorageNode for StorageNodeImpl {
 
         // In Phase 1, there's no background tasks to start
         // The FileSystemService will be mounted separately via the FUSE binary
+        // Raft cluster is initialized during construction (see new_internal)
         // Future phases will start:
-        // - Raft consensus loop
         // - Network event loop
         // - gRPC endpoint
         // - Watchdog monitoring

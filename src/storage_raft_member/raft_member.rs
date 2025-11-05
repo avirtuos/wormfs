@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::storage_network::NetworkHandleTrait;
 
@@ -216,9 +216,10 @@ impl RaftNetwork<WormFsTypeConfig> for RaftMember {
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, WormFsNode, RaftError<NodeId>>>
     {
         // Log the AppendEntries request details
-        debug!(
-            "[RaftMember] Sending AppendEntries to {:?}: term={}, prev_log={:?}, entries={}, leader_commit={:?}",
+        info!(
+            "[RaftMember] Sending AppendEntries to {:?} (peer_id={}): term={}, prev_log={:?}, entries={}, leader_commit={:?}",
             self.target_node_id,
+            self.target_peer_id,
             rpc.vote.leader_id.term,
             rpc.prev_log_id,
             rpc.entries.len(),
@@ -232,9 +233,17 @@ impl RaftNetwork<WormFsTypeConfig> for RaftMember {
         }
 
         let message = RaftRpcMessage::AppendEntries(rpc);
+        info!(
+            "[RaftMember] About to send RPC to peer_id={}",
+            self.target_peer_id
+        );
         let response: RaftRpcResponse = self
             .send_rpc::<RaftRpcMessage, RaftRpcResponse>(message, "append_entries")
             .await?;
+        info!(
+            "[RaftMember] RPC returned from peer_id={}",
+            self.target_peer_id
+        );
 
         // Record the time we received the response
         {
@@ -244,7 +253,7 @@ impl RaftNetwork<WormFsTypeConfig> for RaftMember {
 
         match response {
             RaftRpcResponse::AppendEntries(resp) => {
-                debug!(
+                info!(
                     "[RaftMember] Received AppendEntries response from {:?}: success={:?}",
                     self.target_node_id,
                     resp.is_success()

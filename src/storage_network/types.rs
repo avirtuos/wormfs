@@ -422,6 +422,10 @@ pub enum Error {
     #[error("Failed to send message: {0}")]
     SendFailed(String),
 
+    /// Invalid message format
+    #[error("Invalid message format: {0}")]
+    InvalidMessage(String),
+
     /// Broadcast failed
     #[error("Failed to broadcast on topic '{topic}': {reason}")]
     BroadcastFailed { topic: String, reason: String },

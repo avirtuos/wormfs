@@ -877,41 +877,49 @@ impl super::StorageNetworkInner {
                             request.len()
                         );
 
-                        // TODO: Protocol detection limitation
-                        // The current libp2p request-response implementation doesn't pass
-                        // the protocol identifier to the message handler. Options:
-                        // 1. Encode protocol in first bytes of request (protocol framing)
-                        // 2. Use separate request-response behaviors per protocol
-                        // 3. Wait for libp2p API improvement
-                        //
-                        // For now, we default to echo protocol for all requests.
-                        // This works for testing but limits multi-protocol support.
-                        let protocol = "/wormfs/echo";
+                        // Extract protocol from framed request
+                        // Format: [protocol_len: u16][protocol: UTF-8][request_payload]
+                        match Self::extract_protocol_from_request(&request) {
+                            Ok((protocol, payload)) => {
+                                debug!(
+                                    "Extracted protocol '{}' from request, payload {} bytes",
+                                    protocol,
+                                    payload.len()
+                                );
 
-                        // Route the request to the appropriate protocol handler
-                        let response_result = self.route_request(protocol, request).await;
+                                // Route the request to the appropriate protocol handler
+                                let response_result = self.route_request(&protocol, payload).await;
 
-                        // Send response or handle error
-                        match response_result {
-                            Ok(response) => {
-                                // Send successful response through the swarm
-                                let mut swarm = self.state.swarm.write().await;
-                                if swarm
-                                    .behaviour_mut()
-                                    .request_response
-                                    .send_response(channel, response)
-                                    .is_err()
-                                {
-                                    warn!("Failed to send response to request {:?}", request_id);
+                                // Send response or handle error
+                                match response_result {
+                                    Ok(response) => {
+                                        // Send successful response through the swarm
+                                        let mut swarm = self.state.swarm.write().await;
+                                        if swarm
+                                            .behaviour_mut()
+                                            .request_response
+                                            .send_response(channel, response)
+                                            .is_err()
+                                        {
+                                            warn!(
+                                                "Failed to send response to request {:?}",
+                                                request_id
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "Request handler failed for request {:?}: {}",
+                                            request_id, e
+                                        );
+                                        // libp2p request-response doesn't support sending error responses
+                                        // The channel will be dropped, which signals failure to the peer
+                                    }
                                 }
                             }
                             Err(e) => {
-                                error!(
-                                    "Request handler failed for request {:?}: {}",
-                                    request_id, e
-                                );
-                                // libp2p request-response doesn't support sending error responses
-                                // The channel will be dropped, which signals failure to the peer
+                                error!("Failed to extract protocol from request: {}", e);
+                                // Drop the channel to signal error (channel is implicitly dropped here)
                             }
                         }
                     }
@@ -1279,6 +1287,49 @@ impl super::StorageNetworkInner {
         self.broadcast_internal(topic_name, message).await
     }
 
+    /// Extract protocol from a framed request.
+    ///
+    /// Format: [protocol_len: u16][protocol: UTF-8][request_payload]
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The framed request bytes
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (protocol_string, payload_bytes)
+    fn extract_protocol_from_request(request: &[u8]) -> Result<(String, Vec<u8>), Error> {
+        // Need at least 2 bytes for protocol length
+        if request.len() < 2 {
+            return Err(Error::InvalidMessage(
+                "Request too short to contain protocol frame".to_string(),
+            ));
+        }
+
+        // Read protocol length (u16, big-endian)
+        let protocol_len = u16::from_be_bytes([request[0], request[1]]) as usize;
+
+        // Verify we have enough bytes for protocol + at least some payload
+        if request.len() < 2 + protocol_len {
+            return Err(Error::InvalidMessage(format!(
+                "Request too short: expected at least {} bytes, got {}",
+                2 + protocol_len,
+                request.len()
+            )));
+        }
+
+        // Extract protocol string
+        let protocol_bytes = &request[2..2 + protocol_len];
+        let protocol = String::from_utf8(protocol_bytes.to_vec()).map_err(|e| {
+            Error::InvalidMessage(format!("Invalid UTF-8 in protocol string: {}", e))
+        })?;
+
+        // Extract payload (everything after protocol)
+        let payload = request[2 + protocol_len..].to_vec();
+
+        Ok((protocol, payload))
+    }
+
     /// Internal implementation of sending a request and awaiting response.
     ///
     /// This uses libp2p's request-response protocol for direct peer-to-peer RPC.
@@ -1308,6 +1359,23 @@ impl super::StorageNetworkInner {
         // Convert internal PeerId to libp2p PeerId
         let libp2p_peer_id = internal_peer_id_to_libp2p(peer_id)?;
 
+        // Implement protocol framing: prepend protocol to request bytes
+        // Format: [protocol_len: u16][protocol: UTF-8][request_payload]
+        let protocol_bytes = protocol.as_bytes();
+        let protocol_len = protocol_bytes.len() as u16;
+        let mut framed_request = Vec::with_capacity(2 + protocol_bytes.len() + request.len());
+        framed_request.extend_from_slice(&protocol_len.to_be_bytes());
+        framed_request.extend_from_slice(protocol_bytes);
+        framed_request.extend_from_slice(&request);
+
+        debug!(
+            "Framed request: protocol '{}' ({} bytes), payload {} bytes, total {} bytes",
+            protocol,
+            protocol_bytes.len(),
+            request.len(),
+            framed_request.len()
+        );
+
         // Send request via request-response protocol
         let request_id = {
             let mut swarm = self.state.swarm.write().await;
@@ -1315,7 +1383,7 @@ impl super::StorageNetworkInner {
             swarm
                 .behaviour_mut()
                 .request_response
-                .send_request(&libp2p_peer_id, request)
+                .send_request(&libp2p_peer_id, framed_request)
         };
 
         // Store response channel for when we get the response

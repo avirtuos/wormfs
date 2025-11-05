@@ -330,6 +330,16 @@ pub enum RaftRole {
     Candidate,
 }
 
+/// Information about a cluster member
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClusterMemberInfo {
+    /// Node ID
+    pub node_id: NodeId,
+
+    /// Whether this node is a voter (true) or learner (false)
+    pub is_voter: bool,
+}
+
 /// Raft metrics and status information.
 #[derive(Debug, Clone)]
 pub struct RaftMetrics {
@@ -356,6 +366,9 @@ pub struct RaftMetrics {
 
     /// Number of nodes in the cluster
     pub cluster_size: usize,
+
+    /// List of all cluster members (voters and learners) - available on all nodes
+    pub cluster_members: Vec<ClusterMemberInfo>,
 
     /// Replication lag per follower (leader only)
     pub replication_lag: HashMap<NodeId, u64>,

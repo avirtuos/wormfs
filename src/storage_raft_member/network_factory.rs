@@ -107,9 +107,10 @@ impl RaftNetworkFactory<WormFsTypeConfig> for WormFsNetworkFactory {
             }
         };
 
-        debug!(
+        tracing::info!(
             "Created RaftMember for target {:?} with PeerId {}",
-            target, target_peer_id
+            target,
+            target_peer_id
         );
 
         RaftMember::new(

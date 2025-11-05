@@ -17,6 +17,236 @@ use super::fuse_adapter::FuseAdapter;
 // TODO: Proper solution is to make FileSystemServiceImpl generic over MetadataStore trait
 // For Phase 1, we work with the concrete type directly
 
+/// Automatically form a multi-node Raft cluster by having the lowest-ID node add peers.
+///
+/// This function waits for peers to connect via StorageNetwork, then adds them to the
+/// Raft cluster if this node has the lowest ID.
+#[cfg(feature = "fuser")]
+async fn form_raft_cluster(
+    node_id: u64,
+    raft_member: Arc<crate::storage_raft_member::StorageRaftMemberImpl>,
+    network: Arc<crate::storage_network::StorageNetworkHandle>,
+    network_config: Option<crate::storage_network::Config>,
+) {
+    use crate::storage_raft_member::StorageRaftMember;
+
+    // Log immediately to confirm task is executing
+    tracing::info!("Node {}: Cluster formation task STARTED", node_id);
+
+    // Wait for peers to connect and exchange at least 3 heartbeats (heartbeat interval is 5s)
+    // 18 seconds allows: initial connection (5s) + 2-3 heartbeats (10-15s) = stable peer info
+    tracing::info!("Node {}: Waiting 18 seconds for peers to connect and exchange heartbeats before forming Raft cluster...", node_id);
+    tokio::time::sleep(tokio::time::Duration::from_secs(18)).await;
+
+    tracing::info!(
+        "Node {}: Wait complete, checking for connected peers...",
+        node_id
+    );
+
+    // Get connected peers
+    let peers = network.get_connected_peers().await;
+    tracing::info!("Node {}: Found {} connected peer(s)", node_id, peers.len());
+
+    if peers.is_empty() {
+        tracing::info!(
+            "Node {}: No peers connected, remaining as single-node cluster",
+            node_id
+        );
+        return;
+    }
+
+    // Parse peer information from network config to get ports
+    let network_cfg = match network_config {
+        Some(cfg) => cfg,
+        None => {
+            tracing::warn!(
+                "Node {}: No network config available for cluster formation",
+                node_id
+            );
+            return;
+        }
+    };
+
+    // Extract peer node IDs from connected peers
+    let mut peer_node_ids: Vec<u64> = Vec::new();
+    for peer_info in &peers {
+        if let Some(ref peer_node_id_str) = peer_info.node_id {
+            match peer_node_id_str.parse::<u64>() {
+                Ok(peer_node_id) => {
+                    peer_node_ids.push(peer_node_id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Node {}: Failed to parse peer node_id '{}': {}",
+                        node_id,
+                        peer_node_id_str,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    if peer_node_ids.is_empty() {
+        tracing::info!(
+            "Node {}: No valid peer node IDs found, remaining as single-node cluster",
+            node_id
+        );
+        return;
+    }
+
+    // Determine if this node should initiate cluster formation (lowest ID)
+    let mut all_node_ids = peer_node_ids.clone();
+    all_node_ids.push(node_id);
+    all_node_ids.sort();
+
+    if all_node_ids[0] != node_id {
+        tracing::info!(
+            "Node {}: Not the lowest ID node (lowest is {}), waiting to be added by leader",
+            node_id,
+            all_node_ids[0]
+        );
+        return;
+    }
+
+    tracing::info!(
+        "Node {}: Lowest ID node, initiating cluster formation with {} peers",
+        node_id,
+        peer_node_ids.len()
+    );
+
+    // Add each peer to the cluster
+    for peer_info in peers {
+        tracing::info!(
+            "Node {}: Processing peer - node_id={:?}, addresses={:?}",
+            node_id,
+            peer_info.node_id,
+            peer_info.addresses
+        );
+
+        if let Some(ref peer_node_id_str) = peer_info.node_id {
+            let peer_node_id = match peer_node_id_str.parse::<u64>() {
+                Ok(id) => {
+                    tracing::info!("Node {}: Parsed peer node_id {} successfully", node_id, id);
+                    id
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Node {}: Failed to parse peer node_id '{}': {}",
+                        node_id,
+                        peer_node_id_str,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            // Find the corresponding multiaddr from config to extract IP and port
+            tracing::info!(
+                "Node {}: Looking for multiaddr in {} peer configs",
+                node_id,
+                network_cfg.peers.len()
+            );
+            let mut peer_socket_addr = None;
+            for peer_cfg in &network_cfg.peers {
+                tracing::info!(
+                    "Node {}: Checking peer config multiaddr: {}",
+                    node_id,
+                    peer_cfg.multiaddr
+                );
+
+                // Parse multiaddr to extract IP and port
+                // Format: /ip4/127.0.0.1/tcp/7102
+                let parts: Vec<&str> = peer_cfg.multiaddr.split('/').collect();
+
+                let ip_str = if parts.len() >= 3 && parts[1] == "ip4" {
+                    Some(parts[2])
+                } else {
+                    None
+                };
+
+                let port_str = if parts.len() >= 5 && parts[3] == "tcp" {
+                    Some(parts[4])
+                } else {
+                    None
+                };
+
+                if let (Some(ip), Some(port)) = (ip_str, port_str) {
+                    if let (Ok(ip_addr), Ok(port_num)) =
+                        (ip.parse::<std::net::IpAddr>(), port.parse::<u16>())
+                    {
+                        let socket_addr = std::net::SocketAddr::new(ip_addr, port_num);
+                        tracing::info!(
+                            "Node {}: Extracted socket address {} from multiaddr",
+                            node_id,
+                            socket_addr
+                        );
+                        peer_socket_addr = Some(socket_addr);
+                        break;
+                    }
+                }
+            }
+
+            let socket_addr = match peer_socket_addr {
+                Some(addr) => addr,
+                None => {
+                    tracing::warn!("Node {}: Could not extract socket address for peer {} (checked {} peer configs)",
+                        node_id, peer_node_id, network_cfg.peers.len());
+                    continue;
+                }
+            };
+
+            // Convert peer_id to base58 string (libp2p standard format)
+            let peer_id_str = match libp2p::PeerId::from_bytes(peer_info.peer_id.as_bytes()) {
+                Ok(libp2p_peer_id) => libp2p_peer_id.to_string(),
+                Err(e) => {
+                    tracing::error!(
+                        "Node {}: Failed to convert peer_id to libp2p format: {}",
+                        node_id,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            tracing::info!(
+                "Node {}: Adding peer {} (addr={}, peer_id={}) to Raft cluster",
+                node_id,
+                peer_node_id,
+                socket_addr,
+                peer_id_str
+            );
+
+            match raft_member
+                .add_node(
+                    crate::storage_raft_member::types::NodeId(peer_node_id),
+                    socket_addr,
+                    peer_id_str,
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        "Node {}: Successfully added peer {} to Raft cluster",
+                        node_id,
+                        peer_node_id
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Node {}: Failed to add peer {} to Raft cluster: {}",
+                        node_id,
+                        peer_node_id,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    tracing::info!("Node {}: Raft cluster formation complete", node_id);
+}
+
 /// Mount configuration combining all component configs.
 #[derive(Debug, Clone)]
 pub struct MountConfig {
@@ -37,6 +267,9 @@ pub struct MountConfig {
 
     /// StorageNetwork configuration (optional)
     pub network_config: Option<crate::storage_network::Config>,
+
+    /// StorageRaftMember configuration (optional)
+    pub raft_config: Option<crate::storage_raft_member::Config>,
 
     /// Mount point path
     pub mount_point: std::path::PathBuf,
@@ -202,6 +435,119 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         None
     };
 
+    // Initialize StorageRaftMember if configured
+    let raft_member = if let Some(mut raft_config) = config.raft_config.clone() {
+        // Node ID from filesystem config (already a u64)
+        let node_id_num = config.filesystem_config.node_id;
+        tracing::info!("Initializing StorageRaftMember for node {}...", node_id_num);
+
+        use crate::storage_raft_member::{
+            RaftRpcHandler, StorageRaftMember, StorageRaftMemberImpl,
+        };
+
+        // Set paths if not already set
+        if raft_config.transaction_log_path.as_os_str().is_empty() {
+            return Err(Error::InvalidArgument(
+                "Raft transaction_log_path must be configured".to_string(),
+            ));
+        }
+        if raft_config.snapshot_directory.as_os_str().is_empty() {
+            return Err(Error::InvalidArgument(
+                "Raft snapshot_dir must be configured".to_string(),
+            ));
+        }
+
+        raft_config.metadata_db_path = config.metadata_config.database_path.clone();
+
+        // Set storage_network reference (required for Raft RPC communication)
+        if let Some(ref network) = network_handle {
+            raft_config.storage_network = Some(Arc::new(network.as_ref().clone())
+                as Arc<dyn crate::storage_network::NetworkHandleTrait>);
+        } else {
+            return Err(Error::InvalidArgument(
+                "StorageNetwork must be configured to use Raft".to_string(),
+            ));
+        }
+
+        let mut raft_member = StorageRaftMemberImpl::new(
+            crate::storage_raft_member::types::NodeId(node_id_num),
+            raft_config,
+        )
+        .await
+        .map_err(|e| Error::Internal(format!("Failed to create StorageRaftMember: {}", e)))?;
+
+        // Initialize Raft cluster
+        // IMPORTANT: Only Node 1 initializes as a single-node cluster.
+        // Other nodes do NOT initialize - they wait to be added as learners
+        // by Node 1 via the cluster formation task.
+        //
+        // This prevents creating multiple independent single-node clusters
+        // that cannot be merged (Raft doesn't support merging clusters).
+        if node_id_num == 1 {
+            tracing::info!(
+                "Node 1: Initializing as single-node Raft cluster (will add other nodes later)"
+            );
+            raft_member
+                .initialize(vec![])
+                .await
+                .map_err(|e| Error::Internal(format!("Raft initialization failed: {}", e)))?;
+            tracing::info!("Node 1: Raft cluster initialized successfully");
+        } else {
+            tracing::info!(
+                "Node {}: Skipping Raft initialization (will be added to cluster by Node 1)",
+                node_id_num
+            );
+        }
+
+        let raft_member = Arc::new(raft_member);
+
+        // Wire up Raft RPC handler with network if available
+        if let Some(ref network) = network_handle {
+            network
+                .register_raft_handler(raft_member.clone() as Arc<dyn RaftRpcHandler>)
+                .await
+                .map_err(|e| Error::Internal(format!("Failed to register Raft handler: {}", e)))?;
+            tracing::info!("StorageRaftMember wired to network successfully");
+
+            // Spawn background task to form multi-node cluster automatically
+            // Only the node with the lowest ID attempts to add other nodes
+            // Store the handle to prevent the task from being dropped
+            let raft_for_cluster_formation = raft_member.clone();
+            let network_for_cluster_formation = network.clone();
+            let network_config_for_cluster_formation = config.network_config.clone();
+            let cluster_formation_handle = tokio::spawn(async move {
+                form_raft_cluster(
+                    node_id_num,
+                    raft_for_cluster_formation,
+                    network_for_cluster_formation,
+                    network_config_for_cluster_formation,
+                )
+                .await;
+            });
+
+            // Log that we've started the cluster formation task
+            tracing::info!(
+                "Node {}: Cluster formation task spawned successfully",
+                node_id_num
+            );
+
+            // Spawn a task to log the result of cluster formation (non-blocking)
+            tokio::spawn(async move {
+                match cluster_formation_handle.await {
+                    Ok(()) => tracing::info!("Cluster formation task completed successfully"),
+                    Err(e) => tracing::error!("Cluster formation task failed: {}", e),
+                }
+            });
+        } else {
+            tracing::warn!("StorageNetwork not available - Raft RPC handler not registered");
+        }
+
+        Some(raft_member)
+    } else {
+        tracing::info!("StorageRaftMember disabled");
+        None
+    };
+
     // Start admin server if configured and metrics are available
     let _admin_handle = if let (Some(admin_cfg), Some(metrics_svc)) =
         (config.admin_config.clone(), metrics.as_ref())
@@ -220,6 +566,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
             mount_config_arc,
             Arc::clone(metrics_svc),
             network_handle.clone(),
+            raft_member.clone(),
         );
 
         match admin_server.start() {

@@ -136,6 +136,7 @@ async fn main() {
         metric_config: None,
         admin_config: None,
         network_config: None, // StorageNode handles networking separately
+        raft_config: None,    // StorageNode handles Raft separately
         mount_point: std::path::PathBuf::from("/tmp/wormfs-not-mounted"),
         mount_options: wormfs::filesystem_service::mount::MountOptions::default(),
     });
@@ -156,7 +157,16 @@ async fn main() {
     // Get network handle for Admin UI
     let network_handle = node.storage_network().map(|n| Arc::new(n.clone()));
 
-    let admin_server = AdminServer::new(admin_config, mount_config, metrics, network_handle);
+    // Get Raft member for Admin UI
+    let raft_member = node.storage_raft_member().map(|r| Arc::clone(r));
+
+    let admin_server = AdminServer::new(
+        admin_config,
+        mount_config,
+        metrics,
+        network_handle,
+        raft_member,
+    );
     let _admin_handle = match admin_server.start() {
         Ok(handle) => {
             tracing::info!("Admin UI started at http://127.0.0.1:{}", args.admin_port);
