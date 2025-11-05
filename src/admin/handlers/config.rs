@@ -82,6 +82,7 @@ mod tests {
             metric_config: Some(crate::metric_service::Config::default()),
             admin_config: Some(crate::admin::Config::default()),
             network_config: None,
+            raft_config: None,
             mount_point: std::path::PathBuf::from("/tmp/test"),
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });
@@ -111,6 +112,7 @@ mod tests {
                 keep_alive_interval: std::time::Duration::from_secs(30),
                 admin_url: Some("http://127.0.0.1:9090".to_string()),
             }),
+            raft_config: None,
             mount_point: std::path::PathBuf::from("/tmp/test"),
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });

@@ -527,6 +527,29 @@ impl StorageRaftMemberImpl {
             .map(|guard| guard.clone())
             .unwrap_or_default();
 
+        // Extract cluster membership information (available on all nodes)
+        let membership = openraft_metrics.membership_config.membership();
+        let voter_ids: std::collections::HashSet<_> = membership.voter_ids().collect();
+        let learner_ids: std::collections::HashSet<_> = membership.learner_ids().collect();
+
+        let mut cluster_members = Vec::new();
+        // Add voters
+        for node_id in voter_ids.iter() {
+            cluster_members.push(super::types::ClusterMemberInfo {
+                node_id: *node_id,
+                is_voter: true,
+            });
+        }
+        // Add learners
+        for node_id in learner_ids.iter() {
+            cluster_members.push(super::types::ClusterMemberInfo {
+                node_id: *node_id,
+                is_voter: false,
+            });
+        }
+        // Sort by node_id for consistent ordering
+        cluster_members.sort_by_key(|m| m.node_id.as_u64());
+
         RaftMetrics {
             current_term: openraft_metrics.current_term,
             role,
@@ -540,6 +563,7 @@ impl StorageRaftMemberImpl {
                 .membership()
                 .voter_ids()
                 .count(),
+            cluster_members,
             replication_lag,
             heartbeat_sent,
             heartbeat_acked,
@@ -953,6 +977,9 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         libp2p::PeerId::from_str(&peer_id)
             .map_err(|e| Error::ConfigError(format!("Invalid peer_id format: {}", e)))?;
 
+        // Clone peer_id for logging before moving it into node struct
+        let peer_id_for_logging = peer_id.clone();
+
         // Create node information
         let node = super::raft_config::WormFsNode {
             peer_id,
@@ -967,21 +994,27 @@ impl StorageRaftMember for StorageRaftMemberImpl {
 
         // Step 1: Add as learner using the dedicated add_learner API
         // Use blocking=true to wait for the learner to catch up before returning
-        debug!(
-            "Step 1: Adding node {:?} as learner (blocking until caught up)",
-            node_id
+        info!(
+            "Step 1: Adding node {:?} (peer_id={}) as learner (blocking until caught up)",
+            node_id, peer_id_for_logging
         );
-        self.inner
+        info!("Calling raft.add_learner() - this will block until learner catches up...");
+
+        let add_learner_result = self
+            .inner
             .raft
             .add_learner(node_id, node, true) // true = blocking (wait for learner to catch up)
-            .await
-            .map_err(|e| {
-                Error::MembershipChangeFailed(format!("Failed to add node as learner: {:?}", e))
-            })?;
+            .await;
 
-        debug!("Learner {:?} has caught up with the log", node_id);
+        info!("raft.add_learner() returned: {:?}", add_learner_result);
 
-        debug!("Step 2: Promoting node {:?} to voter", node_id);
+        add_learner_result.map_err(|e| {
+            Error::MembershipChangeFailed(format!("Failed to add node as learner: {:?}", e))
+        })?;
+
+        info!("Learner {:?} has caught up with the log", node_id);
+
+        info!("Step 2: Promoting node {:?} to voter", node_id);
         // Step 2: Promote learner to voter using change_membership
         let mut voter_ids = std::collections::BTreeSet::new();
         voter_ids.insert(node_id);

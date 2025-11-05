@@ -704,6 +704,7 @@ mod tests {
             replication_lag,
             heartbeat_sent: HashMap::new(),
             heartbeat_acked: HashMap::new(),
+            cluster_members: vec![],
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -745,6 +746,7 @@ mod tests {
             replication_lag,
             heartbeat_sent: HashMap::new(),
             heartbeat_acked: HashMap::new(),
+            cluster_members: vec![],
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -787,6 +789,7 @@ mod tests {
             replication_lag: HashMap::new(), // Node not in replication map
             heartbeat_sent: HashMap::new(),
             heartbeat_acked: HashMap::new(),
+            cluster_members: vec![],
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -831,6 +834,7 @@ mod tests {
             replication_lag,
             heartbeat_sent: HashMap::new(),
             heartbeat_acked,
+            cluster_members: vec![],
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -875,6 +879,7 @@ mod tests {
             replication_lag,
             heartbeat_sent: HashMap::new(),
             heartbeat_acked,
+            cluster_members: vec![],
         };
 
         // Poll metrics multiple times (need 2x the failure threshold for recovery)
@@ -919,6 +924,7 @@ mod tests {
             replication_lag: HashMap::new(),
             heartbeat_sent: HashMap::new(),
             heartbeat_acked: HashMap::new(),
+            cluster_members: vec![],
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -964,6 +970,7 @@ mod tests {
             replication_lag,
             heartbeat_sent: HashMap::new(),
             heartbeat_acked,
+            cluster_members: vec![],
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));
@@ -1025,6 +1032,7 @@ mod tests {
             replication_lag,
             heartbeat_sent: HashMap::new(),
             heartbeat_acked: HashMap::new(),
+            cluster_members: vec![],
         };
 
         detector.poll_raft_metrics(&metrics, NodeId(1));

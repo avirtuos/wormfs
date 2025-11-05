@@ -275,6 +275,10 @@ main() {
 # WormFS Demo Configuration - Node 1
 mount_point = "$MOUNT_POINT_1"
 
+# Raft configuration (Phase 2+)
+transaction_log_path = "$DATA_DIR_1/tx_log.db"
+snapshot_dir = "$DATA_DIR_1/snapshots"
+
 [metadata]
 database_path = "$DATA_DIR_1/metadata.db"
 read_pool_size = 8
@@ -349,7 +353,7 @@ port = 9090
 bind_address = "127.0.0.1"
 
 [network]
-node_id = "wormfs-mount-001"
+node_id = "1"
 listen_addresses = ["/ip4/0.0.0.0/tcp/7101"]
 peer_id_store_path = "$DATA_DIR_1/peer_ids.json"
 max_peers = 100
@@ -368,6 +372,10 @@ EOF
     cat > "$CONFIG_FILE_2" <<EOF
 # WormFS Demo Configuration - Node 2
 mount_point = "$MOUNT_POINT_2"
+
+# Raft configuration (Phase 2+)
+transaction_log_path = "$DATA_DIR_2/tx_log.db"
+snapshot_dir = "$DATA_DIR_2/snapshots"
 
 [metadata]
 database_path = "$DATA_DIR_2/metadata.db"
@@ -441,7 +449,7 @@ port = 9091
 bind_address = "127.0.0.1"
 
 [network]
-node_id = "wormfs-mount-002"
+node_id = "2"
 listen_addresses = ["/ip4/0.0.0.0/tcp/7102"]
 peer_id_store_path = "$DATA_DIR_2/peer_ids.json"
 max_peers = 100
@@ -459,10 +467,10 @@ EOF
     print_success "Created temporary configurations for both nodes"
     echo ""
     echo "Node 1 Configuration (${CONFIG_FILE_1}):"
-    echo -e "${CYAN}  Node ID: wormfs-mount-001, Port: 7101, Admin: 9090${NC}"
+    echo -e "${CYAN}  Node ID: 1, Port: 7101, Admin: 9090, Raft: enabled${NC}"
     echo ""
     echo "Node 2 Configuration (${CONFIG_FILE_2}):"
-    echo -e "${CYAN}  Node ID: wormfs-mount-002, Port: 7102, Admin: 9091${NC}"
+    echo -e "${CYAN}  Node ID: 2, Port: 7102, Admin: 9091, Raft: enabled${NC}"
 
     # Step 3: Mount Filesystems via FUSE
     print_section "Step 3: Mount Filesystems"
@@ -608,13 +616,13 @@ EOF
     echo ""
     echo -e "  ${CYAN}Node 1 Admin UI:${NC}"
     echo -e "  ${BOLD}${BLUE}http://127.0.0.1:9090/${NC}"
-    echo -e "  ${CYAN}  • Node ID: wormfs-mount-001${NC}"
+    echo -e "  ${CYAN}  • Node ID: 1${NC}"
     echo -e "  ${CYAN}  • libp2p Port: 7101${NC}"
     echo -e "  ${CYAN}  • Mount Point: $MOUNT_POINT_1${NC}"
     echo ""
     echo -e "  ${CYAN}Node 2 Admin UI:${NC}"
     echo -e "  ${BOLD}${BLUE}http://127.0.0.1:9091/${NC}"
-    echo -e "  ${CYAN}  • Node ID: wormfs-mount-002${NC}"
+    echo -e "  ${CYAN}  • Node ID: 2${NC}"
     echo -e "  ${CYAN}  • libp2p Port: 7102${NC}"
     echo -e "  ${CYAN}  • Mount Point: $MOUNT_POINT_2${NC}"
     echo ""

@@ -39,7 +39,7 @@
 //!     mount_options: Default::default(),
 //! });
 //!
-//! let server = AdminServer::new(config, mount_config, metrics, None);
+//! let server = AdminServer::new(config, mount_config, metrics, None, None);
 //! let handle = server.start()?;
 //!
 //! // Server runs in the background

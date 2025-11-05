@@ -487,6 +487,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             <button class="tab-button" :class="{ 'active': activeTab === 'network' }" @click="activeTab = 'network'">
                 🌐 Network
             </button>
+            <button class="tab-button" :class="{ 'active': activeTab === 'quorum' }" @click="activeTab = 'quorum'">
+                🗳️ Quorum
+            </button>
         </div>
 
         <!-- Monitoring Tab -->
@@ -752,6 +755,138 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 </div>
             </div>
         </div>
+
+        <!-- Quorum Tab -->
+        <div class="tab-panel" :class="{ 'active': activeTab === 'quorum' }">
+            <template x-if="raftMetrics">
+                <div>
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <div class="metric-label">Cluster Role</div>
+                            <div class="metric-value">
+                                <span class="status-badge"
+                                      :style="'background: ' + (raftMetrics.role === 'Leader' ? 'var(--success)' : raftMetrics.role === 'Follower' ? 'var(--info)' : 'var(--warning)')"
+                                      x-text="raftMetrics.role"></span>
+                            </div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Current Term</div>
+                            <div class="metric-value" x-text="raftMetrics.current_term"></div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Leader ID</div>
+                            <div class="metric-value" x-text="raftMetrics.leader_id !== null ? raftMetrics.leader_id : 'Unknown'"></div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Cluster Size</div>
+                            <div class="metric-value" x-text="raftMetrics.cluster_size"></div>
+                        </div>
+                    </div>
+
+                    <div class="metrics-section">
+                        <h2 class="section-title">Log State</h2>
+                        <div class="metrics-grid">
+                            <div class="metric-card">
+                                <div class="metric-label">Commit Index</div>
+                                <div class="metric-value" x-text="formatNumber(raftMetrics.commit_index)"></div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-label">Last Applied</div>
+                                <div class="metric-value" x-text="formatNumber(raftMetrics.last_applied)"></div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-label">Last Log Index</div>
+                                <div class="metric-value" x-text="formatNumber(raftMetrics.last_log_index)"></div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-label">Snapshot Index</div>
+                                <div class="metric-value" x-text="formatNumber(raftMetrics.snapshot_index)"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Cluster Members - shown for all nodes (leader and followers) -->
+                    <div class="metrics-section" x-show="raftMetrics.cluster_members && raftMetrics.cluster_members.length > 0">
+                        <h2 class="section-title">Cluster Members</h2>
+
+                        <!-- Leader view: show heartbeat information -->
+                        <div class="table-container" x-show="raftMetrics.heartbeat_status && raftMetrics.heartbeat_status.length > 0">
+                            <table class="metrics-table">
+                                <thead>
+                                    <tr>
+                                        <th>Node ID</th>
+                                        <th>Role</th>
+                                        <th>Status</th>
+                                        <th>Heartbeat Sent</th>
+                                        <th>Heartbeat Acked</th>
+                                        <th>Replication Lag</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="member in raftMetrics.cluster_members" :key="'leader-' + member.node_id">
+                                        <tr>
+                                            <td x-text="member.node_id"></td>
+                                            <td>
+                                                <span class="status-badge"
+                                                      :style="'background: ' + (member.is_voter ? 'var(--info)' : 'var(--warning)')"
+                                                      x-text="member.role"></span>
+                                            </td>
+                                            <td x-data="{ hb: raftMetrics.heartbeat_status.find(h => h.node_id === member.node_id) }">
+                                                <span x-show="hb" class="status-badge"
+                                                      :style="hb && ('background: ' + (hb.is_responsive ? 'var(--success)' : 'var(--error)'))"
+                                                      x-text="hb ? (hb.is_responsive ? 'Responsive' : 'Unresponsive') : 'N/A'"></span>
+                                                <span x-show="!hb" style="color: var(--text-secondary);">N/A</span>
+                                            </td>
+                                            <td x-data="{ hb: raftMetrics.heartbeat_status.find(h => h.node_id === member.node_id) }"
+                                                x-text="hb && hb.last_heartbeat_sent_secs_ago !== null ? hb.last_heartbeat_sent_secs_ago.toFixed(2) + 's ago' : 'N/A'"></td>
+                                            <td x-data="{ hb: raftMetrics.heartbeat_status.find(h => h.node_id === member.node_id) }"
+                                                x-text="hb && hb.last_heartbeat_acked_secs_ago !== null ? hb.last_heartbeat_acked_secs_ago.toFixed(2) + 's ago' : 'Never'"></td>
+                                            <td x-data="{ hb: raftMetrics.heartbeat_status.find(h => h.node_id === member.node_id) }"
+                                                x-text="hb ? formatNumber(hb.replication_lag) : 'N/A'"></td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Follower view: show basic member info only -->
+                        <div class="table-container" x-show="!raftMetrics.heartbeat_status || raftMetrics.heartbeat_status.length === 0">
+                            <table class="metrics-table">
+                                <thead>
+                                    <tr>
+                                        <th>Node ID</th>
+                                        <th>Role</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="member in raftMetrics.cluster_members" :key="'follower-' + member.node_id">
+                                        <tr>
+                                            <td x-text="member.node_id"></td>
+                                            <td>
+                                                <span class="status-badge"
+                                                      :style="'background: ' + (member.is_voter ? 'var(--info)' : 'var(--warning)')"
+                                                      x-text="member.role"></span>
+                                            </td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="metrics-section" x-show="!raftMetrics.cluster_members || raftMetrics.cluster_members.length === 0">
+                        <div class="placeholder">
+                            <p>🗳️ Single-node cluster (no other members)</p>
+                        </div>
+                    </div>
+                </div>
+            </template>
+            <template x-if="!raftMetrics">
+                <div class="placeholder">
+                    <p>🗳️ Raft cluster not configured</p>
+                </div>
+            </template>
+        </div>
     </div>
 
     <div class="connection-status">
@@ -767,6 +902,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 droppedMetrics: 0,
                 config: {},  // System configuration
                 networkStatus: null,  // Network status
+                raftMetrics: null,  // Raft cluster status
                 wsConnected: false,
                 ws: null,
                 components: {},  // Component-based metric discovery
@@ -789,10 +925,12 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     this.fetchComponents();  // Fetch available components
                     this.fetchConfig();  // Fetch configuration
                     this.fetchNetworkStatus();  // Fetch network status
+                    this.fetchRaftMetrics();  // Fetch Raft cluster status
                     this.initGraph();  // Initialize Plotly graph
                     this.startByteRateTracking();  // Start byte rate updates every second
                     this.startComponentRefresh();  // Discover new metrics every 30 seconds
                     this.startNetworkStatusRefresh();  // Refresh network status every 5 seconds
+                    this.startRaftMetricsRefresh();  // Refresh Raft metrics every 3 seconds
                 },
 
                 connectWebSocket() {
@@ -905,6 +1043,32 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     setInterval(() => {
                         this.fetchNetworkStatus();
                     }, 5000);  // 5 seconds
+                },
+
+                async fetchRaftMetrics() {
+                    try {
+                        const response = await fetch('/api/raft/metrics');
+                        if (response.ok) {
+                            const data = await response.json();
+                            if (data && !data.error) {
+                                this.raftMetrics = data;
+                            }
+                        } else if (response.status === 404) {
+                            // Raft endpoint not available (not configured)
+                            this.raftMetrics = null;
+                        }
+                    } catch (e) {
+                        // Silently handle - Raft may not be configured
+                        console.log('Raft metrics not available:', e.message);
+                        this.raftMetrics = null;
+                    }
+                },
+
+                startRaftMetricsRefresh() {
+                    // Refresh Raft metrics every 3 seconds
+                    setInterval(() => {
+                        this.fetchRaftMetrics();
+                    }, 3000);  // 3 seconds
                 },
 
                 startComponentRefresh() {
