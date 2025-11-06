@@ -26,6 +26,15 @@ mod tests {
         should_fail: Arc<RwLock<bool>>,
         operation_count: Arc<AtomicU64>,
         is_leader: Arc<AtomicBool>,
+        event_sender: Arc<
+            Mutex<
+                Vec<
+                    tokio::sync::mpsc::UnboundedSender<
+                        crate::storage_raft_member::types::MetadataChangeEvent,
+                    >,
+                >,
+            >,
+        >,
     }
 
     impl MockRaftMember {
@@ -35,6 +44,7 @@ mod tests {
                 should_fail: Arc::new(RwLock::new(false)),
                 operation_count: Arc::new(AtomicU64::new(0)),
                 is_leader: Arc::new(AtomicBool::new(true)),
+                event_sender: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -44,6 +54,17 @@ mod tests {
 
         async fn set_should_fail(&self, should_fail: bool) {
             *self.should_fail.write().await = should_fail;
+        }
+
+        /// Send a test event to all subscribers
+        async fn send_test_event(
+            &self,
+            event: crate::storage_raft_member::types::MetadataChangeEvent,
+        ) {
+            let senders = self.event_sender.lock().await;
+            for sender in senders.iter() {
+                let _ = sender.send(event.clone());
+            }
         }
     }
 
@@ -136,7 +157,8 @@ mod tests {
         ) -> tokio::sync::mpsc::UnboundedReceiver<
             crate::storage_raft_member::types::MetadataChangeEvent,
         > {
-            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            self.event_sender.lock().await.push(tx);
             rx
         }
 
@@ -1311,5 +1333,180 @@ mod tests {
             }
             _ => panic!("Expected AtomicTransaction operation"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_metadata_changes() {
+        use crate::storage_raft_member::types::{MetadataChange, MetadataChangeEvent};
+
+        let (tx_manager, raft_member, _, _) = create_test_transaction_manager().await;
+
+        // Subscribe to metadata changes
+        let mut rx = tx_manager.subscribe_metadata_changes(None).await;
+
+        // Send a test event
+        let test_event = MetadataChangeEvent {
+            committed_at: SystemTime::now(),
+            log_index: 1,
+            changes: vec![MetadataChange::FileCreated {
+                file_id: FileId::generate(),
+                inode: 12345,
+                path: PathBuf::from("/test/newfile.txt"),
+            }],
+        };
+
+        raft_member.send_test_event(test_event.clone()).await;
+
+        // Verify we received the event
+        let received_event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("Timeout waiting for event")
+            .expect("Channel closed");
+
+        assert_eq!(received_event.log_index, test_event.log_index);
+        assert_eq!(received_event.changes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_subscribers() {
+        use crate::storage_raft_member::types::{MetadataChange, MetadataChangeEvent};
+
+        let (tx_manager, raft_member, _, _) = create_test_transaction_manager().await;
+
+        // Create multiple subscribers
+        let mut rx1 = tx_manager.subscribe_metadata_changes(None).await;
+        let mut rx2 = tx_manager.subscribe_metadata_changes(None).await;
+        let mut rx3 = tx_manager.subscribe_metadata_changes(None).await;
+
+        // Send a test event
+        let test_event = MetadataChangeEvent {
+            committed_at: SystemTime::now(),
+            log_index: 42,
+            changes: vec![MetadataChange::FileDeleted {
+                file_id: FileId::generate(),
+                inode: 54321,
+            }],
+        };
+
+        raft_member.send_test_event(test_event.clone()).await;
+
+        // Verify all subscribers received the event
+        let event1 = tokio::time::timeout(Duration::from_secs(1), rx1.recv())
+            .await
+            .expect("Timeout on rx1")
+            .expect("Channel closed");
+        let event2 = tokio::time::timeout(Duration::from_secs(1), rx2.recv())
+            .await
+            .expect("Timeout on rx2")
+            .expect("Channel closed");
+        let event3 = tokio::time::timeout(Duration::from_secs(1), rx3.recv())
+            .await
+            .expect("Timeout on rx3")
+            .expect("Channel closed");
+
+        assert_eq!(event1.log_index, 42);
+        assert_eq!(event2.log_index, 42);
+        assert_eq!(event3.log_index, 42);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_with_stripe_events() {
+        use crate::storage_raft_member::types::{MetadataChange, MetadataChangeEvent};
+
+        let (tx_manager, raft_member, _, _) = create_test_transaction_manager().await;
+
+        // Subscribe to metadata changes
+        let mut rx = tx_manager.subscribe_metadata_changes(None).await;
+
+        // Send a stripe creation event
+        let file_id = FileId::generate();
+        let stripe_id = StripeId::generate();
+        let test_event = MetadataChangeEvent {
+            committed_at: SystemTime::now(),
+            log_index: 100,
+            changes: vec![MetadataChange::StripeCreated {
+                file_id,
+                stripe_id,
+                offset: 0,
+                size: 1024,
+            }],
+        };
+
+        raft_member.send_test_event(test_event.clone()).await;
+
+        // Verify we received the stripe event
+        let received_event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("Timeout waiting for event")
+            .expect("Channel closed");
+
+        assert_eq!(received_event.log_index, 100);
+        assert_eq!(received_event.changes.len(), 1);
+
+        match &received_event.changes[0] {
+            MetadataChange::StripeCreated {
+                file_id: fid,
+                stripe_id: sid,
+                offset,
+                size,
+            } => {
+                assert_eq!(*fid, file_id);
+                assert_eq!(*sid, stripe_id);
+                assert_eq!(*offset, 0);
+                assert_eq!(*size, 1024);
+            }
+            _ => panic!("Expected StripeCreated event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_subscription_channel_independent() {
+        use crate::storage_raft_member::types::{MetadataChange, MetadataChangeEvent};
+
+        let (tx_manager, raft_member, _, _) = create_test_transaction_manager().await;
+
+        // Create two subscribers
+        let mut rx1 = tx_manager.subscribe_metadata_changes(None).await;
+        let mut rx2 = tx_manager.subscribe_metadata_changes(None).await;
+
+        // Send first event
+        let event1 = MetadataChangeEvent {
+            committed_at: SystemTime::now(),
+            log_index: 1,
+            changes: vec![MetadataChange::FileCreated {
+                file_id: FileId::generate(),
+                inode: 111,
+                path: PathBuf::from("/test/file1.txt"),
+            }],
+        };
+
+        raft_member.send_test_event(event1.clone()).await;
+
+        // Read from rx1 only
+        let _ = rx1.recv().await.expect("rx1 should receive event");
+
+        // Send second event
+        let event2 = MetadataChangeEvent {
+            committed_at: SystemTime::now(),
+            log_index: 2,
+            changes: vec![MetadataChange::FileCreated {
+                file_id: FileId::generate(),
+                inode: 222,
+                path: PathBuf::from("/test/file2.txt"),
+            }],
+        };
+
+        raft_member.send_test_event(event2.clone()).await;
+
+        // rx2 should have both events
+        let rx2_event1 = rx2.recv().await.expect("rx2 should receive first event");
+        let rx2_event2 = rx2.recv().await.expect("rx2 should receive second event");
+
+        assert_eq!(rx2_event1.log_index, 1);
+        assert_eq!(rx2_event2.log_index, 2);
+
+        // rx1 should only have second event
+        let rx1_event2 = rx1.recv().await.expect("rx1 should receive second event");
+        assert_eq!(rx1_event2.log_index, 2);
     }
 }
