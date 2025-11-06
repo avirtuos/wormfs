@@ -62,9 +62,6 @@ pub struct Inner {
     /// Next transaction ID to use
     next_tx_id: AtomicU64,
 
-    /// Metadata change subscribers (deprecated, use state_machine.subscriptions instead)
-    subscribers: RwLock<Vec<SubscriberHandle>>,
-
     /// Cluster manager for automatic failure detection and recovery
     /// Only active on the leader node
     cluster_manager: RwLock<Option<Arc<ClusterManager>>>,
@@ -106,15 +103,6 @@ struct TransactionState {
 
     /// Whether the transaction has been decided (committed or aborted)
     decided: bool,
-}
-
-/// Handle for a metadata change subscriber.
-struct SubscriberHandle {
-    /// Channel to send events to subscriber
-    sender: mpsc::UnboundedSender<MetadataChangeEvent>,
-
-    /// Filter for event types (None = all events)
-    filter: Option<Vec<MetadataChangeType>>,
 }
 
 /// Concrete implementation of StorageRaftMember using OpenRaft.
@@ -173,7 +161,6 @@ impl StorageRaftMemberImpl {
                 current_leader: RwLock::new(None),
                 pending_transactions: RwLock::new(HashMap::new()),
                 next_tx_id: AtomicU64::new(1),
-                subscribers: RwLock::new(Vec::new()),
                 cluster_manager: RwLock::new(None),
                 cluster_event_sender,
                 cluster_event_receiver: RwLock::new(Some(cluster_event_receiver)),
@@ -440,57 +427,6 @@ impl StorageRaftMemberImpl {
         }
 
         info!("ClusterManager event processing task stopped");
-    }
-
-    /// Notify subscribers of a metadata change event.
-    async fn notify_subscribers(&self, event: MetadataChangeEvent) {
-        let subscribers = self.inner.subscribers.read().await;
-
-        for subscriber in subscribers.iter() {
-            // Check if this event matches the subscriber's filter
-            let should_send = if let Some(filter) = &subscriber.filter {
-                event.changes.iter().any(|change| {
-                    let change_type = match change {
-                        super::types::MetadataChange::FileCreated { .. } => {
-                            MetadataChangeType::FileCreated
-                        }
-                        super::types::MetadataChange::FileUpdated { .. } => {
-                            MetadataChangeType::FileUpdated
-                        }
-                        super::types::MetadataChange::FileDeleted { .. } => {
-                            MetadataChangeType::FileDeleted
-                        }
-                        super::types::MetadataChange::DirectoryCreated { .. } => {
-                            MetadataChangeType::DirectoryCreated
-                        }
-                        super::types::MetadataChange::DirectoryDeleted { .. } => {
-                            MetadataChangeType::DirectoryDeleted
-                        }
-                        super::types::MetadataChange::StripeCreated { .. } => {
-                            MetadataChangeType::StripeCreated
-                        }
-                        super::types::MetadataChange::StripeDeleted { .. } => {
-                            MetadataChangeType::StripeDeleted
-                        }
-                        super::types::MetadataChange::ChunkMoved { .. } => {
-                            MetadataChangeType::ChunkMoved
-                        }
-                        super::types::MetadataChange::LockReleased { .. } => {
-                            MetadataChangeType::LockReleased
-                        }
-                    };
-                    filter.contains(&change_type)
-                })
-            } else {
-                true // No filter means all events
-            };
-
-            if should_send {
-                // Non-blocking send - if channel is full or closed, we drop the event
-                // This implements at-most-once delivery semantics
-                let _ = subscriber.sender.send(event.clone());
-            }
-        }
     }
 
     /// Convert OpenRaft metrics to WormFS RaftMetrics.
@@ -1396,15 +1332,5 @@ mod tests {
         let tx_id1 = TxId(1);
         let tx_id2 = TxId(2);
         assert_ne!(tx_id1, tx_id2);
-    }
-
-    #[test]
-    fn test_subscriber_handle_creation() {
-        let (sender, _receiver) = mpsc::unbounded_channel();
-        let handle = SubscriberHandle {
-            sender,
-            filter: Some(vec![MetadataChangeType::FileCreated]),
-        };
-        assert!(handle.filter.is_some());
     }
 }
