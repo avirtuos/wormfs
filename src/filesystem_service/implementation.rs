@@ -1003,36 +1003,87 @@ impl FileSystemServiceImpl {
     /// This should be called once during filesystem mount.
     pub async fn initialize_root(&self) -> Result<(), Error> {
         // Check if root already exists
-        if let Ok(_) = self.metadata_store.get_file_by_inode(ROOT_INODE).await {
-            // Root already exists
-            return Ok(());
+        match self.metadata_store.get_file_by_inode(ROOT_INODE).await {
+            Ok(root) => {
+                // Root exists (likely from migration) - check if ownership needs updating
+                if root.uid != self.config.uid || root.gid != self.config.gid {
+                    tracing::info!(
+                        "Updating root directory ownership from {}:{} to {}:{}",
+                        root.uid,
+                        root.gid,
+                        self.config.uid,
+                        self.config.gid
+                    );
+
+                    // Update metadata with new ownership
+                    let updated_metadata = FileMetadata {
+                        file_type: root.file_type,
+                        size: root.size,
+                        permissions: root.permissions,
+                        uid: self.config.uid,
+                        gid: self.config.gid,
+                        created_at: root.created_at,
+                        modified_at: root.modified_at,
+                        accessed_at: root.accessed_at,
+                        target: root.target,
+                    };
+
+                    self.metadata_store
+                        .update_file(root.file_id, updated_metadata)
+                        .await
+                        .map_err(|e| {
+                            Error::MetadataError(format!(
+                                "Failed to update root directory ownership: {}",
+                                e
+                            ))
+                        })?;
+
+                    tracing::info!(
+                        "Root directory ownership updated to {}:{}",
+                        self.config.uid,
+                        self.config.gid
+                    );
+                } else {
+                    tracing::debug!("Root directory already has correct ownership");
+                }
+                Ok(())
+            }
+            Err(_) => {
+                // Root doesn't exist (shouldn't happen with migration) - create it
+                tracing::warn!(
+                    "Root directory not found, creating with uid={}, gid={}",
+                    self.config.uid,
+                    self.config.gid
+                );
+
+                let root_metadata = FileMetadata {
+                    file_type: crate::metadata_store::FileType::Directory,
+                    size: 0,
+                    permissions: 0o755,
+                    uid: self.config.uid,
+                    gid: self.config.gid,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None, // Directories don't have targets
+                };
+
+                self.metadata_store
+                    .create_file(
+                        super::inode::ROOT_FILE_ID,
+                        Path::new("/"),
+                        ROOT_INODE,
+                        root_metadata,
+                    )
+                    .await
+                    .map_err(|e| {
+                        Error::MetadataError(format!("Failed to create root directory: {}", e))
+                    })?;
+
+                tracing::info!("Created root directory with inode {}", ROOT_INODE);
+                Ok(())
+            }
         }
-
-        // Create root directory
-        let root_metadata = FileMetadata {
-            file_type: crate::metadata_store::FileType::Directory,
-            size: 0,
-            permissions: 0o755,
-            uid: self.config.uid,
-            gid: self.config.gid,
-            created_at: SystemTime::now(),
-            modified_at: SystemTime::now(),
-            accessed_at: SystemTime::now(),
-            target: None, // Directories don't have targets
-        };
-
-        self.metadata_store
-            .create_file(
-                super::inode::ROOT_FILE_ID,
-                Path::new("/"),
-                ROOT_INODE,
-                root_metadata,
-            )
-            .await
-            .map_err(|e| Error::MetadataError(format!("Failed to create root directory: {}", e)))?;
-
-        tracing::info!("Initialized root directory with inode {}", ROOT_INODE);
-        Ok(())
     }
 
     /// Get the inode cache for external use (e.g., FuseAdapter).

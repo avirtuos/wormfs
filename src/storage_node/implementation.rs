@@ -229,6 +229,7 @@ impl StorageNodeImpl {
             let mut raft_member = StorageRaftMemberImpl::new(
                 crate::storage_raft_member::types::NodeId(node_id_num),
                 raft_config,
+                metadata_store.clone(),
             )
             .await
             .map_err(|e| Error::ComponentInitFailed {

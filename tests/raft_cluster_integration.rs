@@ -26,6 +26,7 @@ use tracing::{self, info};
 use stub_storage_network::{StubNetworkHub, StubStorageNetworkHandle};
 use wormfs::storage_raft_member::types::{TxId, WormFsOperation};
 use wormfs::storage_raft_member::{NodeId, StorageRaftMember, StorageRaftMemberImpl};
+use wormfs::MetadataStore;
 
 /// Get timeout multiplier for CI environments.
 fn get_timeout_multiplier() -> f64 {
@@ -55,6 +56,17 @@ async fn create_single_node(
     let network_handle = hub.create_handle(node_id);
     network_handle.register().await;
 
+    // Create MetadataStore first (required by Raft)
+    let metadata_config = wormfs::metadata_store::Config {
+        database_path: data_dir.join("metadata.redb"),
+        cache_size_mb: 100,
+        ..Default::default()
+    };
+    let metadata_store =
+        wormfs::metadata_store::factory::MetadataStoreFactory::create_concrete(metadata_config)
+            .await?;
+    metadata_store.initialize_schema().await?;
+
     // Create Raft configuration with stub network
     let raft_config = wormfs::storage_raft_member::Config {
         heartbeat_interval: Duration::from_millis(500),
@@ -83,9 +95,13 @@ async fn create_single_node(
         cluster_manager_preset: wormfs::storage_raft_member::ClusterManagerPreset::Moderate,
     };
 
-    // Create Raft instance
-    let raft_node =
-        <StorageRaftMemberImpl as StorageRaftMember>::new(NodeId(node_id), raft_config).await?;
+    // Create Raft instance (passing shared MetadataStore)
+    let raft_node = <StorageRaftMemberImpl as StorageRaftMember>::new(
+        NodeId(node_id),
+        raft_config,
+        metadata_store,
+    )
+    .await?;
 
     // Register Raft handler with stub network
     network_handle
@@ -140,6 +156,19 @@ impl RaftTestCluster {
             // Get the real PeerId for this node
             let peer_id = network_handle.peer_id_string();
 
+            // Create MetadataStore first (required by Raft)
+            let metadata_config = wormfs::metadata_store::Config {
+                database_path: data_dir.join("metadata.redb"),
+                cache_size_mb: 100,
+                ..Default::default()
+            };
+            let metadata_store =
+                wormfs::metadata_store::factory::MetadataStoreFactory::create_concrete(
+                    metadata_config,
+                )
+                .await?;
+            metadata_store.initialize_schema().await?;
+
             // Create Raft configuration with stub network
             let raft_config = wormfs::storage_raft_member::Config {
                 heartbeat_interval: Duration::from_millis(500),
@@ -168,10 +197,13 @@ impl RaftTestCluster {
                 cluster_manager_preset: wormfs::storage_raft_member::ClusterManagerPreset::Moderate,
             };
 
-            // Create Raft instance
-            let raft_node =
-                <StorageRaftMemberImpl as StorageRaftMember>::new(NodeId(node_id), raft_config)
-                    .await?;
+            // Create Raft instance (passing shared MetadataStore)
+            let raft_node = <StorageRaftMemberImpl as StorageRaftMember>::new(
+                NodeId(node_id),
+                raft_config,
+                metadata_store,
+            )
+            .await?;
 
             // Register Raft handler with stub network
             network_handle
@@ -236,6 +268,19 @@ impl RaftTestCluster {
             // Get the real PeerId for this node
             let peer_id = network_handle.peer_id_string();
 
+            // Create MetadataStore first (required by Raft)
+            let metadata_config = wormfs::metadata_store::Config {
+                database_path: data_dir.join("metadata.redb"),
+                cache_size_mb: 100,
+                ..Default::default()
+            };
+            let metadata_store =
+                wormfs::metadata_store::factory::MetadataStoreFactory::create_concrete(
+                    metadata_config,
+                )
+                .await?;
+            metadata_store.initialize_schema().await?;
+
             // Create Raft configuration with ClusterManager enabled
             let raft_config = wormfs::storage_raft_member::Config {
                 heartbeat_interval: Duration::from_millis(500),
@@ -264,10 +309,13 @@ impl RaftTestCluster {
                 cluster_manager_preset: preset,
             };
 
-            // Create Raft instance
-            let raft_node =
-                <StorageRaftMemberImpl as StorageRaftMember>::new(NodeId(node_id), raft_config)
-                    .await?;
+            // Create Raft instance (passing shared MetadataStore)
+            let raft_node = <StorageRaftMemberImpl as StorageRaftMember>::new(
+                NodeId(node_id),
+                raft_config,
+                metadata_store,
+            )
+            .await?;
 
             // Register Raft handler with stub network
             network_handle
@@ -642,9 +690,24 @@ impl RaftTestCluster {
             cluster_manager_preset: wormfs::storage_raft_member::ClusterManagerPreset::Moderate,
         };
 
+        // Create MetadataStore first (required by Raft)
+        let metadata_config = wormfs::metadata_store::Config {
+            database_path: data_dir.join("metadata.redb"),
+            cache_size_mb: 100,
+            ..Default::default()
+        };
+        let metadata_store =
+            wormfs::metadata_store::factory::MetadataStoreFactory::create_concrete(metadata_config)
+                .await?;
+        metadata_store.initialize_schema().await?;
+
         // Create new Raft instance - it will load existing state from storage
-        let raft_node =
-            <StorageRaftMemberImpl as StorageRaftMember>::new(NodeId(node_id), raft_config).await?;
+        let raft_node = <StorageRaftMemberImpl as StorageRaftMember>::new(
+            NodeId(node_id),
+            raft_config,
+            metadata_store,
+        )
+        .await?;
 
         // Register Raft handler with stub network
         network_handle
@@ -845,9 +908,24 @@ impl RaftTestCluster {
             cluster_manager_preset: preset,
         };
 
+        // Create MetadataStore first (required by Raft)
+        let metadata_config = wormfs::metadata_store::Config {
+            database_path: data_dir.join("metadata.redb"),
+            cache_size_mb: 100,
+            ..Default::default()
+        };
+        let metadata_store =
+            wormfs::metadata_store::factory::MetadataStoreFactory::create_concrete(metadata_config)
+                .await?;
+        metadata_store.initialize_schema().await?;
+
         // Create new Raft instance - it will load existing state from storage
-        let raft_node =
-            <StorageRaftMemberImpl as StorageRaftMember>::new(NodeId(node_id), raft_config).await?;
+        let raft_node = <StorageRaftMemberImpl as StorageRaftMember>::new(
+            NodeId(node_id),
+            raft_config,
+            metadata_store,
+        )
+        .await?;
 
         // Register Raft handler with stub network
         network_handle
@@ -1208,9 +1286,28 @@ async fn test_vote_persistence_across_restart() {
             cluster_manager_preset: wormfs::storage_raft_member::ClusterManagerPreset::Moderate,
         };
 
-        let mut node1 = <StorageRaftMemberImpl as StorageRaftMember>::new(NodeId(1), raft_config)
+        // Create MetadataStore first (required by Raft)
+        let metadata_config = wormfs::metadata_store::Config {
+            database_path: data_dir.join("metadata.redb"),
+            cache_size_mb: 100,
+            ..Default::default()
+        };
+        let metadata_store =
+            wormfs::metadata_store::factory::MetadataStoreFactory::create_concrete(metadata_config)
+                .await
+                .expect("Failed to create metadata store");
+        metadata_store
+            .initialize_schema()
             .await
-            .expect("Failed to create node");
+            .expect("Failed to initialize metadata schema");
+
+        let mut node1 = <StorageRaftMemberImpl as StorageRaftMember>::new(
+            NodeId(1),
+            raft_config,
+            metadata_store,
+        )
+        .await
+        .expect("Failed to create node");
 
         network_handle
             .register_raft_handler_internal(Arc::new(node1.clone()))

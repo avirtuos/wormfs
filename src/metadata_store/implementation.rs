@@ -253,6 +253,7 @@ impl MetadataStoreImpl {
             include_str!("migrations/002_indexes.sql").to_string(),
             include_str!("migrations/003_inode_management.sql").to_string(),
             include_str!("migrations/004_uuid_migration.sql").to_string(),
+            include_str!("migrations/005_root_directory.sql").to_string(),
         ];
 
         self.inner

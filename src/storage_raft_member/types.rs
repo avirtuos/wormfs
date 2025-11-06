@@ -423,6 +423,7 @@ pub enum WormFsOperation {
 pub enum MetadataOperation {
     /// Create a new file
     FileCreate {
+        file_id: FileId,
         path: PathBuf,
         inode: u64,
         metadata: FileMetadata,

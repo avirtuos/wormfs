@@ -76,6 +76,7 @@ mod tests {
         async fn new(
             _node_id: NodeId,
             _config: crate::storage_raft_member::Config,
+            _metadata_store: crate::metadata_store::MetadataStoreImpl,
         ) -> Result<Self, RaftError>
         where
             Self: Sized,
@@ -83,7 +84,7 @@ mod tests {
             Ok(Self::new())
         }
 
-        async fn initialize(&mut self, _peers: Vec<NodeId>) -> Result<(), RaftError> {
+        async fn initialize(&mut self, _peers: Vec<(NodeId, String)>) -> Result<(), RaftError> {
             Ok(())
         }
 
@@ -284,6 +285,7 @@ mod tests {
             .expect("Failed to begin transaction");
 
         let operation = Operation::CreateFile {
+            file_id: FileId::generate(),
             path: PathBuf::from("/test/file.txt"),
             inode: 12345,
             metadata: FileMetadata {
@@ -316,6 +318,7 @@ mod tests {
 
         // Add first operation
         let op1 = Operation::CreateFile {
+            file_id: FileId::generate(),
             path: PathBuf::from("/test/file1.txt"),
             inode: 12345,
             metadata: FileMetadata {
@@ -338,6 +341,7 @@ mod tests {
 
         // Add second operation
         let op2 = Operation::CreateFile {
+            file_id: FileId::generate(),
             path: PathBuf::from("/test/file2.txt"),
             inode: 12346,
             metadata: FileMetadata {
@@ -369,6 +373,7 @@ mod tests {
             .expect("Failed to begin transaction");
 
         let operation = Operation::CreateFile {
+            file_id: FileId::generate(),
             path: PathBuf::from("/test/file.txt"),
             inode: 12345,
             metadata: FileMetadata {
@@ -426,6 +431,7 @@ mod tests {
             .expect("Failed to begin transaction");
 
         let operation = Operation::CreateFile {
+            file_id: FileId::generate(),
             path: PathBuf::from("/test/file.txt"),
             inode: 12345,
             metadata: FileMetadata {
@@ -473,6 +479,7 @@ mod tests {
 
         let fake_tx_id = TxId(99999);
         let operation = Operation::CreateFile {
+            file_id: FileId::generate(),
             path: PathBuf::from("/test/file.txt"),
             inode: 12345,
             metadata: FileMetadata {
@@ -589,6 +596,7 @@ mod tests {
             .expect("Failed to begin transaction");
 
         let operation = Operation::CreateFile {
+            file_id: FileId::generate(),
             path: PathBuf::from("/test/file.txt"),
             inode: 12345,
             metadata: FileMetadata {
@@ -638,6 +646,7 @@ mod tests {
                     .expect("Failed to begin transaction");
 
                 let operation = Operation::CreateFile {
+                    file_id: FileId::generate(),
                     path: PathBuf::from(format!("/test/file{}.txt", i)),
                     inode: 12345 + i as u64,
                     metadata: FileMetadata {
@@ -698,6 +707,7 @@ mod tests {
             .add_operation(
                 tx_id,
                 Operation::CreateFile {
+                    file_id: FileId::generate(),
                     path: PathBuf::from("/test/file1.txt"),
                     inode: 12345,
                     metadata: FileMetadata {
@@ -721,6 +731,7 @@ mod tests {
             .add_operation(
                 tx_id,
                 Operation::CreateFile {
+                    file_id: FileId::generate(),
                     path: PathBuf::from("/test/file2.txt"),
                     inode: 12346,
                     metadata: FileMetadata {
@@ -744,6 +755,7 @@ mod tests {
             .add_operation(
                 tx_id,
                 Operation::CreateFile {
+                    file_id: FileId::generate(),
                     path: PathBuf::from("/test/file3.txt"),
                     inode: 12347,
                     metadata: FileMetadata {
