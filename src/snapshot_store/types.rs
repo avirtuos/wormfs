@@ -55,11 +55,12 @@ impl Default for RetentionPolicy {
 }
 
 /// Compression algorithm for snapshots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CompressionAlgorithm {
     /// No compression
     None,
-    // Future: Gzip, Zstd, etc.
+    /// Zstd compression with specified level (1-22)
+    Zstd { level: i32 },
 }
 
 /// Errors that can occur during SnapshotStore operations.
@@ -96,10 +97,18 @@ pub enum Error {
     /// Configuration error
     #[error("Configuration error: {0}")]
     ConfigError(String),
+
+    /// Compression/decompression error
+    #[error("Compression error: {0}")]
+    CompressionError(String),
+
+    /// Serialization error
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
 }
 
 /// Snapshot information structure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotInfo {
     /// Snapshot identifier
     pub snapshot_id: u64,
