@@ -141,3 +141,28 @@ gid = 1000
 
 # Note: Additional mount options (allow_root, allow_other, foreground, etc.)
 # are controlled via command-line flags, not this config file.
+
+# ===== Transaction Manager Configuration =====
+# (Phase 2 feature - requires Raft consensus enabled)
+[transactions]
+# Maximum number of active transactions (default: 1000)
+max_active_transactions = 1000
+
+# Timeout for transaction prepare phase in seconds (default: 30)
+prepare_timeout_secs = 30
+
+# Lock acquisition timeout in seconds (default: 10)
+lock_timeout_secs = 10
+
+# Deadlock detection interval in milliseconds (default: 100)
+# Note: Currently we use timeout-based prevention, not active detection
+deadlock_detection_interval_ms = 100
+
+# Enable subscription system for metadata changes (default: true)
+enable_subscriptions = true
+
+# Maximum number of concurrent subscribers (default: 100)
+max_subscribers = 100
+
+# Interval for cleanup task to check for expired transactions (default: 1 second)
+cleanup_interval_secs = 1

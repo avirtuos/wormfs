@@ -61,7 +61,7 @@ impl TransactionManagerImpl {
         });
 
         // Start cleanup task
-        let cleanup_task = Self::start_cleanup_task(manager.clone(), config.cleanup_interval);
+        let cleanup_task = Self::start_cleanup_task(manager.clone(), config.cleanup_interval());
 
         // Replace the cleanup task handle
         let manager = Arc::new(Self {
@@ -335,9 +335,10 @@ impl TransactionManagerImpl {
 #[async_trait]
 impl TransactionManager for TransactionManagerImpl {
     async fn begin(&self, timeout: Duration) -> Result<TxId> {
-        // Validate timeout
-        if timeout > self.config.max_timeout {
-            return Err(Error::InvalidTimeout(timeout, self.config.max_timeout));
+        // Validate timeout (max is 5 minutes - 300 seconds)
+        let max_timeout = Duration::from_secs(300);
+        if timeout > max_timeout {
+            return Err(Error::InvalidTimeout(timeout, max_timeout));
         }
 
         // Check active transaction limit

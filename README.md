@@ -43,6 +43,13 @@ WormFS is a work in progress that's being developed iteratively following a phas
   - Quorum-safe membership management prevents split-brain during network partitions
   - Structured event logging for observability and audit trails
   - Enabled by default with configurable presets
+- ✅ **TransactionManager**: Distributed transaction support with ACID guarantees
+  - Two-phase commit protocol for atomic metadata operations
+  - Transaction lifecycle management (begin/commit/abort)
+  - Distributed locking with timeout-based deadlock prevention
+  - Metadata change subscription system for real-time event notifications
+  - Configurable transaction limits, timeouts, and subscription settings
+  - Comprehensive tests for ACID properties, isolation, consistency, and concurrency
 - 🚧 **Multi-node cluster formation and leader election** (in progress)
 
 ### Documentation
