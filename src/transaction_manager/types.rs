@@ -1,5 +1,6 @@
 //! Common types for the TransactionManager component.
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -9,29 +10,101 @@ pub use crate::file_store::types::{ChunkId, DiskId, FileId, StripeId};
 pub use crate::storage_raft_member::types::{FileMetadata, MetadataOperation, StoragePolicy, TxId};
 
 /// Configuration for TransactionManager.
-#[derive(Debug, Clone)]
+///
+/// This configuration controls transaction behavior, timeouts, and subscription settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Maximum number of active transactions
+    /// Maximum number of active transactions (default: 1000)
+    #[serde(default = "default_max_active")]
     pub max_active_transactions: usize,
 
-    /// Default timeout for transactions if not specified
-    pub default_timeout: Duration,
+    /// Timeout for transaction prepare phase in seconds (default: 30)
+    #[serde(default = "default_prepare_timeout")]
+    pub prepare_timeout_secs: u64,
 
-    /// Maximum timeout allowed for any transaction
-    pub max_timeout: Duration,
+    /// Lock acquisition timeout in seconds (default: 10)
+    #[serde(default = "default_lock_timeout")]
+    pub lock_timeout_secs: u64,
 
-    /// Interval for cleanup task to check for expired transactions
-    pub cleanup_interval: Duration,
+    /// Deadlock detection interval in milliseconds (default: 100)
+    /// Note: Currently we use timeout-based prevention, not active detection
+    #[serde(default = "default_deadlock_detection_interval")]
+    pub deadlock_detection_interval_ms: u64,
+
+    /// Enable subscription system for metadata changes (default: true)
+    #[serde(default = "default_enable_subscriptions")]
+    pub enable_subscriptions: bool,
+
+    /// Maximum number of concurrent subscribers (default: 100)
+    #[serde(default = "default_max_subscribers")]
+    pub max_subscribers: usize,
+
+    /// Interval for cleanup task to check for expired transactions in seconds (default: 1)
+    #[serde(default = "default_cleanup_interval")]
+    pub cleanup_interval_secs: u64,
+}
+
+fn default_max_active() -> usize {
+    1000
+}
+
+fn default_prepare_timeout() -> u64 {
+    30
+}
+
+fn default_lock_timeout() -> u64 {
+    10
+}
+
+fn default_deadlock_detection_interval() -> u64 {
+    100
+}
+
+fn default_enable_subscriptions() -> bool {
+    true
+}
+
+fn default_max_subscribers() -> usize {
+    100
+}
+
+fn default_cleanup_interval() -> u64 {
+    1
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            max_active_transactions: 1000,
-            default_timeout: Duration::from_secs(30),
-            max_timeout: Duration::from_secs(300),
-            cleanup_interval: Duration::from_secs(1),
+            max_active_transactions: default_max_active(),
+            prepare_timeout_secs: default_prepare_timeout(),
+            lock_timeout_secs: default_lock_timeout(),
+            deadlock_detection_interval_ms: default_deadlock_detection_interval(),
+            enable_subscriptions: default_enable_subscriptions(),
+            max_subscribers: default_max_subscribers(),
+            cleanup_interval_secs: default_cleanup_interval(),
         }
+    }
+}
+
+impl Config {
+    /// Get the prepare timeout as a Duration
+    pub fn prepare_timeout(&self) -> Duration {
+        Duration::from_secs(self.prepare_timeout_secs)
+    }
+
+    /// Get the lock timeout as a Duration
+    pub fn lock_timeout(&self) -> Duration {
+        Duration::from_secs(self.lock_timeout_secs)
+    }
+
+    /// Get the cleanup interval as a Duration
+    pub fn cleanup_interval(&self) -> Duration {
+        Duration::from_secs(self.cleanup_interval_secs)
+    }
+
+    /// Get the deadlock detection interval as a Duration
+    pub fn deadlock_detection_interval(&self) -> Duration {
+        Duration::from_millis(self.deadlock_detection_interval_ms)
     }
 }
 

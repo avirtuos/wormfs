@@ -231,9 +231,12 @@ mod tests {
 
         let config = Config {
             max_active_transactions: 100,
-            default_timeout: Duration::from_secs(30),
-            max_timeout: Duration::from_secs(300),
-            cleanup_interval: Duration::from_secs(60),
+            prepare_timeout_secs: 30,
+            lock_timeout_secs: 10,
+            deadlock_detection_interval_ms: 100,
+            enable_subscriptions: true,
+            max_subscribers: 100,
+            cleanup_interval_secs: 60,
         };
 
         let tx_manager = TransactionManagerImpl::new(
