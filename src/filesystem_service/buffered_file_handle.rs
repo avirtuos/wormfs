@@ -1788,7 +1788,7 @@ mod tests {
         let raft_client: Arc<dyn RaftClient> = Arc::new(RaftClientImpl::new(raft_stub));
 
         let file_id = FileId::new(Uuid::new_v4());
-        let inode = 1;
+        let inode = 100; // Use inode 100 (inode 1 is reserved for root directory)
         let attributes = FileAttr {
             ino: inode,
             size: 0,

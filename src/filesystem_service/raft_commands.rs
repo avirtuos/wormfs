@@ -1119,10 +1119,11 @@ mod tests {
             accessed_at: SystemTime::now(),
             target: None, // Not a symlink
         };
-        metadata_store
+
+        // Try to create root, but ignore error if it already exists (from migration)
+        let _ = metadata_store
             .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
-            .await
-            .expect("Failed to create root");
+            .await;
     }
 
     #[tokio::test]
@@ -1227,10 +1228,10 @@ mod tests {
             accessed_at: SystemTime::now(),
             target: None, // Not a symlink
         };
-        metadata_store
+        // Ignore error if root already exists (from migration)
+        let _ = metadata_store
             .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
-            .await
-            .expect("Failed to create root");
+            .await;
 
         // Create a regular file
         let file_metadata = FileMetadata {
@@ -1300,10 +1301,10 @@ mod tests {
             accessed_at: SystemTime::now(),
             target: None, // Not a symlink
         };
-        metadata_store
+        // Ignore error if root already exists (from migration)
+        let _ = metadata_store
             .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
-            .await
-            .expect("Failed to create root");
+            .await;
 
         // Create a symlink
         let symlink_metadata = FileMetadata {
@@ -1371,10 +1372,10 @@ mod tests {
             accessed_at: SystemTime::now(),
             target: None, // Not a symlink
         };
-        metadata_store
+        // Ignore error if root already exists (from migration)
+        let _ = metadata_store
             .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
-            .await
-            .expect("Failed to create root");
+            .await;
 
         // Try to delete a non-existent file
         let stub = StorageRaftMemberStub::new(metadata_store);
@@ -1420,10 +1421,10 @@ mod tests {
             accessed_at: SystemTime::now(),
             target: None, // Not a symlink
         };
-        metadata_store
+        // Ignore error if root already exists (from migration)
+        let _ = metadata_store
             .create_file(FileId::generate(), Path::new("/"), 1, root_metadata)
-            .await
-            .expect("Failed to create root");
+            .await;
 
         // Create a file with data
         let file_metadata = FileMetadata {

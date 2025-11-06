@@ -472,6 +472,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         let mut raft_member = StorageRaftMemberImpl::new(
             crate::storage_raft_member::types::NodeId(node_id_num),
             raft_config,
+            metadata_store.clone(),
         )
         .await
         .map_err(|e| Error::Internal(format!("Failed to create StorageRaftMember: {}", e)))?;

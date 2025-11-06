@@ -730,6 +730,9 @@ mod tests {
         std::fs::create_dir_all(&snapshot_dir).expect("Failed to create snapshot dir");
         let state_machine = WormFsStateMachine::new(metadata_store.clone(), snapshot_dir.clone());
 
+        // Get a handle to the state machine's inner before it's consumed by Raft
+        let state_machine_inner = state_machine.inner_handle();
+
         // Create minimal Raft config
         let raft_config = openraft::Config {
             election_timeout_min: 150,
@@ -796,6 +799,7 @@ mod tests {
             node_id,
             config,
             Arc::new(raft),
+            state_machine_inner,
             heartbeat_sent,
             heartbeat_acked,
         ));

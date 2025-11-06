@@ -93,6 +93,8 @@ impl TransactionBatch {
 pub enum Operation {
     /// Create a new file
     CreateFile {
+        /// Unique file identifier (caller should pre-generate using FileId::generate())
+        file_id: FileId,
         /// Path where the file should be created
         path: PathBuf,
         /// Inode number for the file
@@ -195,11 +197,13 @@ impl Operation {
     pub fn to_metadata_operation(self) -> MetadataOperation {
         match self {
             Operation::CreateFile {
+                file_id,
                 path,
                 inode,
                 metadata,
                 policy,
             } => MetadataOperation::FileCreate {
+                file_id,
                 path,
                 inode,
                 metadata,

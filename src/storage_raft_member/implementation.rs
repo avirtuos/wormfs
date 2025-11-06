@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace};
 
-use crate::metadata_store::MetadataStoreFactory;
+use crate::metadata_store::MetadataStoreImpl;
 use crate::transaction_log_store::{TransactionLogConfig, TransactionLogStoreImpl};
 
 use super::cluster_manager::{ClusterEvent, ClusterManager, ClusterManagerConfig};
@@ -46,6 +46,9 @@ pub struct Inner {
     /// The OpenRaft instance
     pub raft: Arc<Raft<WormFsTypeConfig>>,
 
+    /// The state machine inner (for accessing subscriptions)
+    state_machine_inner: Arc<RwLock<super::state_machine::StateMachineInner>>,
+
     /// Whether this node is currently the leader
     pub is_leader: AtomicBool,
 
@@ -59,7 +62,7 @@ pub struct Inner {
     /// Next transaction ID to use
     next_tx_id: AtomicU64,
 
-    /// Metadata change subscribers
+    /// Metadata change subscribers (deprecated, use state_machine.subscriptions instead)
     subscribers: RwLock<Vec<SubscriberHandle>>,
 
     /// Cluster manager for automatic failure detection and recovery
@@ -147,6 +150,7 @@ impl StorageRaftMemberImpl {
         node_id: NodeId,
         config: Config,
         raft: Arc<Raft<WormFsTypeConfig>>,
+        state_machine_inner: Arc<RwLock<super::state_machine::StateMachineInner>>,
         heartbeat_sent: Arc<RwLock<HashMap<NodeId, std::time::Instant>>>,
         heartbeat_acked: Arc<RwLock<HashMap<NodeId, std::time::Instant>>>,
     ) -> Self {
@@ -164,6 +168,7 @@ impl StorageRaftMemberImpl {
                 node_id,
                 config,
                 raft,
+                state_machine_inner,
                 is_leader: AtomicBool::new(false),
                 current_leader: RwLock::new(None),
                 pending_transactions: RwLock::new(HashMap::new()),
@@ -576,7 +581,11 @@ impl StorageRaftMember for StorageRaftMemberImpl {
     type Operation = WormFsOperation;
     type OperationResult = ();
 
-    async fn new(node_id: NodeId, config: Config) -> Result<Self, Error>
+    async fn new(
+        node_id: NodeId,
+        config: Config,
+        metadata_store: MetadataStoreImpl,
+    ) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -602,28 +611,8 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         let log_store = TransactionLogStoreImpl::new(log_config)
             .map_err(|e| Error::StorageError(format!("Failed to open transaction log: {:?}", e)))?;
 
-        // Create the MetadataStore
-        info!("Opening metadata store at {:?}", config.metadata_db_path);
-        let metadata_config = crate::metadata_store::Config {
-            database_path: config.metadata_db_path.clone(),
-            read_pool_size: 8,
-            enable_wal: true,
-            cache_size_mb: 10,
-            enable_foreign_keys: true,
-            synchronous: crate::metadata_store::types::SynchronousMode::Normal,
-            transaction_isolation: crate::metadata_store::types::IsolationLevel::Serializable,
-            enable_prepared_statements: true,
-            read_pool_timeout_secs: 30,
-            stripe_cache_size_mb: 64,
-            stripe_cache_ttl_secs: 10,
-            stripe_cache_tti_secs: 5,
-            chunk_cache_size_mb: 64,
-            chunk_cache_ttl_secs: 10,
-            chunk_cache_tti_secs: 5,
-        };
-        let metadata_store = MetadataStoreFactory::create_concrete(metadata_config)
-            .await
-            .map_err(|e| Error::StorageError(format!("Failed to open metadata store: {:?}", e)))?;
+        // Use the external MetadataStore passed in
+        info!("Using external metadata store (already initialized by caller)");
 
         // Create shared timing trackers for heartbeat monitoring
         let heartbeat_sent = Arc::new(RwLock::new(HashMap::new()));
@@ -633,6 +622,10 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         let log_storage = RaftLogStorageAdapter::new(log_store);
         let state_machine =
             WormFsStateMachine::new(metadata_store, config.snapshot_directory.clone());
+
+        // Get a handle to the state machine's inner for subscription access
+        let state_machine_inner = state_machine.inner_handle();
+
         let network_factory = WormFsNetworkFactory::new(
             storage_network,
             heartbeat_sent.clone(),
@@ -675,6 +668,7 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             node_id,
             config,
             raft.clone(),
+            state_machine_inner,
             heartbeat_sent,
             heartbeat_acked,
         );
@@ -724,10 +718,11 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         Ok(impl_instance)
     }
 
-    async fn initialize(&mut self, peers: Vec<NodeId>) -> Result<(), Error> {
+    async fn initialize(&mut self, peers: Vec<(NodeId, String)>) -> Result<(), Error> {
         info!(
-            "Initializing Raft for node {:?} with peers: {:?}",
-            self.inner.node_id, peers
+            "Initializing Raft for node {:?} with {} peers",
+            self.inner.node_id,
+            peers.len()
         );
 
         // Check if already initialized
@@ -803,23 +798,61 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             info!("Single-node cluster initialization complete");
             Ok(())
         } else {
-            // Multi-node cluster: joining an existing cluster
-            //
-            // NOTE: This requires more design work. The current interface only provides NodeIds,
-            // but we need WormFsNode information (peer_ids) to construct the membership.
-            //
-            // Possible approaches:
-            // 1. Change the interface to pass full node information (NodeId + PeerId)
-            // 2. Have the new node wait to be added via add_node() by the leader
-            // 3. Add a separate method for querying node information from peers
-            //
-            // For now, we return an error indicating this is not yet implemented.
-            Err(Error::ConfigError(
-                "Multi-node cluster initialization not yet implemented. \
-                 Please initialize as a single-node cluster first, then use \
-                 add_node() to add additional nodes."
-                    .to_string(),
-            ))
+            // Multi-node cluster: initialize all nodes together
+            info!(
+                "Creating multi-node cluster for node {:?} with {} total members",
+                self.inner.node_id,
+                peers.len()
+            );
+
+            // Build membership from peer list
+            let mut members = std::collections::BTreeMap::new();
+            for (node_id, peer_id) in peers {
+                let node = super::raft_config::WormFsNode {
+                    peer_id: peer_id.clone(),
+                    metadata: Some(super::raft_config::NodeMetadata {
+                        name: Some(format!("node-{}", node_id.as_u64())),
+                        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                    }),
+                };
+                members.insert(node_id, node);
+            }
+
+            debug!("Calling raft.initialize() with {} members", members.len());
+
+            let init_result = self.inner.raft.initialize(members).await;
+
+            match &init_result {
+                Ok(_) => {
+                    debug!("raft.initialize() returned Ok");
+                    info!(
+                        "Successfully initialized multi-node cluster for node {:?}",
+                        self.inner.node_id
+                    );
+                }
+                Err(e) => {
+                    debug!("raft.initialize() returned Err: {:?}", e);
+                }
+            }
+
+            init_result
+                .map_err(|e| Error::RaftError(format!("Failed to initialize Raft: {:?}", e)))?;
+
+            // Give the Raft core task time to process the initialization
+            debug!("Waiting for Raft core to process initialization...");
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // Check state after initialization
+            let metrics_after_init = self.inner.raft.metrics().borrow().clone();
+            debug!(
+                "State after raft.initialize() + delay: state={:?}, term={}, current_leader={:?}",
+                metrics_after_init.state,
+                metrics_after_init.current_term,
+                metrics_after_init.current_leader
+            );
+
+            info!("Multi-node cluster initialization complete");
+            Ok(())
         }
     }
 
@@ -1094,14 +1127,31 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         &self,
         filter: Option<Vec<MetadataChangeType>>,
     ) -> tokio::sync::mpsc::UnboundedReceiver<MetadataChangeEvent> {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        use super::state_machine::Subscription;
 
-        let subscriber = SubscriberHandle { sender, filter };
+        // Create a broadcast channel for this subscription
+        let capacity = 100;
+        let (sender, receiver) = tokio::sync::broadcast::channel(capacity);
 
-        let mut subscribers = self.inner.subscribers.write().await;
-        subscribers.push(subscriber);
+        // Add subscription to the state machine's subscription list
+        let mut inner = self.inner.state_machine_inner.write().await;
+        inner.subscriptions.push(Subscription { sender, filter });
 
-        receiver
+        // Create an unbounded channel to forward events to (for compatibility with existing API)
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        // Spawn a task to forward events from broadcast to unbounded
+        let mut broadcast_rx = receiver;
+        tokio::spawn(async move {
+            while let Ok(event) = broadcast_rx.recv().await {
+                if tx.send(event).is_err() {
+                    // Receiver dropped, exit the forwarding task
+                    break;
+                }
+            }
+        });
+
+        rx
     }
 
     #[tracing::instrument(skip(self, request), fields(node_id = %self.inner.node_id.0))]

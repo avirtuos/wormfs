@@ -125,30 +125,37 @@ pub trait StorageRaftMember: Send + Sync {
     ///
     /// * `node_id` - Unique identifier for this node
     /// * `config` - Raft configuration (timeouts, log settings, etc.)
+    /// * `metadata_store` - External MetadataStore instance to use for state machine
     ///
     /// # Returns
     ///
     /// A new RaftMember instance ready to join or create a cluster.
-    async fn new(node_id: NodeId, config: Config) -> Result<Self, Error>
+    async fn new(
+        node_id: NodeId,
+        config: Config,
+        metadata_store: crate::metadata_store::MetadataStoreImpl,
+    ) -> Result<Self, Error>
     where
         Self: Sized;
 
     /// Initialize Raft and join or create a cluster.
     ///
     /// If `peers` is empty, this node becomes the initial leader of a new cluster.
-    /// Otherwise, it attempts to join the existing cluster formed by the peers.
+    /// Otherwise, all nodes in the list (including this node) are initialized as
+    /// members of the cluster. Each peer tuple contains (NodeId, peer_id_string)
+    /// where peer_id is the libp2p PeerId for network communication.
     ///
     /// # Arguments
     ///
-    /// * `peers` - List of peer node IDs to form/join cluster with
+    /// * `peers` - List of (NodeId, peer_id_string) tuples for all cluster members
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Unable to contact any peers (when joining)
     /// - Cluster membership cannot be established
     /// - Local state is incompatible with cluster state
-    async fn initialize(&mut self, peers: Vec<NodeId>) -> Result<(), Error>;
+    /// - Invalid peer_id format
+    async fn initialize(&mut self, peers: Vec<(NodeId, String)>) -> Result<(), Error>;
 
     /// Propose a metadata write operation through Raft consensus.
     ///
