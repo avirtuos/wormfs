@@ -510,6 +510,17 @@ impl TransactionManager for TransactionManagerImpl {
         let transactions = self.active_transactions.read().await;
         transactions.len()
     }
+
+    async fn subscribe_metadata_changes(
+        &self,
+        filter: Option<Vec<crate::storage_raft_member::types::MetadataChangeType>>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::storage_raft_member::types::MetadataChangeEvent>
+    {
+        use crate::storage_raft_member::StorageRaftMember;
+
+        // Forward the subscription request to the underlying Raft member
+        self.raft_member.subscribe_metadata_changes(filter).await
+    }
 }
 
 impl Drop for TransactionManagerImpl {

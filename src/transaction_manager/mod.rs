@@ -282,6 +282,59 @@ pub trait TransactionManager: Send + Sync {
     ///
     /// The number of active transactions
     async fn active_count(&self) -> usize;
+
+    /// Subscribe to metadata change events.
+    ///
+    /// Returns a channel receiver that will receive notifications when metadata changes
+    /// are committed through the Raft state machine. This allows applications to react
+    /// to filesystem changes in real-time.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Optional list of event types to receive. If None, all events are received.
+    ///
+    /// # Returns
+    ///
+    /// An unbounded receiver channel for `MetadataChangeEvent`.
+    ///
+    /// # Notes
+    ///
+    /// - Events are sent asynchronously and do not block transaction commits
+    /// - Slow subscribers may experience channel capacity issues
+    /// - At-most-once delivery semantics (events may be missed if channel is full)
+    /// - The receiver should be consumed in a loop to prevent memory growth
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// # async fn example(tx_manager: std::sync::Arc<dyn wormfs::TransactionManager>) -> Result<(), Box<dyn std::error::Error>> {
+    /// use wormfs::storage_raft_member::types::{MetadataChangeType, MetadataChangeEvent};
+    ///
+    /// // Subscribe to all events
+    /// let mut rx = tx_manager.subscribe_metadata_changes(None).await;
+    ///
+    /// // Or subscribe to specific event types
+    /// let mut rx = tx_manager.subscribe_metadata_changes(Some(vec![
+    ///     MetadataChangeType::FileCreated,
+    ///     MetadataChangeType::FileDeleted,
+    /// ])).await;
+    ///
+    /// // Process events
+    /// tokio::spawn(async move {
+    ///     while let Some(event) = rx.recv().await {
+    ///         println!("Metadata changed at log index {}", event.log_index);
+    ///         for change in event.changes {
+    ///             // Handle each change...
+    ///         }
+    ///     }
+    /// });
+    /// # Ok(())
+    /// # }
+    /// ```
+    async fn subscribe_metadata_changes(
+        &self,
+        filter: Option<Vec<crate::storage_raft_member::types::MetadataChangeType>>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::storage_raft_member::types::MetadataChangeEvent>;
 }
 
 /// Type alias for shared TransactionManager trait object.
