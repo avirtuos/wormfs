@@ -546,8 +546,12 @@ impl StorageRaftMember for StorageRaftMemberImpl {
 
         // Create the adapters
         let log_storage = RaftLogStorageAdapter::new(log_store);
-        let state_machine =
-            WormFsStateMachine::new(metadata_store, config.snapshot_directory.clone());
+        let state_machine = WormFsStateMachine::new_with_config(
+            metadata_store,
+            config.snapshot_directory.clone(),
+            config.enable_snapshot_compression,
+            config.snapshot_compression_level,
+        );
 
         // Get a handle to the state machine's inner for subscription access
         let state_machine_inner = state_machine.inner_handle();
