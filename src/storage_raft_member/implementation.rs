@@ -59,9 +59,6 @@ pub struct Inner {
     /// Maps transaction ID to transaction state
     pending_transactions: RwLock<HashMap<TxId, TransactionState>>,
 
-    /// Next transaction ID to use
-    next_tx_id: AtomicU64,
-
     /// Cluster manager for automatic failure detection and recovery
     /// Only active on the leader node
     cluster_manager: RwLock<Option<Arc<ClusterManager>>>,
@@ -160,7 +157,6 @@ impl StorageRaftMemberImpl {
                 is_leader: AtomicBool::new(false),
                 current_leader: RwLock::new(None),
                 pending_transactions: RwLock::new(HashMap::new()),
-                next_tx_id: AtomicU64::new(1),
                 cluster_manager: RwLock::new(None),
                 cluster_event_sender,
                 cluster_event_receiver: RwLock::new(Some(cluster_event_receiver)),
@@ -169,12 +165,6 @@ impl StorageRaftMemberImpl {
                 startup_time,
             }),
         }
-    }
-
-    /// Get the next transaction ID.
-    fn next_tx_id(&self) -> TxId {
-        let id = self.inner.next_tx_id.fetch_add(1, Ordering::SeqCst);
-        TxId(id)
     }
 
     /// Update leadership state based on Raft metrics.
@@ -1328,9 +1318,14 @@ mod tests {
 
     #[test]
     fn test_tx_id_generation() {
-        // This test will be expanded once we have the full implementation
-        let tx_id1 = TxId(1);
-        let tx_id2 = TxId(2);
+        // Test that generated TxIds are unique
+        let tx_id1 = TxId::generate();
+        let tx_id2 = TxId::generate();
         assert_ne!(tx_id1, tx_id2);
+
+        // Test that manual creation works for testing
+        let tx_id3 = TxId::new(123);
+        let tx_id4 = TxId::new(456);
+        assert_ne!(tx_id3, tx_id4);
     }
 }

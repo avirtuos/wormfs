@@ -563,7 +563,7 @@ mod tests {
             entries.push(Entry {
                 log_id: LogId::new(CommittedLeaderId::new(1, NodeId(0)), i),
                 payload: EntryPayload::Normal(WormFsOperation::TransactionPrepare {
-                    tx_id: super::super::types::TxId(i),
+                    tx_id: super::super::types::TxId::new(i as u128),
                     metadata_ops: Some(vec![]),
                     command_ops: None,
                     timeout: std::time::SystemTime::now(),
@@ -599,7 +599,7 @@ mod tests {
             entries.push(Entry {
                 log_id: LogId::new(CommittedLeaderId::new(1, NodeId(0)), i),
                 payload: EntryPayload::Normal(WormFsOperation::TransactionPrepare {
-                    tx_id: super::super::types::TxId(i),
+                    tx_id: super::super::types::TxId::new(i as u128),
                     metadata_ops: Some(vec![]),
                     command_ops: None,
                     timeout: std::time::SystemTime::now(),

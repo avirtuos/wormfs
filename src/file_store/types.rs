@@ -158,21 +158,8 @@ impl DiskId {
     }
 }
 
-/// Unique identifier for a transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TxId(pub u64);
-
-impl TxId {
-    /// Create a new TxId.
-    pub fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    /// Get the inner u64 value.
-    pub fn as_u64(&self) -> u64 {
-        self.0
-    }
-}
+// Re-export TxId from storage_raft_member to avoid duplication
+pub use crate::storage_raft_member::types::TxId;
 
 /// Configuration for FileStore.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
