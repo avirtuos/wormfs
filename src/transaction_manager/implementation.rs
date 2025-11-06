@@ -129,10 +129,9 @@ impl TransactionManagerImpl {
     async fn validate_create_file(&self, path: &std::path::Path) -> Result<()> {
         // Check that parent directory exists
         if let Some(parent) = path.parent() {
-            self.metadata_store
-                .get_file_by_path(parent)
-                .await
-                .map_err(|_| Error::ParentNotFound(parent.to_path_buf()))?;
+            // Use ? operator to preserve the specific error type
+            // The From impl will convert MetadataStore errors appropriately
+            self.metadata_store.get_file_by_path(parent).await?;
         }
 
         // Check that file doesn't already exist
@@ -146,10 +145,8 @@ impl TransactionManagerImpl {
     /// Validate an UpdateFile operation.
     async fn validate_update_file(&self, file_id: crate::file_store::types::FileId) -> Result<()> {
         // Check that file exists
-        self.metadata_store
-            .get_file(file_id)
-            .await
-            .map_err(|_| Error::FileNotFound(file_id))?;
+        // Use ? operator - From impl converts FileNotFoundByFileId to FileNotFound
+        self.metadata_store.get_file(file_id).await?;
 
         Ok(())
     }
@@ -157,10 +154,7 @@ impl TransactionManagerImpl {
     /// Validate a DeleteFile operation.
     async fn validate_delete_file(&self, file_id: crate::file_store::types::FileId) -> Result<()> {
         // Check that file exists
-        self.metadata_store
-            .get_file(file_id)
-            .await
-            .map_err(|_| Error::FileNotFound(file_id))?;
+        self.metadata_store.get_file(file_id).await?;
 
         // Note: In a full implementation, you might also check:
         // - File has no children (if it's a directory)
@@ -176,10 +170,7 @@ impl TransactionManagerImpl {
         file_id: crate::file_store::types::FileId,
     ) -> Result<()> {
         // Check that file exists
-        self.metadata_store
-            .get_file(file_id)
-            .await
-            .map_err(|_| Error::FileNotFound(file_id))?;
+        self.metadata_store.get_file(file_id).await?;
 
         Ok(())
     }
@@ -190,10 +181,7 @@ impl TransactionManagerImpl {
         stripe_id: crate::file_store::types::StripeId,
     ) -> Result<()> {
         // Check that stripe exists
-        self.metadata_store
-            .get_stripe(stripe_id)
-            .await
-            .map_err(|_| Error::StripeNotFound(stripe_id))?;
+        self.metadata_store.get_stripe(stripe_id).await?;
 
         Ok(())
     }
@@ -204,10 +192,7 @@ impl TransactionManagerImpl {
         file_id: crate::file_store::types::FileId,
     ) -> Result<()> {
         // Check that file exists
-        self.metadata_store
-            .get_file(file_id)
-            .await
-            .map_err(|_| Error::FileNotFound(file_id))?;
+        self.metadata_store.get_file(file_id).await?;
 
         // Note: Actual lock conflict checking is done by the metadata store
         // when the operation is applied. We just verify the file exists.
@@ -220,10 +205,7 @@ impl TransactionManagerImpl {
         file_id: crate::file_store::types::FileId,
     ) -> Result<()> {
         // Check that file exists
-        self.metadata_store
-            .get_file(file_id)
-            .await
-            .map_err(|_| Error::FileNotFound(file_id))?;
+        self.metadata_store.get_file(file_id).await?;
 
         // Note: Actual lock conflict checking is done by the metadata store
         // when the operation is applied. We just verify the file exists.
@@ -239,17 +221,10 @@ impl TransactionManagerImpl {
         use crate::metadata_store::types::ClientId;
 
         // Check that file exists
-        self.metadata_store
-            .get_file(file_id)
-            .await
-            .map_err(|_| Error::FileNotFound(file_id))?;
+        self.metadata_store.get_file(file_id).await?;
 
         // Check that the client actually has a lock on this file
-        let locks = self
-            .metadata_store
-            .get_file_locks(file_id)
-            .await
-            .map_err(|e| Error::MetadataStoreError(e.to_string()))?;
+        let locks = self.metadata_store.get_file_locks(file_id).await?;
 
         let has_lock = locks
             .iter()
@@ -271,17 +246,10 @@ impl TransactionManagerImpl {
         use crate::metadata_store::types::ClientId;
 
         // Check that file exists
-        self.metadata_store
-            .get_file(file_id)
-            .await
-            .map_err(|_| Error::FileNotFound(file_id))?;
+        self.metadata_store.get_file(file_id).await?;
 
         // Check that the client actually has a lock on this file
-        let locks = self
-            .metadata_store
-            .get_file_locks(file_id)
-            .await
-            .map_err(|e| Error::MetadataStoreError(e.to_string()))?;
+        let locks = self.metadata_store.get_file_locks(file_id).await?;
 
         let has_lock = locks
             .iter()
