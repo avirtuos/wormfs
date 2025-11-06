@@ -8,7 +8,7 @@ use crate::storage_raft_member::{types::WormFsOperation, StorageRaftMember};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -262,6 +262,43 @@ impl TransactionManagerImpl {
         Ok(())
     }
 
+    /// Validate a lock expiration time against configured timeout.
+    ///
+    /// Ensures that:
+    /// - Lock expires at least 1 second in the future (not already expired)
+    /// - Lock expires no more than lock_timeout_secs in the future (respects config)
+    ///
+    /// This enforcement prevents DoS attacks via long-lived locks and ensures
+    /// the deadlock prevention mechanism works as designed.
+    fn validate_lock_timeout(&self, expires_at: SystemTime) -> Result<()> {
+        let now = SystemTime::now();
+        let max_lock_duration = self.config.lock_timeout();
+        let min_lock_duration = Duration::from_secs(1);
+
+        // Calculate how far in the future the lock expires
+        let duration_until_expiry = expires_at
+            .duration_since(now)
+            .unwrap_or(Duration::from_secs(0));
+
+        // Check minimum: lock must expire at least 1 second in the future
+        if duration_until_expiry < min_lock_duration {
+            return Err(Error::InvalidLockExpiry(
+                self.config.lock_timeout_secs,
+                duration_until_expiry,
+            ));
+        }
+
+        // Check maximum: lock must not exceed configured timeout
+        if duration_until_expiry > max_lock_duration {
+            return Err(Error::InvalidLockExpiry(
+                self.config.lock_timeout_secs,
+                duration_until_expiry,
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Validate an operation before adding it to the transaction.
     async fn validate_operation(&self, operation: &Operation) -> Result<()> {
         match operation {
@@ -280,19 +317,32 @@ impl TransactionManagerImpl {
             Operation::DeleteStripe { stripe_id, .. } => {
                 self.validate_delete_stripe(*stripe_id).await?;
             }
-            Operation::AcquireReadLock { file_id, .. } => {
+            Operation::AcquireReadLock {
+                file_id,
+                expires_at,
+                ..
+            } => {
                 self.validate_acquire_read_lock(*file_id).await?;
+                self.validate_lock_timeout(*expires_at)?;
             }
-            Operation::AcquireWriteLock { file_id, .. } => {
+            Operation::AcquireWriteLock {
+                file_id,
+                expires_at,
+                ..
+            } => {
                 self.validate_acquire_write_lock(*file_id).await?;
+                self.validate_lock_timeout(*expires_at)?;
             }
             Operation::ReleaseLock { file_id, client_id } => {
                 self.validate_release_lock(*file_id, *client_id).await?;
             }
             Operation::ExtendLock {
-                file_id, client_id, ..
+                file_id,
+                client_id,
+                new_expiry,
             } => {
                 self.validate_extend_lock(*file_id, *client_id).await?;
+                self.validate_lock_timeout(*new_expiry)?;
             }
         }
 

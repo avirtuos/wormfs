@@ -407,6 +407,10 @@ pub enum Error {
     #[error("Lock has expired for file {0:?}, client {1}")]
     LockExpired(FileId, u64),
 
+    /// Lock expiration time is invalid (too short or exceeds configured timeout)
+    #[error("Invalid lock expiration: must be between 1s and {0}s from now, but expires_at would be {1:?} from now")]
+    InvalidLockExpiry(u64, Duration),
+
     /// Raft operation failed
     #[error("Raft operation failed: {0}")]
     RaftError(String),

@@ -831,7 +831,7 @@ mod tests {
             .expect("Failed to begin transaction");
 
         // Add read lock operation
-        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let expires_at = SystemTime::now() + Duration::from_secs(10);
         let operation = Operation::AcquireReadLock {
             file_id,
             client_id: 1001,
@@ -905,7 +905,7 @@ mod tests {
             .expect("Failed to begin transaction");
 
         // Add write lock operation
-        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let expires_at = SystemTime::now() + Duration::from_secs(10);
         let operation = Operation::AcquireWriteLock {
             file_id,
             client_id: 1002,
@@ -976,7 +976,7 @@ mod tests {
             .expect("Failed to create file");
 
         // Acquire a lock first
-        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let expires_at = SystemTime::now() + Duration::from_secs(10);
         metadata_store
             .acquire_read_lock(
                 file_id,
@@ -1058,7 +1058,7 @@ mod tests {
             .expect("Failed to create file");
 
         // Acquire a lock first
-        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let expires_at = SystemTime::now() + Duration::from_secs(10);
         metadata_store
             .acquire_write_lock(
                 file_id,
@@ -1076,7 +1076,7 @@ mod tests {
             .expect("Failed to begin transaction");
 
         // Add extend lock operation
-        let new_expiry = SystemTime::now() + Duration::from_secs(120);
+        let new_expiry = SystemTime::now() + Duration::from_secs(10);
         let operation = Operation::ExtendLock {
             file_id,
             client_id: 1004,
@@ -1127,7 +1127,7 @@ mod tests {
             .await
             .expect("Failed to begin transaction");
 
-        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let expires_at = SystemTime::now() + Duration::from_secs(10);
         let operation = Operation::AcquireReadLock {
             file_id: fake_file_id,
             client_id: 1005,
@@ -1226,7 +1226,7 @@ mod tests {
             .await
             .expect("Failed to begin transaction");
 
-        let new_expiry = SystemTime::now() + Duration::from_secs(120);
+        let new_expiry = SystemTime::now() + Duration::from_secs(10);
         let operation = Operation::ExtendLock {
             file_id,
             client_id: 9999,
@@ -1301,7 +1301,7 @@ mod tests {
             .expect("Failed to begin transaction");
 
         // Add multiple lock operations
-        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let expires_at = SystemTime::now() + Duration::from_secs(10);
 
         tx_manager
             .add_operation(
@@ -1523,5 +1523,108 @@ mod tests {
         // rx1 should only have second event
         let rx1_event2 = rx1.recv().await.expect("rx1 should receive second event");
         assert_eq!(rx1_event2.log_index, 2);
+    }
+
+    #[tokio::test]
+    async fn test_lock_timeout_validation() {
+        use std::time::Duration;
+
+        let (tx_manager, _, metadata_store, _) = create_test_transaction_manager().await;
+
+        // Create test file
+        let file_id = FileId::generate();
+        let inode = metadata_store
+            .reserve_inode()
+            .await
+            .expect("Failed to reserve inode");
+        metadata_store
+            .create_file(
+                file_id,
+                &PathBuf::from("/test/file.txt"),
+                inode,
+                crate::metadata_store::types::FileMetadata {
+                    file_type: crate::metadata_store::types::FileType::RegularFile,
+                    size: 0,
+                    permissions: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None,
+                },
+            )
+            .await
+            .expect("Failed to create file");
+
+        let tx_id = tx_manager
+            .begin(Duration::from_secs(30))
+            .await
+            .expect("Failed to begin transaction");
+
+        // Test 1: Lock expires too far in future (should fail)
+        let expires_at = SystemTime::now() + Duration::from_secs(3600); // 1 hour
+        let operation = Operation::AcquireReadLock {
+            file_id,
+            client_id: 1001,
+            expires_at,
+        };
+
+        let result = tx_manager.add_operation(tx_id, operation).await;
+        assert!(
+            result.is_err(),
+            "Should reject lock expiring more than lock_timeout_secs"
+        );
+        if let Err(Error::InvalidLockExpiry(_, _)) = result {
+            // Expected error type
+        } else {
+            panic!("Expected InvalidLockExpiry error, got {:?}", result);
+        }
+
+        // Test 2: Lock already expired (should fail)
+        let expires_at = SystemTime::now() - Duration::from_secs(1);
+        let operation = Operation::AcquireWriteLock {
+            file_id,
+            client_id: 1002,
+            node_id: 1,
+            expires_at,
+        };
+
+        let result = tx_manager.add_operation(tx_id, operation).await;
+        assert!(result.is_err(), "Should reject already-expired lock");
+        if let Err(Error::InvalidLockExpiry(_, _)) = result {
+            // Expected error type
+        } else {
+            panic!("Expected InvalidLockExpiry error, got {:?}", result);
+        }
+
+        // Test 3: Valid lock within timeout (should succeed)
+        let expires_at = SystemTime::now() + Duration::from_secs(5);
+        let operation = Operation::AcquireReadLock {
+            file_id,
+            client_id: 1003,
+            expires_at,
+        };
+
+        let result = tx_manager.add_operation(tx_id, operation).await;
+        assert!(
+            result.is_ok(),
+            "Should accept lock within timeout range: {:?}",
+            result
+        );
+
+        // Test 4: ExtendLock with invalid expiry (should fail)
+        let new_expiry = SystemTime::now() + Duration::from_secs(3600); // 1 hour
+        let operation = Operation::ExtendLock {
+            file_id,
+            client_id: 1003,
+            new_expiry,
+        };
+
+        let result = tx_manager.add_operation(tx_id, operation).await;
+        assert!(
+            result.is_err(),
+            "Should reject ExtendLock with expiry > lock_timeout_secs"
+        );
     }
 }
