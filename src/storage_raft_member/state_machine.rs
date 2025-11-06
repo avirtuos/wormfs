@@ -21,6 +21,7 @@ use openraft::{
 };
 
 use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
+use crate::snapshot_store::{CompressionAlgorithm, SnapshotStore, SnapshotStoreImpl};
 
 use super::raft_config::{WormFsResponse, WormFsSnapshotData, WormFsTypeConfig};
 use super::types::{
@@ -80,6 +81,15 @@ pub(crate) struct StateMachineInner {
     /// Directory where snapshots are stored
     snapshot_directory: std::path::PathBuf,
 
+    /// SnapshotStore for managing persistent snapshots
+    snapshot_store: Arc<SnapshotStoreImpl>,
+
+    /// Compression algorithm for snapshots
+    snapshot_compression: CompressionAlgorithm,
+
+    /// Next snapshot ID (incremented for each snapshot)
+    next_snapshot_id: u64,
+
     /// Path to the temporary snapshot file being received
     /// Set by begin_receiving_snapshot(), used by install_snapshot()
     incoming_snapshot_path: Option<std::path::PathBuf>,
@@ -122,7 +132,61 @@ impl WormFsStateMachine {
     ///
     /// * `metadata_store` - The metadata store to apply operations to
     /// * `snapshot_directory` - Directory where snapshots will be stored
+    ///
+    /// # Note
+    ///
+    /// This method creates a state machine without compression enabled.
+    /// Use `new_with_config` for compression support.
     pub fn new(metadata_store: MetadataStoreImpl, snapshot_directory: std::path::PathBuf) -> Self {
+        Self::new_with_config(metadata_store, snapshot_directory, false, 3)
+    }
+
+    /// Create a new state machine with snapshot compression configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `metadata_store` - The metadata store to apply operations to
+    /// * `snapshot_directory` - Directory where snapshots will be stored
+    /// * `enable_compression` - Whether to enable zstd compression for snapshots
+    /// * `compression_level` - Compression level (1-22, higher = better compression)
+    pub fn new_with_config(
+        metadata_store: MetadataStoreImpl,
+        snapshot_directory: std::path::PathBuf,
+        enable_compression: bool,
+        compression_level: i32,
+    ) -> Self {
+        // Create SnapshotStore with configured compression
+        let snapshot_compression = if enable_compression {
+            CompressionAlgorithm::Zstd {
+                level: compression_level,
+            }
+        } else {
+            CompressionAlgorithm::None
+        };
+
+        let snapshot_store_config = crate::snapshot_store::Config {
+            storage_dir: snapshot_directory.clone(),
+            retention_policy: crate::snapshot_store::RetentionPolicy {
+                max_snapshots: 10,
+                max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60), // 30 days
+                min_snapshots: 3,
+            },
+            compression: snapshot_compression,
+            stream_chunk_size: 64 * 1024, // 64KB
+        };
+
+        let snapshot_store =
+            SnapshotStoreImpl::new(snapshot_store_config).expect("Failed to create SnapshotStore");
+
+        // Initialize snapshot store (scan existing snapshots)
+        let snapshot_store_arc = Arc::new(snapshot_store);
+        let snapshot_store_clone = Arc::clone(&snapshot_store_arc);
+        tokio::spawn(async move {
+            if let Err(e) = snapshot_store_clone.initialize().await {
+                error!("Failed to initialize SnapshotStore: {:?}", e);
+            }
+        });
+
         Self {
             inner: Arc::new(RwLock::new(StateMachineInner {
                 metadata_store,
@@ -131,6 +195,9 @@ impl WormFsStateMachine {
                 last_membership: StoredMembership::default(),
                 transactions: HashMap::new(),
                 snapshot_directory,
+                snapshot_store: snapshot_store_arc,
+                snapshot_compression,
+                next_snapshot_id: 1,
                 incoming_snapshot_path: None,
                 subscriptions: Vec::new(),
                 needs_resync: AtomicBool::new(false),
@@ -785,43 +852,80 @@ impl WormFsStateMachine {
             last_included_index, last_included_term
         );
 
-        let inner = self.inner.read().await;
+        let (snapshot_store, snapshot_id, snapshot_compression) = {
+            let mut inner = self.inner.write().await;
+            let snapshot_id = inner.next_snapshot_id;
+            inner.next_snapshot_id += 1;
+            (
+                Arc::clone(&inner.snapshot_store),
+                snapshot_id,
+                inner.snapshot_compression,
+            )
+        };
 
-        // Generate snapshot filename
-        let snapshot_filename =
-            format!("snapshot-{}-{}.db", last_included_index, last_included_term);
-        let snapshot_path = inner.snapshot_directory.join(&snapshot_filename);
-
-        // Create snapshot directory if it doesn't exist
-        tokio::fs::create_dir_all(&inner.snapshot_directory)
-            .await
-            .map_err(|e| format!("Failed to create snapshot directory: {}", e))?;
-
-        // Create the snapshot using MetadataStore
-        info!("Creating MetadataStore snapshot at {:?}", snapshot_path);
-        inner
-            .metadata_store
-            .create_snapshot(&snapshot_path)
-            .await
-            .map_err(|e| format!("Failed to create snapshot: {:?}", e))?;
-
-        // Get the file size and calculate checksum
-        let metadata = tokio::fs::metadata(&snapshot_path)
-            .await
-            .map_err(|e| format!("Failed to read snapshot metadata: {}", e))?;
-        let file_size = metadata.len();
-
-        // Calculate CRC32 checksum
-        let checksum = Self::calculate_checksum(&snapshot_path).await?;
-
-        // Get current membership
-        let membership: BTreeSet<NodeId> = inner.last_membership.membership().voter_ids().collect();
+        // Create temporary snapshot file using MetadataStore
+        let temp_dir = std::env::temp_dir();
+        let temp_snapshot_file = temp_dir.join(format!(
+            "wormfs_snapshot_{}_{}_temp.db",
+            last_included_index, last_included_term
+        ));
 
         info!(
-            "Snapshot created successfully: {} bytes, checksum: {:08x}, members: {}",
-            file_size,
-            checksum,
+            "Creating temporary MetadataStore snapshot at {:?}",
+            temp_snapshot_file
+        );
+        {
+            let inner = self.inner.read().await;
+            inner
+                .metadata_store
+                .create_snapshot(&temp_snapshot_file)
+                .await
+                .map_err(|e| format!("Failed to create snapshot: {:?}", e))?;
+        }
+
+        // Ingest snapshot into SnapshotStore (handles compression and persistence)
+        let snapshot_info = snapshot_store
+            .ingest_snapshot(
+                snapshot_id,
+                last_included_index,
+                last_included_term,
+                &temp_snapshot_file,
+            )
+            .await
+            .map_err(|e| format!("Failed to ingest snapshot into SnapshotStore: {:?}", e))?;
+
+        // Clean up temporary file
+        if let Err(e) = tokio::fs::remove_file(&temp_snapshot_file).await {
+            warn!("Failed to remove temporary snapshot file: {}", e);
+        }
+
+        // Get current membership
+        let membership: BTreeSet<NodeId> = {
+            let inner = self.inner.read().await;
+            inner.last_membership.membership().voter_ids().collect()
+        };
+
+        info!(
+            "Snapshot {} created successfully: {} bytes, compressed: {:?}, members: {}",
+            snapshot_id,
+            snapshot_info.metadata_db_size,
+            matches!(snapshot_compression, CompressionAlgorithm::Zstd { .. }),
             membership.len()
+        );
+
+        // Calculate CRC32 checksum of the stored file for compatibility with existing code
+        let checksum = Self::calculate_checksum(&snapshot_info.storage_path.join(
+            match snapshot_compression {
+                CompressionAlgorithm::None => "metadata.db",
+                CompressionAlgorithm::Zstd { .. } => "metadata.db.zst",
+            },
+        ))
+        .await?;
+
+        // Build filename that includes snapshot ID for tracking
+        let snapshot_filename = format!(
+            "snapshot_{:06}_{}_{}.db",
+            snapshot_id, last_included_index, last_included_term
         );
 
         let snapshot = WormFsSnapshotData::new(
@@ -829,9 +933,9 @@ impl WormFsStateMachine {
             last_included_term,
             membership,
             snapshot_filename,
-            file_size,
+            snapshot_info.metadata_db_size,
             checksum,
-            false, // SQLite VACUUM creates uncompressed backups
+            matches!(snapshot_compression, CompressionAlgorithm::Zstd { .. }),
         );
 
         Ok(snapshot)
