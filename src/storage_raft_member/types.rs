@@ -431,8 +431,39 @@ impl StateMachineStatus {
 // ============================================================================
 
 /// Transaction ID for two-phase commit coordination.
+///
+/// Uses 128-bit UUIDv7 for globally unique, time-ordered transaction identifiers
+/// that work correctly in distributed multi-node deployments without coordination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct TxId(pub u64);
+pub struct TxId(pub u128);
+
+impl TxId {
+    /// Generate a new globally unique transaction ID.
+    ///
+    /// Uses UUID v7 which provides:
+    /// - Time-ordered identifiers (better for logs and debugging)
+    /// - Collision resistance (122 bits of randomness)
+    /// - No coordination required between nodes
+    /// - Better database index locality than random UUIDs
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::now_v7().as_u128())
+    }
+
+    /// Create a TxId from a u128 value (for testing/deserialization).
+    pub fn new(id: u128) -> Self {
+        Self(id)
+    }
+
+    /// Get the inner u128 value.
+    pub fn as_u128(&self) -> u128 {
+        self.0
+    }
+
+    /// Format as a short hex string (first 16 hex digits) for logging.
+    pub fn to_hex_short(&self) -> String {
+        format!("{:016x}", (self.0 >> 64) as u64)
+    }
+}
 
 /// Operations that can be proposed through Raft consensus.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

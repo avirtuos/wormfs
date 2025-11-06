@@ -1438,7 +1438,7 @@ async fn test_single_node_propose_operation() {
 
     // Try to propose an operation
     let operation = WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1001),
+        tx_id: TxId::new(1001),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -1506,7 +1506,7 @@ async fn test_bootstrap_can_propose() {
 
     // Try to propose an operation
     let operation = WormFsOperation::TransactionPrepare {
-        tx_id: TxId(9999),
+        tx_id: TxId::new(9999),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -1658,7 +1658,7 @@ async fn test_log_replication() {
 
     // Propose an operation on the leader
     let operation = WormFsOperation::TransactionPrepare {
-        tx_id: TxId(12345),
+        tx_id: TxId::new(12345),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -1772,7 +1772,7 @@ async fn test_concurrent_requests() {
         let leader_raft = leader.raft.clone();
         let handle = tokio::spawn(async move {
             let operation = WormFsOperation::TransactionPrepare {
-                tx_id: TxId(1000 + i),
+                tx_id: TxId::new(1000 + i),
                 metadata_ops: Some(vec![]),
                 command_ops: None,
                 timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -1905,7 +1905,7 @@ async fn test_network_partition_handling() {
 
     // Submit initial operation to build some log history
     let operation_0 = WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1000),
+        tx_id: TxId::new(1000),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -1982,7 +1982,7 @@ async fn test_network_partition_handling() {
         .expect("Majority leader node should exist");
 
     let operation_1 = WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1001),
+        tx_id: TxId::new(1001),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2006,7 +2006,7 @@ async fn test_network_partition_handling() {
         .expect("Node 4 should exist");
 
     let operation_2 = WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1002),
+        tx_id: TxId::new(1002),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(5),
@@ -2055,7 +2055,7 @@ async fn test_network_partition_handling() {
         .leader()
         .expect("Should have a leader after healing");
     let operation_final = WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1003),
+        tx_id: TxId::new(1003),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2141,7 +2141,7 @@ async fn test_node_restart_recovery() {
     eprintln!("Step 2: Submitting 10 operations to build log...");
     for i in 1..=10 {
         let operation = WormFsOperation::TransactionPrepare {
-            tx_id: TxId(i),
+            tx_id: TxId::new(i),
             metadata_ops: Some(vec![]),
             command_ops: None,
             timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2182,7 +2182,7 @@ async fn test_node_restart_recovery() {
     eprintln!("Step 4: Submitting 10 more operations while node 3 is down...");
     for i in 11..=20 {
         let operation = WormFsOperation::TransactionPrepare {
-            tx_id: TxId(i),
+            tx_id: TxId::new(i),
             metadata_ops: Some(vec![]),
             command_ops: None,
             timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2267,7 +2267,7 @@ async fn test_node_restart_recovery() {
     // Step 8: Verify node 3 can participate in consensus by submitting a new operation
     eprintln!("Step 8: Verifying node 3 can participate in consensus...");
     let operation = WormFsOperation::TransactionPrepare {
-        tx_id: TxId(21),
+        tx_id: TxId::new(21),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2433,7 +2433,7 @@ async fn test_automatic_recovery_and_promotion() {
 
     // Verify cluster is operational by committing a new operation
     let operation = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-        tx_id: TxId(999),
+        tx_id: TxId::new(999),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2600,7 +2600,7 @@ async fn test_cluster_manager_no_auto_demotion() {
     use wormfs::storage_raft_member::types::{TxId, WormFsOperation};
 
     let operation = WormFsOperation::TransactionPrepare {
-        tx_id: TxId(99999),
+        tx_id: TxId::new(99999),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2699,7 +2699,7 @@ async fn test_progressive_node_failure_and_recovery() {
     // Verify cluster can still make progress
     let leader = cluster.leader().expect("Should have leader with 4/5 nodes");
     let operation_1 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1001),
+        tx_id: TxId::new(1001),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2722,7 +2722,7 @@ async fn test_progressive_node_failure_and_recovery() {
     // Verify cluster can still make progress (3 nodes = exact quorum)
     let leader = cluster.leader().expect("Should have leader with 3/5 nodes");
     let operation_2 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1002),
+        tx_id: TxId::new(1002),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2747,7 +2747,7 @@ async fn test_progressive_node_failure_and_recovery() {
     let leader_option = cluster.leader();
     if let Some(leader_node) = leader_option {
         let operation_3 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-            tx_id: TxId(1003),
+            tx_id: TxId::new(1003),
             metadata_ops: Some(vec![]),
             command_ops: None,
             timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2793,7 +2793,7 @@ async fn test_progressive_node_failure_and_recovery() {
         .leader()
         .expect("Should have leader after node 5 restart");
     let operation_4 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1004),
+        tx_id: TxId::new(1004),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2831,7 +2831,7 @@ async fn test_progressive_node_failure_and_recovery() {
     // Verify cluster is operational
     let leader = cluster.leader().expect("Should have leader");
     let operation_5 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1005),
+        tx_id: TxId::new(1005),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2869,7 +2869,7 @@ async fn test_progressive_node_failure_and_recovery() {
     // Verify cluster is fully operational
     let leader = cluster.leader().expect("Should have leader");
     let operation_6 = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-        tx_id: TxId(1006),
+        tx_id: TxId::new(1006),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),
@@ -2916,7 +2916,7 @@ async fn test_progressive_node_failure_and_recovery() {
     eprintln!("\n🎯 Final operation test...");
     let leader = cluster.leader().expect("Should have leader");
     let final_operation = wormfs::storage_raft_member::types::WormFsOperation::TransactionPrepare {
-        tx_id: TxId(9999),
+        tx_id: TxId::new(9999),
         metadata_ops: Some(vec![]),
         command_ops: None,
         timeout: std::time::SystemTime::now() + Duration::from_secs(30),

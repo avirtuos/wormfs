@@ -1725,7 +1725,7 @@ mod tests {
 
         // Apply an operation to increment the index
         let operation = WormFsOperation::TransactionPrepare {
-            tx_id: TxId(1),
+            tx_id: TxId::new(1),
             metadata_ops: Some(vec![]),
             command_ops: None,
             timeout: SystemTime::now(),
@@ -1741,7 +1741,7 @@ mod tests {
         let (state_machine, _temp_dir) = create_test_state_machine().await;
 
         let operation = WormFsOperation::TransactionPrepare {
-            tx_id: TxId(1),
+            tx_id: TxId::new(1),
             metadata_ops: Some(vec![]),
             command_ops: None,
             timeout: SystemTime::now(),
@@ -1760,7 +1760,7 @@ mod tests {
     async fn test_two_phase_commit_flow() {
         let (state_machine, _temp_dir) = create_test_state_machine().await;
 
-        let tx_id = TxId(100);
+        let tx_id = TxId::new(100);
 
         // Phase 1: Prepare
         let prepare_op = WormFsOperation::TransactionPrepare {

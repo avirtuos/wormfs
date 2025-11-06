@@ -480,7 +480,7 @@ mod tests {
     async fn test_add_operation_to_nonexistent_transaction() {
         let (tx_manager, _, _, _) = create_test_transaction_manager().await;
 
-        let fake_tx_id = TxId(99999);
+        let fake_tx_id = TxId::new(99999);
         let operation = Operation::CreateFile {
             file_id: FileId::generate(),
             path: PathBuf::from("/test/file.txt"),
@@ -514,7 +514,7 @@ mod tests {
     async fn test_commit_nonexistent_transaction() {
         let (tx_manager, _, _, _) = create_test_transaction_manager().await;
 
-        let fake_tx_id = TxId(99999);
+        let fake_tx_id = TxId::new(99999);
         let result = tx_manager.commit(fake_tx_id).await;
 
         assert!(

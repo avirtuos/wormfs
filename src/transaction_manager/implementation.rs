@@ -318,8 +318,10 @@ impl TransactionManager for TransactionManagerImpl {
         }
         drop(transactions);
 
-        // Generate new transaction ID
-        let tx_id = TxId(rand::random());
+        // Generate new transaction ID using UUIDv7
+        // This provides time-ordered, globally unique IDs that work correctly
+        // in distributed deployments without coordination between nodes
+        let tx_id = TxId::generate();
 
         // Create transaction batch
         let batch = TransactionBatch::new(tx_id, timeout);
