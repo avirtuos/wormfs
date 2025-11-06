@@ -33,8 +33,9 @@ pub struct TransactionManagerImpl {
     /// Metrics service for observability
     metrics: MetricServiceImpl,
 
-    /// Handle to the cleanup task
-    _cleanup_task: Arc<JoinHandle<()>>,
+    /// Shutdown signal sender for cleanup task
+    /// Using broadcast channel to break reference cycle and enable graceful shutdown
+    shutdown_tx: Arc<tokio::sync::broadcast::Sender<()>>,
 }
 
 impl TransactionManagerImpl {
@@ -50,27 +51,25 @@ impl TransactionManagerImpl {
     ) -> Arc<Self> {
         let active_transactions = Arc::new(RwLock::new(HashMap::new()));
 
+        // Create shutdown channel
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+
+        // Start cleanup task (captures only what it needs, not the manager)
+        Self::start_cleanup_task(
+            active_transactions.clone(),
+            metrics.clone(),
+            shutdown_rx,
+            config.cleanup_interval(),
+        );
+
         // Create the manager
         let manager = Arc::new(Self {
-            active_transactions: active_transactions.clone(),
+            active_transactions,
             raft_member,
             metadata_store,
-            config: config.clone(),
-            metrics: metrics.clone(),
-            _cleanup_task: Arc::new(tokio::spawn(async {})), // Temporary, will be replaced
-        });
-
-        // Start cleanup task
-        let cleanup_task = Self::start_cleanup_task(manager.clone(), config.cleanup_interval());
-
-        // Replace the cleanup task handle
-        let manager = Arc::new(Self {
-            active_transactions: manager.active_transactions.clone(),
-            raft_member: manager.raft_member.clone(),
-            metadata_store: manager.metadata_store.clone(),
-            config: manager.config.clone(),
-            metrics: manager.metrics.clone(),
-            _cleanup_task: Arc::new(cleanup_task),
+            config,
+            metrics,
+            shutdown_tx: Arc::new(shutdown_tx),
         });
 
         info!("TransactionManager initialized");
@@ -78,21 +77,55 @@ impl TransactionManagerImpl {
     }
 
     /// Start the background cleanup task.
+    ///
+    /// This task captures only the active_transactions HashMap and metrics service,
+    /// not the entire TransactionManagerImpl, to avoid reference cycles.
+    /// The task listens for shutdown signals via the broadcast channel.
     fn start_cleanup_task(
-        manager: Arc<TransactionManagerImpl>,
+        active_transactions: Arc<RwLock<HashMap<TxId, TransactionBatch>>>,
+        metrics: MetricServiceImpl,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
         interval: Duration,
-    ) -> JoinHandle<()> {
+    ) {
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
 
             loop {
-                interval_timer.tick().await;
+                tokio::select! {
+                    _ = interval_timer.tick() => {
+                        // Cleanup expired transactions inline
+                        let mut transactions = active_transactions.write().await;
+                        let mut expired = Vec::new();
 
-                if let Err(e) = manager.cleanup_expired_transactions().await {
-                    error!("Failed to cleanup expired transactions: {:?}", e);
+                        // Find expired transactions
+                        for (tx_id, batch) in transactions.iter() {
+                            if batch.is_expired() {
+                                expired.push(*tx_id);
+                            }
+                        }
+
+                        // Remove expired transactions
+                        for tx_id in &expired {
+                            transactions.remove(tx_id);
+                            warn!("Transaction {:?} expired and was auto-aborted", tx_id);
+                            let _ = metrics.publish_counter(
+                                "transaction_manager.transactions_expired",
+                                1,
+                                UnitType::Operations,
+                            );
+                        }
+
+                        if !expired.is_empty() {
+                            debug!("Cleaned up {} expired transactions", expired.len());
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        info!("TransactionManager cleanup task stopped (shutdown signal)");
+                        break;
+                    }
                 }
             }
-        })
+        });
     }
 
     /// Clean up expired transactions.
@@ -546,7 +579,9 @@ impl TransactionManager for TransactionManagerImpl {
 
 impl Drop for TransactionManagerImpl {
     fn drop(&mut self) {
-        // Abort cleanup task
-        self._cleanup_task.abort();
+        // Send shutdown signal to cleanup task (non-blocking)
+        // The task will exit gracefully when it receives the signal
+        let _ = self.shutdown_tx.send(());
+        debug!("TransactionManager dropped, shutdown signal sent to cleanup task");
     }
 }
