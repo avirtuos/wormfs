@@ -7,10 +7,10 @@ mod tests {
     use super::super::TransactionManager;
     use crate::file_store::types::StripeId;
     use crate::metadata_store::factory::MetadataStoreFactory;
-    use crate::metadata_store::MetadataStoreImpl;
+    use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
     use crate::metric_service::{Config as MetricConfig, MetricService, MetricServiceImpl};
     use crate::storage_raft_member::types::{
-        FileId, FileMetadata, NodeId, StoragePolicy, TxId, WormFsOperation,
+        FileId, FileMetadata, MetadataOperation, NodeId, StoragePolicy, TxId, WormFsOperation,
     };
     use crate::storage_raft_member::{Error as RaftError, StorageRaftMember};
     use async_trait::async_trait;
@@ -756,6 +756,558 @@ mod tests {
         match &proposed_ops[0] {
             WormFsOperation::AtomicTransaction { operations, .. } => {
                 assert_eq!(operations.len(), 3, "Should have batched all 3 operations");
+            }
+            _ => panic!("Expected AtomicTransaction operation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_acquire_read_lock() {
+        let (tx_manager, raft_member, metadata_store, _) = create_test_transaction_manager().await;
+
+        // First create a file to lock
+        let file_id = FileId::generate();
+        metadata_store
+            .create_file(
+                file_id,
+                &PathBuf::from("/test/lockfile.txt"),
+                20001,
+                crate::metadata_store::types::FileMetadata {
+                    file_type: crate::metadata_store::types::FileType::RegularFile,
+                    size: 0,
+                    permissions: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None,
+                },
+            )
+            .await
+            .expect("Failed to create file");
+
+        // Begin transaction
+        let tx_id = tx_manager
+            .begin(Duration::from_secs(30))
+            .await
+            .expect("Failed to begin transaction");
+
+        // Add read lock operation
+        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let operation = Operation::AcquireReadLock {
+            file_id,
+            client_id: 1001,
+            expires_at,
+        };
+
+        tx_manager
+            .add_operation(tx_id, operation)
+            .await
+            .expect("Failed to add read lock operation");
+
+        // Commit transaction
+        tx_manager
+            .commit(tx_id)
+            .await
+            .expect("Failed to commit transaction");
+
+        // Verify lock operation was proposed
+        let proposed_ops = raft_member.get_proposed_operations().await;
+        assert_eq!(proposed_ops.len(), 1);
+
+        match &proposed_ops[0] {
+            WormFsOperation::AtomicTransaction { operations, .. } => {
+                assert_eq!(operations.len(), 1);
+                match &operations[0] {
+                    MetadataOperation::AcquireReadLock {
+                        file_id: fid,
+                        client_id,
+                        ..
+                    } => {
+                        assert_eq!(*fid, file_id);
+                        assert_eq!(*client_id, 1001);
+                    }
+                    _ => panic!("Expected AcquireReadLock operation"),
+                }
+            }
+            _ => panic!("Expected AtomicTransaction operation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_acquire_write_lock() {
+        let (tx_manager, raft_member, metadata_store, _) = create_test_transaction_manager().await;
+
+        // First create a file to lock
+        let file_id = FileId::generate();
+        metadata_store
+            .create_file(
+                file_id,
+                &PathBuf::from("/test/lockfile2.txt"),
+                20002,
+                crate::metadata_store::types::FileMetadata {
+                    file_type: crate::metadata_store::types::FileType::RegularFile,
+                    size: 0,
+                    permissions: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None,
+                },
+            )
+            .await
+            .expect("Failed to create file");
+
+        // Begin transaction
+        let tx_id = tx_manager
+            .begin(Duration::from_secs(30))
+            .await
+            .expect("Failed to begin transaction");
+
+        // Add write lock operation
+        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let operation = Operation::AcquireWriteLock {
+            file_id,
+            client_id: 1002,
+            node_id: 1,
+            expires_at,
+        };
+
+        tx_manager
+            .add_operation(tx_id, operation)
+            .await
+            .expect("Failed to add write lock operation");
+
+        // Commit transaction
+        tx_manager
+            .commit(tx_id)
+            .await
+            .expect("Failed to commit transaction");
+
+        // Verify lock operation was proposed
+        let proposed_ops = raft_member.get_proposed_operations().await;
+        assert_eq!(proposed_ops.len(), 1);
+
+        match &proposed_ops[0] {
+            WormFsOperation::AtomicTransaction { operations, .. } => {
+                assert_eq!(operations.len(), 1);
+                match &operations[0] {
+                    MetadataOperation::AcquireWriteLock {
+                        file_id: fid,
+                        client_id,
+                        node_id,
+                        ..
+                    } => {
+                        assert_eq!(*fid, file_id);
+                        assert_eq!(*client_id, 1002);
+                        assert_eq!(*node_id, 1);
+                    }
+                    _ => panic!("Expected AcquireWriteLock operation"),
+                }
+            }
+            _ => panic!("Expected AtomicTransaction operation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_release_lock() {
+        let (tx_manager, raft_member, metadata_store, _) = create_test_transaction_manager().await;
+
+        // Create a file
+        let file_id = FileId::generate();
+        metadata_store
+            .create_file(
+                file_id,
+                &PathBuf::from("/test/lockfile3.txt"),
+                20003,
+                crate::metadata_store::types::FileMetadata {
+                    file_type: crate::metadata_store::types::FileType::RegularFile,
+                    size: 0,
+                    permissions: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None,
+                },
+            )
+            .await
+            .expect("Failed to create file");
+
+        // Acquire a lock first
+        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        metadata_store
+            .acquire_read_lock(
+                file_id,
+                crate::metadata_store::types::ClientId::new(1003),
+                expires_at,
+            )
+            .await
+            .expect("Failed to acquire read lock");
+
+        // Begin transaction to release lock
+        let tx_id = tx_manager
+            .begin(Duration::from_secs(30))
+            .await
+            .expect("Failed to begin transaction");
+
+        // Add release lock operation
+        let operation = Operation::ReleaseLock {
+            file_id,
+            client_id: 1003,
+        };
+
+        tx_manager
+            .add_operation(tx_id, operation)
+            .await
+            .expect("Failed to add release lock operation");
+
+        // Commit transaction
+        tx_manager
+            .commit(tx_id)
+            .await
+            .expect("Failed to commit transaction");
+
+        // Verify release operation was proposed
+        let proposed_ops = raft_member.get_proposed_operations().await;
+        assert_eq!(proposed_ops.len(), 1);
+
+        match &proposed_ops[0] {
+            WormFsOperation::AtomicTransaction { operations, .. } => {
+                assert_eq!(operations.len(), 1);
+                match &operations[0] {
+                    MetadataOperation::ReleaseLock {
+                        file_id: fid,
+                        client_id,
+                    } => {
+                        assert_eq!(*fid, file_id);
+                        assert_eq!(*client_id, 1003);
+                    }
+                    _ => panic!("Expected ReleaseLock operation"),
+                }
+            }
+            _ => panic!("Expected AtomicTransaction operation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_extend_lock() {
+        let (tx_manager, raft_member, metadata_store, _) = create_test_transaction_manager().await;
+
+        // Create a file
+        let file_id = FileId::generate();
+        metadata_store
+            .create_file(
+                file_id,
+                &PathBuf::from("/test/lockfile4.txt"),
+                20004,
+                crate::metadata_store::types::FileMetadata {
+                    file_type: crate::metadata_store::types::FileType::RegularFile,
+                    size: 0,
+                    permissions: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None,
+                },
+            )
+            .await
+            .expect("Failed to create file");
+
+        // Acquire a lock first
+        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        metadata_store
+            .acquire_write_lock(
+                file_id,
+                crate::metadata_store::types::ClientId::new(1004),
+                1,
+                expires_at,
+            )
+            .await
+            .expect("Failed to acquire write lock");
+
+        // Begin transaction to extend lock
+        let tx_id = tx_manager
+            .begin(Duration::from_secs(30))
+            .await
+            .expect("Failed to begin transaction");
+
+        // Add extend lock operation
+        let new_expiry = SystemTime::now() + Duration::from_secs(120);
+        let operation = Operation::ExtendLock {
+            file_id,
+            client_id: 1004,
+            new_expiry,
+        };
+
+        tx_manager
+            .add_operation(tx_id, operation)
+            .await
+            .expect("Failed to add extend lock operation");
+
+        // Commit transaction
+        tx_manager
+            .commit(tx_id)
+            .await
+            .expect("Failed to commit transaction");
+
+        // Verify extend operation was proposed
+        let proposed_ops = raft_member.get_proposed_operations().await;
+        assert_eq!(proposed_ops.len(), 1);
+
+        match &proposed_ops[0] {
+            WormFsOperation::AtomicTransaction { operations, .. } => {
+                assert_eq!(operations.len(), 1);
+                match &operations[0] {
+                    MetadataOperation::ExtendLock {
+                        file_id: fid,
+                        client_id,
+                        ..
+                    } => {
+                        assert_eq!(*fid, file_id);
+                        assert_eq!(*client_id, 1004);
+                    }
+                    _ => panic!("Expected ExtendLock operation"),
+                }
+            }
+            _ => panic!("Expected AtomicTransaction operation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lock_on_nonexistent_file() {
+        let (tx_manager, _, _, _) = create_test_transaction_manager().await;
+
+        let fake_file_id = FileId::generate();
+        let tx_id = tx_manager
+            .begin(Duration::from_secs(30))
+            .await
+            .expect("Failed to begin transaction");
+
+        let expires_at = SystemTime::now() + Duration::from_secs(60);
+        let operation = Operation::AcquireReadLock {
+            file_id: fake_file_id,
+            client_id: 1005,
+            expires_at,
+        };
+
+        let result = tx_manager.add_operation(tx_id, operation).await;
+
+        assert!(result.is_err(), "Should fail to lock nonexistent file");
+
+        match result.unwrap_err() {
+            Error::FileNotFound(_) => {}
+            e => panic!("Expected FileNotFound error, got: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_release_lock_without_holding_it() {
+        let (tx_manager, _, metadata_store, _) = create_test_transaction_manager().await;
+
+        // Create a file
+        let file_id = FileId::generate();
+        metadata_store
+            .create_file(
+                file_id,
+                &PathBuf::from("/test/lockfile5.txt"),
+                20005,
+                crate::metadata_store::types::FileMetadata {
+                    file_type: crate::metadata_store::types::FileType::RegularFile,
+                    size: 0,
+                    permissions: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None,
+                },
+            )
+            .await
+            .expect("Failed to create file");
+
+        // Try to release a lock we don't have
+        let tx_id = tx_manager
+            .begin(Duration::from_secs(30))
+            .await
+            .expect("Failed to begin transaction");
+
+        let operation = Operation::ReleaseLock {
+            file_id,
+            client_id: 9999,
+        };
+
+        let result = tx_manager.add_operation(tx_id, operation).await;
+
+        assert!(
+            result.is_err(),
+            "Should fail to release lock not held by client"
+        );
+
+        match result.unwrap_err() {
+            Error::LockNotFound(_, _) => {}
+            e => panic!("Expected LockNotFound error, got: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_extend_lock_without_holding_it() {
+        let (tx_manager, _, metadata_store, _) = create_test_transaction_manager().await;
+
+        // Create a file
+        let file_id = FileId::generate();
+        metadata_store
+            .create_file(
+                file_id,
+                &PathBuf::from("/test/lockfile6.txt"),
+                20006,
+                crate::metadata_store::types::FileMetadata {
+                    file_type: crate::metadata_store::types::FileType::RegularFile,
+                    size: 0,
+                    permissions: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None,
+                },
+            )
+            .await
+            .expect("Failed to create file");
+
+        // Try to extend a lock we don't have
+        let tx_id = tx_manager
+            .begin(Duration::from_secs(30))
+            .await
+            .expect("Failed to begin transaction");
+
+        let new_expiry = SystemTime::now() + Duration::from_secs(120);
+        let operation = Operation::ExtendLock {
+            file_id,
+            client_id: 9999,
+            new_expiry,
+        };
+
+        let result = tx_manager.add_operation(tx_id, operation).await;
+
+        assert!(
+            result.is_err(),
+            "Should fail to extend lock not held by client"
+        );
+
+        match result.unwrap_err() {
+            Error::LockNotFound(_, _) => {}
+            e => panic!("Expected LockNotFound error, got: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_lock_operations_in_transaction() {
+        let (tx_manager, raft_member, metadata_store, _) = create_test_transaction_manager().await;
+
+        // Create two files
+        let file_id1 = FileId::generate();
+        let file_id2 = FileId::generate();
+
+        metadata_store
+            .create_file(
+                file_id1,
+                &PathBuf::from("/test/lockfile7.txt"),
+                20007,
+                crate::metadata_store::types::FileMetadata {
+                    file_type: crate::metadata_store::types::FileType::RegularFile,
+                    size: 0,
+                    permissions: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None,
+                },
+            )
+            .await
+            .expect("Failed to create file1");
+
+        metadata_store
+            .create_file(
+                file_id2,
+                &PathBuf::from("/test/lockfile8.txt"),
+                20008,
+                crate::metadata_store::types::FileMetadata {
+                    file_type: crate::metadata_store::types::FileType::RegularFile,
+                    size: 0,
+                    permissions: 0o644,
+                    uid: 1000,
+                    gid: 1000,
+                    created_at: SystemTime::now(),
+                    modified_at: SystemTime::now(),
+                    accessed_at: SystemTime::now(),
+                    target: None,
+                },
+            )
+            .await
+            .expect("Failed to create file2");
+
+        // Begin transaction
+        let tx_id = tx_manager
+            .begin(Duration::from_secs(30))
+            .await
+            .expect("Failed to begin transaction");
+
+        // Add multiple lock operations
+        let expires_at = SystemTime::now() + Duration::from_secs(60);
+
+        tx_manager
+            .add_operation(
+                tx_id,
+                Operation::AcquireReadLock {
+                    file_id: file_id1,
+                    client_id: 2001,
+                    expires_at,
+                },
+            )
+            .await
+            .expect("Failed to add first lock");
+
+        tx_manager
+            .add_operation(
+                tx_id,
+                Operation::AcquireWriteLock {
+                    file_id: file_id2,
+                    client_id: 2001,
+                    node_id: 1,
+                    expires_at,
+                },
+            )
+            .await
+            .expect("Failed to add second lock");
+
+        // Commit transaction
+        tx_manager
+            .commit(tx_id)
+            .await
+            .expect("Failed to commit transaction");
+
+        // Verify both lock operations were batched
+        let proposed_ops = raft_member.get_proposed_operations().await;
+        assert_eq!(proposed_ops.len(), 1);
+
+        match &proposed_ops[0] {
+            WormFsOperation::AtomicTransaction { operations, .. } => {
+                assert_eq!(
+                    operations.len(),
+                    2,
+                    "Should have batched both lock operations"
+                );
             }
             _ => panic!("Expected AtomicTransaction operation"),
         }

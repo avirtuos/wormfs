@@ -198,6 +198,102 @@ impl TransactionManagerImpl {
         Ok(())
     }
 
+    /// Validate an AcquireReadLock operation.
+    async fn validate_acquire_read_lock(
+        &self,
+        file_id: crate::file_store::types::FileId,
+    ) -> Result<()> {
+        // Check that file exists
+        self.metadata_store
+            .get_file(file_id)
+            .await
+            .map_err(|_| Error::FileNotFound(file_id))?;
+
+        // Note: Actual lock conflict checking is done by the metadata store
+        // when the operation is applied. We just verify the file exists.
+        Ok(())
+    }
+
+    /// Validate an AcquireWriteLock operation.
+    async fn validate_acquire_write_lock(
+        &self,
+        file_id: crate::file_store::types::FileId,
+    ) -> Result<()> {
+        // Check that file exists
+        self.metadata_store
+            .get_file(file_id)
+            .await
+            .map_err(|_| Error::FileNotFound(file_id))?;
+
+        // Note: Actual lock conflict checking is done by the metadata store
+        // when the operation is applied. We just verify the file exists.
+        Ok(())
+    }
+
+    /// Validate a ReleaseLock operation.
+    async fn validate_release_lock(
+        &self,
+        file_id: crate::file_store::types::FileId,
+        client_id: u64,
+    ) -> Result<()> {
+        use crate::metadata_store::types::ClientId;
+
+        // Check that file exists
+        self.metadata_store
+            .get_file(file_id)
+            .await
+            .map_err(|_| Error::FileNotFound(file_id))?;
+
+        // Check that the client actually has a lock on this file
+        let locks = self
+            .metadata_store
+            .get_file_locks(file_id)
+            .await
+            .map_err(|e| Error::MetadataStoreError(e.to_string()))?;
+
+        let has_lock = locks
+            .iter()
+            .any(|lock| lock.client_id == ClientId::new(client_id));
+
+        if !has_lock {
+            return Err(Error::LockNotFound(file_id, client_id));
+        }
+
+        Ok(())
+    }
+
+    /// Validate an ExtendLock operation.
+    async fn validate_extend_lock(
+        &self,
+        file_id: crate::file_store::types::FileId,
+        client_id: u64,
+    ) -> Result<()> {
+        use crate::metadata_store::types::ClientId;
+
+        // Check that file exists
+        self.metadata_store
+            .get_file(file_id)
+            .await
+            .map_err(|_| Error::FileNotFound(file_id))?;
+
+        // Check that the client actually has a lock on this file
+        let locks = self
+            .metadata_store
+            .get_file_locks(file_id)
+            .await
+            .map_err(|e| Error::MetadataStoreError(e.to_string()))?;
+
+        let has_lock = locks
+            .iter()
+            .any(|lock| lock.client_id == ClientId::new(client_id));
+
+        if !has_lock {
+            return Err(Error::LockNotFound(file_id, client_id));
+        }
+
+        Ok(())
+    }
+
     /// Validate an operation before adding it to the transaction.
     async fn validate_operation(&self, operation: &Operation) -> Result<()> {
         match operation {
@@ -215,6 +311,20 @@ impl TransactionManagerImpl {
             }
             Operation::DeleteStripe { stripe_id, .. } => {
                 self.validate_delete_stripe(*stripe_id).await?;
+            }
+            Operation::AcquireReadLock { file_id, .. } => {
+                self.validate_acquire_read_lock(*file_id).await?;
+            }
+            Operation::AcquireWriteLock { file_id, .. } => {
+                self.validate_acquire_write_lock(*file_id).await?;
+            }
+            Operation::ReleaseLock { file_id, client_id } => {
+                self.validate_release_lock(*file_id, *client_id).await?;
+            }
+            Operation::ExtendLock {
+                file_id, client_id, ..
+            } => {
+                self.validate_extend_lock(*file_id, *client_id).await?;
             }
         }
 

@@ -551,6 +551,75 @@ impl WormFsStateMachine {
                 );
                 // In a full implementation, we might need to add this to MetadataStore
             }
+
+            MetadataOperation::AcquireReadLock {
+                file_id,
+                client_id,
+                expires_at,
+            } => {
+                use crate::metadata_store::types::ClientId;
+
+                metadata_store
+                    .acquire_read_lock(*file_id, ClientId::new(*client_id), *expires_at)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                debug!(
+                    "Read lock acquired for file {:?} by client {}",
+                    file_id, client_id
+                );
+            }
+
+            MetadataOperation::AcquireWriteLock {
+                file_id,
+                client_id,
+                node_id,
+                expires_at,
+            } => {
+                use crate::metadata_store::types::ClientId;
+
+                metadata_store
+                    .acquire_write_lock(*file_id, ClientId::new(*client_id), *node_id, *expires_at)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                debug!(
+                    "Write lock acquired for file {:?} by client {} on node {}",
+                    file_id, client_id, node_id
+                );
+            }
+
+            MetadataOperation::ReleaseLock { file_id, client_id } => {
+                use crate::metadata_store::types::ClientId;
+
+                metadata_store
+                    .release_lock(*file_id, ClientId::new(*client_id))
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                debug!(
+                    "Lock released for file {:?} by client {}",
+                    file_id, client_id
+                );
+            }
+
+            MetadataOperation::ExtendLock {
+                file_id,
+                client_id,
+                new_expiry,
+            } => {
+                use crate::metadata_store::types::ClientId;
+
+                metadata_store
+                    .extend_lock(*file_id, ClientId::new(*client_id), *new_expiry)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                debug!(
+                    "Lock extended for file {:?} by client {}",
+                    file_id, client_id
+                );
+            }
         }
 
         Ok(())
@@ -861,7 +930,14 @@ impl WormFsStateMachine {
                     disk_id: *new_disk,
                 },
             }),
-            // CreateChunk and DeleteChunk don't produce change events
+            MetadataOperation::ReleaseLock { file_id, .. } => {
+                // Note: We don't have the inode in ReleaseLock operation,
+                // so we can't emit a full LockReleased event.
+                // In practice, lock release events may not be critical for most subscribers.
+                // If needed, we could query the metadata store for the inode before releasing.
+                None
+            }
+            // CreateChunk, DeleteChunk, and lock acquire/extend operations don't produce change events
             _ => None,
         }
     }
