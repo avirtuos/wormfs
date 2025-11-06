@@ -94,31 +94,27 @@ cargo clean --package wormfs
 sleep 2
 
 # 1. Cargo Build - Check for errors and warnings
-echo -e "${YELLOW}Step 1/7: Building project...${NC}"
+echo -e "${YELLOW}Step 1/6: Building project...${NC}"
 run_check "Cargo Build" "cargo build 2>&1 | tee /tmp/wormfs_build.log && ! grep 'error:' /tmp/wormfs_build.log" "/tmp/wormfs_build.log"
 
 # 2. Cargo Test - Run all tests (check for compilation errors first, then run tests)
-echo -e "${YELLOW}Step 2/7: Running tests...${NC}"
+echo -e "${YELLOW}Step 2/6: Running tests...${NC}"
 run_check "Cargo Test" "cargo test 2>&1 | tee /tmp/wormfs_test.log && ! grep -E '^error:|^error\[E[0-9]+\]|could not compile' /tmp/wormfs_test.log" "/tmp/wormfs_test.log"
 
-# 3. Cargo Test (Integration Tests) - Run integration tests with test-utils feature
-echo -e "${YELLOW}Step 3/7: Running integration tests...${NC}"
-run_check "Cargo Integration Tests" "cargo test --tests --features test-utils 2>&1 | tee /tmp/wormfs_integration_test.log && ! grep -E '^error:|^error\[E[0-9]+\]|could not compile' /tmp/wormfs_integration_test.log" "/tmp/wormfs_integration_test.log"
-
-# 4. FUSE Integration Tests - Run ignored integration tests that mount filesystems
-echo -e "${YELLOW}Step 4/7: Running FUSE integration tests (ignored)...${NC}"
+# 3. FUSE Integration Tests - Run ignored integration tests that mount filesystems
+echo -e "${YELLOW}Step 3/6: Running FUSE integration tests (ignored)...${NC}"
 run_check "FUSE Integration Tests" "./scripts/run_fuse_integration_tests.sh" ""
 
-# 5. Cargo Check (test-utils feature) - Verify test utilities compile
-echo -e "${YELLOW}Step 5/7: Checking test-utils feature...${NC}"
+# 4. Cargo Check (test-utils feature) - Verify test utilities compile
+echo -e "${YELLOW}Step 4/6: Checking test-utils feature...${NC}"
 run_check "Cargo Check test-utils" "cargo check --features test-utils" ""
 
-# 6. Cargo Fmt Check - Verify code formatting
-echo -e "${YELLOW}Step 6/7: Checking code format...${NC}"
+# 5. Cargo Fmt Check - Verify code formatting
+echo -e "${YELLOW}Step 5/6: Checking code format...${NC}"
 run_check "Cargo Format Check" "cargo fmt --all -- --check" ""
 
-# 7. Cargo Clippy - Lint with warnings as errors
-echo -e "${YELLOW}Step 7/7: Running clippy linter...${NC}"
+# 6. Cargo Clippy - Lint with warnings as errors
+echo -e "${YELLOW}Step 6/6: Running clippy linter...${NC}"
 run_check "Cargo Clippy" "cargo clippy --all-targets --all-features -- -D warnings" ""
 
 # Print summary table function
