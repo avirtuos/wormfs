@@ -148,6 +148,46 @@ pub enum Operation {
         /// File ID this stripe belongs to
         file_id: FileId,
     },
+
+    /// Acquire a read lock on a file
+    AcquireReadLock {
+        /// File ID to lock
+        file_id: FileId,
+        /// Client requesting the lock
+        client_id: u64,
+        /// Lock expiration time (for deadlock prevention)
+        expires_at: SystemTime,
+    },
+
+    /// Acquire a write lock on a file
+    AcquireWriteLock {
+        /// File ID to lock
+        file_id: FileId,
+        /// Client requesting the lock
+        client_id: u64,
+        /// Node ID where the client is located
+        node_id: u64,
+        /// Lock expiration time (for deadlock prevention)
+        expires_at: SystemTime,
+    },
+
+    /// Release a lock on a file
+    ReleaseLock {
+        /// File ID to unlock
+        file_id: FileId,
+        /// Client releasing the lock
+        client_id: u64,
+    },
+
+    /// Extend lock expiration time
+    ExtendLock {
+        /// File ID
+        file_id: FileId,
+        /// Client ID
+        client_id: u64,
+        /// New expiration time
+        new_expiry: SystemTime,
+    },
 }
 
 impl Operation {
@@ -199,6 +239,38 @@ impl Operation {
             Operation::DeleteStripe { stripe_id, file_id } => {
                 MetadataOperation::DeleteStripe { stripe_id, file_id }
             }
+            Operation::AcquireReadLock {
+                file_id,
+                client_id,
+                expires_at,
+            } => MetadataOperation::AcquireReadLock {
+                file_id,
+                client_id,
+                expires_at,
+            },
+            Operation::AcquireWriteLock {
+                file_id,
+                client_id,
+                node_id,
+                expires_at,
+            } => MetadataOperation::AcquireWriteLock {
+                file_id,
+                client_id,
+                node_id,
+                expires_at,
+            },
+            Operation::ReleaseLock { file_id, client_id } => {
+                MetadataOperation::ReleaseLock { file_id, client_id }
+            }
+            Operation::ExtendLock {
+                file_id,
+                client_id,
+                new_expiry,
+            } => MetadataOperation::ExtendLock {
+                file_id,
+                client_id,
+                new_expiry,
+            },
         }
     }
 }
@@ -245,6 +317,18 @@ pub enum Error {
     /// Stripe not found
     #[error("Stripe not found: {0:?}")]
     StripeNotFound(StripeId),
+
+    /// Lock conflict - another client holds a conflicting lock
+    #[error("Lock conflict on file {0:?}: {1}")]
+    LockConflict(FileId, String),
+
+    /// Lock not found or already released
+    #[error("Lock not found for file {0:?}, client {1}")]
+    LockNotFound(FileId, u64),
+
+    /// Lock has expired
+    #[error("Lock has expired for file {0:?}, client {1}")]
+    LockExpired(FileId, u64),
 
     /// Raft operation failed
     #[error("Raft operation failed: {0}")]

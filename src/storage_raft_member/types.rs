@@ -473,6 +473,27 @@ pub enum MetadataOperation {
         disk_id: DiskId,
         chunk_id: ChunkId,
     },
+    /// Acquire a read lock on a file
+    AcquireReadLock {
+        file_id: FileId,
+        client_id: u64,
+        expires_at: SystemTime,
+    },
+    /// Acquire a write lock on a file
+    AcquireWriteLock {
+        file_id: FileId,
+        client_id: u64,
+        node_id: u64,
+        expires_at: SystemTime,
+    },
+    /// Release a lock
+    ReleaseLock { file_id: FileId, client_id: u64 },
+    /// Extend lock expiration time
+    ExtendLock {
+        file_id: FileId,
+        client_id: u64,
+        new_expiry: SystemTime,
+    },
 }
 
 /// Command operations that can be proposed through Raft.
