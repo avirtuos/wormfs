@@ -699,6 +699,51 @@ cluster_manager_preset = "moderate"     # Options: "conservative", "moderate", "
 - Corrupted entries trigger snapshot install from leader
 - Node may need to rejoin cluster with fresh state
 
+### State Machine Apply Failures
+
+When the state machine fails to apply a committed Raft operation, this indicates state corruption or a serious bug that could cause state divergence across replicas.
+
+**Semi-Automatic Recovery Process:**
+
+1. **Detection** - Apply operation fails after Raft commit
+2. **Automatic Response:**
+   - Node enters read-only mode (rejects new writes)
+   - Creates diagnostic marker file: `data/snapshots/NEEDS_RESYNC`
+   - Logs detailed failure information (operation, reason, context)
+   - Returns error from apply_operation()
+3. **Operator Action Required:**
+   - Check `NEEDS_RESYNC` file for failure details
+   - Stop the affected node
+   - Optionally clear or backup corrupted state
+   - Restart the node
+4. **Automatic Recovery:**
+   - OpenRaft detects node is behind
+   - Leader sends InstallSnapshot RPC
+   - Node applies snapshot to restore state
+   - Resync state cleared automatically
+   - Node resumes normal operation
+
+**Marker File Format:**
+```
+Reason: AtomicTransaction TxId(12345) failed: 2 of 5 operations failed
+Failed Operations: FileCreate(...): database error, StripeCreate(...): constraint violation
+Triggered: 2025-11-06 10:30:45 UTC
+Last Applied Index: 10234
+```
+
+**Design Rationale:**
+- **Semi-automatic** approach chosen for Phase 2 safety
+- Operator visibility into failures aids debugging
+- Prevents potential infinite resync loops
+- Simpler than fully automatic recovery
+- Future enhancement: add `auto_resync_enabled` config flag
+
+**Prevention:**
+- This should be extremely rare in production
+- Indicates either corruption or state machine bugs
+- Proper validation in TransactionManager prevents most failures
+- Frequent resyncs warrant investigation and bug reports
+
 ## Testing Strategy
 
 ### Unit Tests

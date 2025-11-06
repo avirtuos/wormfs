@@ -153,6 +153,35 @@ Open your browser to **http://127.0.0.1:9090/** to view:
 
 ---
 
+## 🔧 Troubleshooting
+
+### State Machine Resync
+
+**Symptom:** Node logs show "STATE MACHINE APPLY FAILURE - Triggering automatic resync"
+
+**Cause:** The Raft state machine failed to apply a committed operation, indicating potential state corruption or a serious bug.
+
+**What Happens:**
+- Node automatically enters read-only mode (rejects new writes)
+- Creates diagnostic file: `data/snapshots/NEEDS_RESYNC`
+- Logs detailed failure information
+- Waits for operator intervention
+
+**Recovery Steps:**
+1. Check the `NEEDS_RESYNC` file for failure details
+2. Stop the affected node
+3. Clear or backup the corrupted state (optional)
+4. Restart the node
+5. OpenRaft will automatically install a snapshot from the leader
+6. Node resumes normal operation once snapshot is applied
+
+**Prevention:**
+- This should be extremely rare in production
+- Frequent resyncs indicate a bug that should be reported
+- Check logs for patterns before the failure
+
+---
+
 ## 🤝 Contributing
 
 This project is currently in active development as a learning exercise. While it's not yet ready for external contributions, you're welcome to:

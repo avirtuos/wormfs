@@ -314,6 +314,10 @@ pub enum Error {
     #[error("Raft error: {0}")]
     RaftError(String),
 
+    /// Node is resyncing state and cannot accept writes
+    #[error("Node is resyncing state: {reason}")]
+    NodeResyncing { reason: String },
+
     /// I/O error
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -378,6 +382,48 @@ pub struct RaftMetrics {
 
     /// Timestamp when leader received AppendEntriesResponse from each follower (leader only)
     pub heartbeat_acked: HashMap<NodeId, Instant>,
+}
+
+/// State machine status indicating whether it needs resynchronization.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum StateMachineStatus {
+    /// State machine is operating normally
+    Normal,
+
+    /// State machine needs resync due to apply failure
+    NeedsResync {
+        /// Reason for resync requirement
+        reason: String,
+        /// List of operations that failed
+        failed_operations: Vec<String>,
+        /// When the resync was triggered
+        triggered_at: SystemTime,
+    },
+
+    /// State machine is currently resyncing
+    Resyncing {
+        /// Progress percentage (0.0 to 100.0)
+        progress: f64,
+        /// When resync started
+        started_at: SystemTime,
+    },
+}
+
+impl StateMachineStatus {
+    /// Check if the state machine is healthy (normal operation)
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, StateMachineStatus::Normal)
+    }
+
+    /// Check if the state machine needs resync
+    pub fn needs_resync(&self) -> bool {
+        matches!(self, StateMachineStatus::NeedsResync { .. })
+    }
+
+    /// Check if the state machine is currently resyncing
+    pub fn is_resyncing(&self) -> bool {
+        matches!(self, StateMachineStatus::Resyncing { .. })
+    }
 }
 
 // ============================================================================

@@ -8,6 +8,7 @@
 //! - Transaction state tracking
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -85,6 +86,21 @@ pub(crate) struct StateMachineInner {
 
     /// Active metadata change subscriptions
     pub(crate) subscriptions: Vec<Subscription>,
+
+    /// Whether the state machine needs resynchronization due to apply failure
+    needs_resync: AtomicBool,
+
+    /// Reason for needing resync (if needs_resync is true)
+    resync_reason: Option<String>,
+
+    /// List of operations that failed and triggered resync
+    failed_operations: Vec<String>,
+
+    /// Timestamp when resync was triggered
+    resync_triggered_at: Option<SystemTime>,
+
+    /// Whether the state machine is in read-only mode (during resync)
+    read_only_mode: AtomicBool,
 }
 
 /// Raft state machine that applies operations to MetadataStore.
@@ -117,6 +133,11 @@ impl WormFsStateMachine {
                 snapshot_directory,
                 incoming_snapshot_path: None,
                 subscriptions: Vec::new(),
+                needs_resync: AtomicBool::new(false),
+                resync_reason: None,
+                failed_operations: Vec::new(),
+                resync_triggered_at: None,
+                read_only_mode: AtomicBool::new(false),
             })),
         }
     }
@@ -166,6 +187,99 @@ impl WormFsStateMachine {
         inner.subscriptions.push(Subscription { sender, filter });
 
         receiver
+    }
+
+    /// Get the current state machine status.
+    pub async fn get_status(&self) -> super::types::StateMachineStatus {
+        let inner = self.inner.read().await;
+
+        if inner.needs_resync.load(Ordering::SeqCst) {
+            super::types::StateMachineStatus::NeedsResync {
+                reason: inner
+                    .resync_reason
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                failed_operations: inner.failed_operations.clone(),
+                triggered_at: inner.resync_triggered_at.unwrap_or_else(SystemTime::now),
+            }
+        } else if inner.read_only_mode.load(Ordering::SeqCst) {
+            super::types::StateMachineStatus::Resyncing {
+                progress: 0.0, // TODO: Track actual progress
+                started_at: inner.resync_triggered_at.unwrap_or_else(SystemTime::now),
+            }
+        } else {
+            super::types::StateMachineStatus::Normal
+        }
+    }
+
+    /// Trigger state machine resynchronization due to apply failure.
+    ///
+    /// This marks the state machine as needing resync and enters read-only mode.
+    async fn trigger_resync(&self, reason: String, failed_ops: Vec<String>) {
+        let mut inner = self.inner.write().await;
+
+        error!(
+            failed_ops = %failed_ops.len(),
+            reason = %reason,
+            last_applied = inner.last_applied_index,
+            "STATE MACHINE APPLY FAILURE - Triggering automatic resync"
+        );
+
+        // Set resync flags
+        inner.needs_resync.store(true, Ordering::SeqCst);
+        inner.read_only_mode.store(true, Ordering::SeqCst);
+        inner.resync_reason = Some(reason.clone());
+        inner.failed_operations = failed_ops.clone();
+        inner.resync_triggered_at = Some(SystemTime::now());
+
+        // Write corruption marker file
+        let marker_path = inner.snapshot_directory.join("NEEDS_RESYNC");
+        let marker_content = format!(
+            "Reason: {}\nFailed Operations: {}\nTriggered: {:?}\nLast Applied Index: {}\n",
+            reason,
+            failed_ops.join(", "),
+            SystemTime::now(),
+            inner.last_applied_index
+        );
+
+        if let Err(e) = std::fs::write(&marker_path, marker_content) {
+            error!("Failed to write resync marker file: {}", e);
+        } else {
+            info!("Wrote resync marker to {:?}", marker_path);
+        }
+
+        warn!(
+            "Node entered read-only mode and needs state resync. \
+             Operator should restart node to trigger snapshot-based recovery."
+        );
+    }
+
+    /// Clear resync state after successful snapshot installation.
+    ///
+    /// This should be called after a snapshot is successfully installed to
+    /// restore normal operation.
+    async fn clear_resync_state(&self) {
+        let mut inner = self.inner.write().await;
+
+        if inner.needs_resync.load(Ordering::SeqCst) {
+            info!("Clearing resync state - node recovered");
+
+            inner.needs_resync.store(false, Ordering::SeqCst);
+            inner.read_only_mode.store(false, Ordering::SeqCst);
+            inner.resync_reason = None;
+            inner.failed_operations.clear();
+            inner.resync_triggered_at = None;
+
+            // Remove the marker file
+            let marker_path = inner.snapshot_directory.join("NEEDS_RESYNC");
+            if marker_path.exists() {
+                if let Err(e) = std::fs::remove_file(&marker_path) {
+                    warn!("Failed to remove resync marker file: {}", e);
+                } else {
+                    info!("Removed resync marker file");
+                }
+            }
+        }
     }
 
     /// Apply a WormFsOperation to the state machine.
@@ -274,19 +388,28 @@ impl WormFsStateMachine {
                         }
                     }
 
-                    // If any operations failed, this is a critical error that could cause
-                    // state divergence across Raft replicas. We panic to fail-stop rather
-                    // than continue with inconsistent state.
+                    // If any operations failed, trigger automatic resync to recover state.
+                    // This prevents state divergence by entering read-only mode and requesting
+                    // a snapshot from the leader.
                     if !failed_operations.is_empty() {
-                        panic!(
-                            "CRITICAL: Transaction {:?} commit failed! {} operations succeeded, {} failed. \
-                             Failed operations: {:?}. This indicates a serious bug or state corruption. \
-                             Node must restart to resync from cluster.",
+                        let reason = format!(
+                            "Transaction {:?} commit failed: {} of {} operations failed",
                             tx_id,
-                            successful_operations.len(),
                             failed_operations.len(),
-                            failed_operations
+                            successful_operations.len() + failed_operations.len()
                         );
+
+                        let failed_op_strings: Vec<String> = failed_operations
+                            .iter()
+                            .map(|(op, err)| format!("{:?}: {}", op, err))
+                            .collect();
+
+                        // Drop the write lock before calling trigger_resync
+                        drop(inner);
+                        self.trigger_resync(reason.clone(), failed_op_strings).await;
+
+                        // Return error to indicate apply failure
+                        return Err(reason);
                     }
 
                     // Convert ONLY successful operations to metadata change events
@@ -370,19 +493,28 @@ impl WormFsStateMachine {
                     }
                 }
 
-                // If any operations failed, this is a critical error that could cause
-                // state divergence across Raft replicas. We panic to fail-stop rather
-                // than continue with inconsistent state.
+                // If any operations failed, trigger automatic resync to recover state.
+                // This prevents state divergence by entering read-only mode and requesting
+                // a snapshot from the leader.
                 if !failed_operations.is_empty() {
-                    panic!(
-                        "CRITICAL: AtomicTransaction {:?} failed! {} operations succeeded, {} failed. \
-                         Failed operations: {:?}. This indicates a serious bug or state corruption. \
-                         Node must restart to resync from cluster.",
+                    let reason = format!(
+                        "AtomicTransaction {:?} failed: {} of {} operations failed",
                         tx_id,
-                        successful_operations.len(),
                         failed_operations.len(),
-                        failed_operations
+                        successful_operations.len() + failed_operations.len()
                     );
+
+                    let failed_op_strings: Vec<String> = failed_operations
+                        .iter()
+                        .map(|(op, err)| format!("{:?}: {}", op, err))
+                        .collect();
+
+                    // Drop the write lock before calling trigger_resync
+                    drop(inner);
+                    self.trigger_resync(reason.clone(), failed_op_strings).await;
+
+                    // Return error to indicate apply failure
+                    return Err(reason);
                 }
 
                 // Convert successful operations to metadata change events
@@ -1345,6 +1477,12 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
             "Snapshot installed successfully: cleared {} transactions, last_applied_index={}",
             old_tx_count, last_included_index
         );
+
+        // Release the lock before calling clear_resync_state
+        drop(inner);
+
+        // Clear resync state if node was in resync mode
+        self.clear_resync_state().await;
 
         Ok(())
     }
