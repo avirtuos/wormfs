@@ -244,12 +244,19 @@ impl SnapshotStore for SnapshotStoreImpl {
         snapshot_id: u64,
         log_index: u64,
         log_term: u64,
+        snapshot_leader_node_id: u64,
         metadata_db_path: &Path,
+        membership_log_index: Option<u64>,
+        membership_log_term: Option<u64>,
+        membership_leader_node_id: Option<u64>,
+        membership_config: String,
     ) -> Result<SnapshotInfo, Error> {
         info!(
-            "Ingesting snapshot {} from {}",
+            "Ingesting snapshot {} from {} with leader_node_id={}, membership log_id {:?}",
             snapshot_id,
-            metadata_db_path.display()
+            metadata_db_path.display(),
+            snapshot_leader_node_id,
+            membership_log_index
         );
 
         // Verify source file exists
@@ -294,6 +301,11 @@ impl SnapshotStore for SnapshotStoreImpl {
             compression,
             node_id: self.inner.node_id.clone(),
             storage_path: snapshot_dir.clone(),
+            membership_log_index,
+            membership_log_term,
+            membership_leader_node_id,
+            membership_config,
+            snapshot_leader_node_id,
         };
 
         // Write metadata.json
@@ -453,8 +465,20 @@ impl SnapshotStore for SnapshotStoreImpl {
         );
 
         // Ingest the received snapshot
+        // Note: membership information is not available in this context (receiving from remote)
+        // The membership will be set when the snapshot is installed by Raft
         let result = self
-            .ingest_snapshot(snapshot_id, log_index, log_term, &temp_file)
+            .ingest_snapshot(
+                snapshot_id,
+                log_index,
+                log_term,
+                0, // snapshot_leader_node_id - not available during receive, will be overwritten
+                &temp_file,
+                None,               // membership_log_index - not available during receive
+                None,               // membership_log_term - not available during receive
+                None,               // membership_leader_node_id - not available during receive
+                String::from("{}"), // empty membership config - will be set during install
+            )
             .await;
 
         // Clean up temporary file
@@ -626,7 +650,17 @@ mod tests {
 
         // Ingest snapshot
         let info = store
-            .ingest_snapshot(1, 100, 5, &source_path)
+            .ingest_snapshot(
+                1,
+                100,
+                5,
+                1,
+                &source_path,
+                None,
+                None,
+                None,
+                "{}".to_string(),
+            )
             .await
             .unwrap();
 
@@ -653,7 +687,17 @@ mod tests {
 
         for id in [1, 3, 2] {
             store
-                .ingest_snapshot(id, id * 100, 5, &source_path)
+                .ingest_snapshot(
+                    id,
+                    id * 100,
+                    5,
+                    1,
+                    &source_path,
+                    None,
+                    None,
+                    None,
+                    "{}".to_string(),
+                )
                 .await
                 .unwrap();
         }
@@ -674,7 +718,17 @@ mod tests {
         // Ingest snapshots in random order
         for id in [3, 1, 2] {
             store
-                .ingest_snapshot(id, id * 100, 5, &source_path)
+                .ingest_snapshot(
+                    id,
+                    id * 100,
+                    5,
+                    1,
+                    &source_path,
+                    None,
+                    None,
+                    None,
+                    "{}".to_string(),
+                )
                 .await
                 .unwrap();
         }
@@ -698,7 +752,17 @@ mod tests {
         // Ingest 5 snapshots (max_snapshots is 3)
         for id in 1..=5 {
             store
-                .ingest_snapshot(id, id * 100, 5, &source_path)
+                .ingest_snapshot(
+                    id,
+                    id * 100,
+                    5,
+                    1,
+                    &source_path,
+                    None,
+                    None,
+                    None,
+                    "{}".to_string(),
+                )
                 .await
                 .unwrap();
         }
@@ -723,15 +787,45 @@ mod tests {
 
         // Ingest snapshots at different log indices
         store
-            .ingest_snapshot(1, 100, 5, &source_path)
+            .ingest_snapshot(
+                1,
+                100,
+                5,
+                1,
+                &source_path,
+                None,
+                None,
+                None,
+                "{}".to_string(),
+            )
             .await
             .unwrap();
         store
-            .ingest_snapshot(2, 200, 5, &source_path)
+            .ingest_snapshot(
+                2,
+                200,
+                5,
+                1,
+                &source_path,
+                None,
+                None,
+                None,
+                "{}".to_string(),
+            )
             .await
             .unwrap();
         store
-            .ingest_snapshot(3, 300, 5, &source_path)
+            .ingest_snapshot(
+                3,
+                300,
+                5,
+                1,
+                &source_path,
+                None,
+                None,
+                None,
+                "{}".to_string(),
+            )
             .await
             .unwrap();
 
@@ -765,7 +859,17 @@ mod tests {
 
         // Ingest snapshot
         store
-            .ingest_snapshot(1, 100, 5, &source_path)
+            .ingest_snapshot(
+                1,
+                100,
+                5,
+                1,
+                &source_path,
+                None,
+                None,
+                None,
+                "{}".to_string(),
+            )
             .await
             .unwrap();
 
@@ -788,11 +892,31 @@ mod tests {
         let source_path = create_dummy_snapshot(temp_dir.path(), content).await;
 
         store
-            .ingest_snapshot(1, 100, 5, &source_path)
+            .ingest_snapshot(
+                1,
+                100,
+                5,
+                1,
+                &source_path,
+                None,
+                None,
+                None,
+                "{}".to_string(),
+            )
             .await
             .unwrap();
         store
-            .ingest_snapshot(2, 200, 5, &source_path)
+            .ingest_snapshot(
+                2,
+                200,
+                5,
+                1,
+                &source_path,
+                None,
+                None,
+                None,
+                "{}".to_string(),
+            )
             .await
             .unwrap();
 

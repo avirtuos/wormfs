@@ -17,7 +17,7 @@ WormFS, short for write-once-read-many file system, is intended to be user-space
 9. Ask for clarification, if any task or requirement is unclear, ask for clarification before proceeding with implementation.
 10. Do not remove or mark tests as ignored without explaining why the change is needed and asking for approval before doing so.
 11. Do not create new documents (e.g. design docs) without asking first.
-12. Use tracing subscriber (e.g. info!) for logging instead of print statements.
+12. Use tracing subscriber (e.g. info!) for logging instead of print or eprint statements. Do not use any special characters in log or print statements, only regular alpha-numeric and punctuation characters.
 
 ## Specific Instructions for Claude
 

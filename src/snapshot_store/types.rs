@@ -139,6 +139,25 @@ pub struct SnapshotInfo {
 
     /// Path to snapshot storage directory
     pub storage_path: PathBuf,
+
+    /// Membership log index (index of the log entry that established the membership in this snapshot)
+    /// None if membership was established before any logged changes
+    pub membership_log_index: Option<u64>,
+
+    /// Membership log term (term of the log entry that established the membership in this snapshot)
+    /// None if membership was established before any logged changes
+    pub membership_log_term: Option<u64>,
+
+    /// Node ID of the leader that created this log entry (for membership log_id)
+    /// None if membership was established before any logged changes
+    pub membership_leader_node_id: Option<u64>,
+
+    /// Serialized membership configuration (JSON format)
+    /// Contains the voter and learner node configurations that were active at snapshot time
+    pub membership_config: String,
+
+    /// Node ID of the leader that created the last log entry in this snapshot
+    pub snapshot_leader_node_id: u64,
 }
 
 impl SnapshotInfo {

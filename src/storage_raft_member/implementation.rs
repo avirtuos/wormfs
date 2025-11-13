@@ -553,6 +553,11 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             config.snapshot_compression_level,
         );
 
+        // Initialize the state machine (creates snapshot directory, scans existing snapshots)
+        state_machine.initialize().await.map_err(|e| {
+            Error::ConfigError(format!("Failed to initialize state machine: {:?}", e))
+        })?;
+
         // Get a handle to the state machine's inner for subscription access
         let state_machine_inner = state_machine.inner_handle();
 
@@ -571,6 +576,8 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(
                 config.snapshot_log_size_threshold / 1000, // Convert to entry count estimate
             ),
+            max_in_snapshot_log_to_keep: 5, // Keep only 5 logs after snapshot for aggressive purging
+            replication_lag_threshold: 10,  // Send snapshot if follower >10 entries behind
             ..Default::default()
         };
 
