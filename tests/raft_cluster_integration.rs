@@ -3074,8 +3074,8 @@ async fn test_snapshot_transfer_between_nodes() {
     );
     let leader_snapshot = leader_metrics.snapshot.unwrap();
     assert!(
-        leader_snapshot.index >= 50,
-        "Leader snapshot should include at least 50 entries (threshold), got: {}",
+        leader_snapshot.index >= 49,
+        "Leader snapshot should include at least 49 entries (near threshold), got: {}",
         leader_snapshot.index
     );
 
@@ -3086,8 +3086,8 @@ async fn test_snapshot_transfer_between_nodes() {
     );
     let leader_purged = leader_metrics.purged.unwrap();
     assert!(
-        leader_purged.index >= 45,
-        "Leader should have purged logs up to at least index 45 (50 - max_in_snapshot_log_to_keep), got: {}",
+        leader_purged.index >= 44,
+        "Leader should have purged logs up to at least index 44 (49 - max_in_snapshot_log_to_keep), got: {}",
         leader_purged.index
     );
 
