@@ -14,6 +14,9 @@ use std::time::SystemTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
+// Import MetricService trait to use its methods
+use crate::metric_service::MetricService;
+
 /// Inner state for SnapshotStore with interior mutability.
 struct SnapshotStoreInner {
     /// Configuration
@@ -29,6 +32,9 @@ struct SnapshotStoreInner {
 
     /// Count of corrupted snapshots encountered during initialization
     corrupted_count: std::sync::atomic::AtomicUsize,
+
+    /// Optional metrics service for instrumentation (sync lock for fire-and-forget publishing)
+    metrics: RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>,
 }
 
 /// Implementation of SnapshotStore using in-memory registry.
@@ -66,11 +72,19 @@ impl SnapshotStoreImpl {
             registry: RwLock::new(HashMap::new()),
             node_id,
             corrupted_count: std::sync::atomic::AtomicUsize::new(0),
+            metrics: RwLock::new(None),
         };
 
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// Set the metrics service for this SnapshotStore.
+    ///
+    /// This allows metrics to be configured after construction.
+    pub fn set_metrics(&self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
+        *self.inner.metrics.write().unwrap() = Some(metrics);
     }
 
     /// Helper function to calculate SHA256 checksum of a file.
@@ -325,6 +339,9 @@ impl SnapshotStore for SnapshotStoreImpl {
         membership_leader_node_id: Option<u64>,
         membership_config: String,
     ) -> Result<SnapshotInfo, Error> {
+        use tokio::time::Instant;
+        let start = Instant::now();
+
         info!(
             "Ingesting snapshot {} from {} with leader_node_id={}, membership log_id {:?}",
             snapshot_id,
@@ -333,11 +350,31 @@ impl SnapshotStore for SnapshotStoreImpl {
             membership_log_index
         );
 
+        // Publish snapshot create counter
+        let metrics_opt = self.inner.metrics.read().unwrap().clone();
+        if let Some(ref metrics) = metrics_opt {
+            let _ = metrics.publish_counter(
+                "snapshot_create.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+        }
+
         // Verify source file exists
         if !tokio::fs::try_exists(metadata_db_path)
             .await
             .unwrap_or(false)
         {
+            // Publish error metric
+            let metrics_opt = self.inner.metrics.read().unwrap().clone();
+            if let Some(ref metrics) = metrics_opt {
+                let _ = metrics.publish_counter(
+                    "snapshot_create.errors",
+                    1,
+                    crate::metric_service::UnitType::Operations,
+                );
+            }
+
             return Err(Error::IoError(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Source file not found: {}", metadata_db_path.display()),
@@ -401,6 +438,77 @@ impl SnapshotStore for SnapshotStoreImpl {
             snapshot_id, file_size, compression
         );
 
+        // Publish success metrics
+        let metrics_opt = self.inner.metrics.read().unwrap().clone();
+        if let Some(ref metrics) = metrics_opt {
+            let elapsed = start.elapsed().as_secs_f64();
+
+            // Success counter
+            let _ = metrics.publish_counter(
+                "snapshot_create.success",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            // Latency histogram
+            let _ = metrics.publish_histogram(
+                "snapshot_create.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+
+            // Size histogram
+            let _ = metrics.publish_histogram(
+                "snapshot_create.size_bytes",
+                file_size as f64,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Compression ratio (if compressed)
+            if let CompressionAlgorithm::Zstd { .. } = compression {
+                // Get original size from source file
+                if let Ok(source_metadata) = tokio::fs::metadata(metadata_db_path).await {
+                    let original_size = source_metadata.len();
+                    if original_size > 0 {
+                        let compression_ratio = (file_size as f64 / original_size as f64) * 100.0;
+                        let _ = metrics.publish_histogram(
+                            "snapshot_create.compression_ratio",
+                            compression_ratio,
+                            crate::metric_service::UnitType::Percent,
+                        );
+                    }
+                }
+            }
+
+            // Update gauge metrics
+            let registry = self.inner.registry.read().unwrap();
+            let snapshot_count = registry.len() as f64;
+            let total_size: u64 = registry.values().map(|info| info.metadata_db_size).sum();
+
+            let _ = metrics.publish_gauge(
+                "snapshots.count",
+                snapshot_count,
+                crate::metric_service::UnitType::Count,
+            );
+
+            let _ = metrics.publish_gauge(
+                "snapshots.total_size_bytes",
+                total_size as f64,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            // Calculate oldest snapshot age
+            if let Some(oldest_timestamp) = registry.values().map(|info| info.timestamp).min() {
+                if let Ok(duration) = SystemTime::now().duration_since(oldest_timestamp) {
+                    let _ = metrics.publish_gauge(
+                        "snapshots.oldest_age_seconds",
+                        duration.as_secs_f64(),
+                        crate::metric_service::UnitType::Seconds,
+                    );
+                }
+            }
+        }
+
         // Trigger automatic pruning
         if let Err(e) = self.prune_snapshots().await {
             warn!("Failed to prune snapshots after ingestion: {:?}", e);
@@ -453,6 +561,9 @@ impl SnapshotStore for SnapshotStoreImpl {
     }
 
     async fn open_snapshot(&self, snapshot_id: u64) -> Result<SnapshotReader, Error> {
+        use tokio::time::Instant;
+        let start = Instant::now();
+
         let info = self.get_snapshot(snapshot_id).await?;
 
         // Determine the actual metadata file path based on compression
@@ -466,7 +577,27 @@ impl SnapshotStore for SnapshotStoreImpl {
             return Err(Error::NotFound(snapshot_id));
         }
 
-        Ok(SnapshotReader::new(snapshot_id, metadata_path, info))
+        let reader = SnapshotReader::new(snapshot_id, metadata_path, info.clone());
+
+        // Publish read metrics
+        let metrics_opt = self.inner.metrics.read().unwrap().clone();
+        if let Some(ref metrics) = metrics_opt {
+            let elapsed = start.elapsed().as_secs_f64();
+
+            let _ = metrics.publish_histogram(
+                "snapshot_read.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+
+            let _ = metrics.publish_histogram(
+                "snapshot_read.size_bytes",
+                info.metadata_db_size as f64,
+                crate::metric_service::UnitType::Bytes,
+            );
+        }
+
+        Ok(reader)
     }
 
     async fn stream_snapshot(
@@ -474,6 +605,9 @@ impl SnapshotStore for SnapshotStoreImpl {
         snapshot_id: u64,
         mut sink: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     ) -> Result<(), Error> {
+        use tokio::time::Instant;
+        let start = Instant::now();
+
         let reader = self.open_snapshot(snapshot_id).await?;
         let metadata_path = reader.get_metadata_db_path();
 
@@ -498,6 +632,25 @@ impl SnapshotStore for SnapshotStoreImpl {
         sink.flush().await?;
 
         info!("Streamed snapshot {} ({} bytes)", snapshot_id, total_bytes);
+
+        // Publish transfer metrics
+        let metrics_opt = self.inner.metrics.read().unwrap().clone();
+        if let Some(ref metrics) = metrics_opt {
+            let elapsed = start.elapsed().as_secs_f64();
+
+            let _ = metrics.publish_counter(
+                "snapshot_transfer.bytes_sent",
+                total_bytes,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            let _ = metrics.publish_histogram(
+                "snapshot_transfer.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+        }
+
         Ok(())
     }
 
@@ -576,10 +729,27 @@ impl SnapshotStore for SnapshotStoreImpl {
         let current_checksum = self.calculate_checksum(&metadata_path).await?;
 
         // Compare with stored checksum
-        Ok(current_checksum == info.metadata_db_checksum)
+        let is_valid = current_checksum == info.metadata_db_checksum;
+
+        // Publish verification error metric if checksum mismatch
+        if !is_valid {
+            let metrics_opt = self.inner.metrics.read().unwrap().clone();
+            if let Some(ref metrics) = metrics_opt {
+                let _ = metrics.publish_counter(
+                    "snapshot_verify.errors",
+                    1,
+                    crate::metric_service::UnitType::Operations,
+                );
+            }
+        }
+
+        Ok(is_valid)
     }
 
     async fn prune_snapshots(&self) -> Result<Vec<u64>, Error> {
+        use tokio::time::Instant;
+        let start = Instant::now();
+
         let retention = &self.inner.config.retention_policy;
         let mut deleted_ids = Vec::new();
 
@@ -638,6 +808,30 @@ impl SnapshotStore for SnapshotStoreImpl {
             info!("Pruned {} snapshots: {:?}", deleted_ids.len(), deleted_ids);
         }
 
+        // Publish pruning metrics
+        let metrics_opt = self.inner.metrics.read().unwrap().clone();
+        if let Some(ref metrics) = metrics_opt {
+            let elapsed = start.elapsed().as_secs_f64();
+
+            let _ = metrics.publish_counter(
+                "snapshot_prune.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            let _ = metrics.publish_counter(
+                "snapshot_prune.removed_count",
+                deleted_ids.len() as u64,
+                crate::metric_service::UnitType::Count,
+            );
+
+            let _ = metrics.publish_histogram(
+                "snapshot_prune.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+        }
+
         Ok(deleted_ids)
     }
 
@@ -654,6 +848,17 @@ impl SnapshotStore for SnapshotStoreImpl {
         }
 
         info!("Deleted snapshot {}", snapshot_id);
+
+        // Publish delete counter
+        let metrics_opt = self.inner.metrics.read().unwrap().clone();
+        if let Some(ref metrics) = metrics_opt {
+            let _ = metrics.publish_counter(
+                "snapshot_delete.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+        }
+
         Ok(())
     }
 
