@@ -7,6 +7,7 @@ use super::SnapshotStore;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -206,16 +207,31 @@ impl SnapshotStoreImpl {
                 // Read compressed file
                 let compressed_data = tokio::fs::read(input_path).await?;
 
-                // Decompress using zstd
-                let decompressed_data =
-                    zstd::bulk::decompress(&compressed_data, 10 * 1024 * 1024 * 1024).map_err(
-                        |e| Error::CompressionError(format!("Zstd decompression failed: {}", e)),
-                    )?;
+                // Decompress using streaming API (sync work in task pool)
+                let decompressed_data = tokio::task::spawn_blocking(move || {
+                    let cursor = std::io::Cursor::new(compressed_data);
+                    let mut decoder = zstd::stream::read::Decoder::new(cursor).map_err(|e| {
+                        Error::CompressionError(format!("Zstd decoder init failed: {}", e))
+                    })?;
+
+                    let mut decompressed = Vec::new();
+                    decoder.read_to_end(&mut decompressed).map_err(|e| {
+                        Error::CompressionError(format!("Zstd decompression failed: {}", e))
+                    })?;
+
+                    Ok::<Vec<u8>, Error>(decompressed)
+                })
+                .await
+                .map_err(|e| {
+                    Error::CompressionError(format!("Decompression task failed: {}", e))
+                })??;
+
+                let size = decompressed_data.len() as u64;
 
                 // Write decompressed data
                 tokio::fs::write(output_path, &decompressed_data).await?;
 
-                Ok(decompressed_data.len() as u64)
+                Ok(size)
             }
         }
     }

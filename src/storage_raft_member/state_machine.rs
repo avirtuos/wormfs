@@ -8,6 +8,7 @@
 //! - Transaction state tracking
 
 use std::collections::{BTreeSet, HashMap};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -1079,12 +1080,6 @@ impl WormFsStateMachine {
         }
         info!("Snapshot checksum verified: {:08x}", actual_checksum);
 
-        // Decompress if needed (though SQLite snapshots are uncompressed)
-        if snapshot_data.compressed {
-            warn!("Compressed snapshots not yet supported, but snapshot is marked as compressed");
-            return Err("Compressed snapshots not yet supported".to_string());
-        }
-
         // Restore MetadataStore from snapshot
         info!("Restoring MetadataStore from snapshot...");
         {
@@ -1604,7 +1599,7 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
             // Create path for decompressed file
             let decompressed_path = temp_path.with_extension("db");
 
-            // Decompress using zstd
+            // Decompress using streaming API (sync work in task pool)
             let compressed_data = tokio::fs::read(&temp_path).await.map_err(|e| {
                 error!("Failed to read compressed snapshot: {:?}", e);
                 let io_error = openraft::StorageIOError::new(
@@ -1615,16 +1610,37 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
                 StorageError::IO { source: io_error }
             })?;
 
-            let decompressed_data = zstd::bulk::decompress(&compressed_data, 100 * 1024 * 1024) // 100MB max
-                .map_err(|e| {
-                    error!("Failed to decompress snapshot: {:?}", e);
-                    let io_error = openraft::StorageIOError::new(
-                        openraft::ErrorSubject::Snapshot(None),
-                        openraft::ErrorVerb::Read,
-                        openraft::AnyError::error(format!("Decompression failed: {:?}", e)),
-                    );
-                    StorageError::IO { source: io_error }
-                })?;
+            let decompressed_data = tokio::task::spawn_blocking(move || {
+                let cursor = std::io::Cursor::new(compressed_data);
+                let mut decoder = zstd::stream::read::Decoder::new(cursor)
+                    .map_err(|e| format!("Zstd decoder init failed: {}", e))?;
+
+                let mut decompressed = Vec::new();
+                decoder
+                    .read_to_end(&mut decompressed)
+                    .map_err(|e| format!("Zstd decompression failed: {}", e))?;
+
+                Ok::<Vec<u8>, String>(decompressed)
+            })
+            .await
+            .map_err(|e| {
+                error!("Failed to decompress snapshot: {:?}", e);
+                let io_error = openraft::StorageIOError::new(
+                    openraft::ErrorSubject::Snapshot(None),
+                    openraft::ErrorVerb::Read,
+                    openraft::AnyError::error(format!("Decompression task failed: {}", e)),
+                );
+                StorageError::IO { source: io_error }
+            })?
+            .map_err(|e| {
+                error!("Failed to decompress snapshot: {}", e);
+                let io_error = openraft::StorageIOError::new(
+                    openraft::ErrorSubject::Snapshot(None),
+                    openraft::ErrorVerb::Read,
+                    openraft::AnyError::error(e),
+                );
+                StorageError::IO { source: io_error }
+            })?;
 
             let decompressed_size = decompressed_data.len();
 
