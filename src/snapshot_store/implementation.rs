@@ -26,6 +26,9 @@ struct SnapshotStoreInner {
 
     /// Node ID for tracking which node created snapshots
     node_id: String,
+
+    /// Count of corrupted snapshots encountered during initialization
+    corrupted_count: std::sync::atomic::AtomicUsize,
 }
 
 /// Implementation of SnapshotStore using in-memory registry.
@@ -62,6 +65,7 @@ impl SnapshotStoreImpl {
             config,
             registry: RwLock::new(HashMap::new()),
             node_id,
+            corrupted_count: std::sync::atomic::AtomicUsize::new(0),
         };
 
         Ok(Self {
@@ -116,6 +120,7 @@ impl SnapshotStoreImpl {
 
         let mut entries = tokio::fs::read_dir(storage_dir).await?;
         let mut count = 0;
+        let mut corrupted_count = 0;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -132,8 +137,23 @@ impl SnapshotStoreImpl {
                     "Snapshot directory missing metadata.json: {}",
                     path.display()
                 );
+                corrupted_count += 1;
                 continue;
             }
+
+            // Get file metadata for enhanced error context
+            let file_metadata = match tokio::fs::metadata(&metadata_path).await {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    error!(
+                        "Failed to read file metadata for {}: {}",
+                        metadata_path.display(),
+                        e
+                    );
+                    corrupted_count += 1;
+                    continue;
+                }
+            };
 
             // Read and parse metadata
             match tokio::fs::read_to_string(&metadata_path).await {
@@ -145,16 +165,54 @@ impl SnapshotStoreImpl {
                         count += 1;
                     }
                     Err(e) => {
-                        error!("Failed to parse metadata.json in {}: {}", path.display(), e);
+                        let file_size = file_metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                        error!(
+                            "Failed to parse metadata.json in {} (size: {} bytes): {}. \
+                             JSON parsing error: {}. \
+                             This snapshot will be skipped. \
+                             Consider manually inspecting or removing the corrupted snapshot directory.",
+                            path.display(),
+                            file_size,
+                            e,
+                            e
+                        );
+                        corrupted_count += 1;
                     }
                 },
                 Err(e) => {
-                    error!("Failed to read metadata.json in {}: {}", path.display(), e);
+                    let file_size = file_metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                    error!(
+                        "Failed to read metadata.json in {} (size: {} bytes): {}. \
+                         File may be corrupted or inaccessible. \
+                         This snapshot will be skipped. \
+                         Consider manually inspecting or removing the corrupted snapshot directory.",
+                        path.display(),
+                        file_size,
+                        e
+                    );
+                    corrupted_count += 1;
                 }
             }
         }
 
-        info!("Loaded {} snapshots from {}", count, storage_dir.display());
+        // Store corrupted count in atomic for metrics
+        self.inner
+            .corrupted_count
+            .store(corrupted_count, std::sync::atomic::Ordering::Relaxed);
+
+        if corrupted_count > 0 {
+            warn!(
+                "Found {} corrupted or invalid snapshot(s) during initialization",
+                corrupted_count
+            );
+        }
+
+        info!(
+            "Loaded {} valid snapshots from {} ({} corrupted/invalid)",
+            count,
+            storage_dir.display(),
+            corrupted_count
+        );
         Ok(())
     }
 
@@ -608,12 +666,18 @@ impl SnapshotStore for SnapshotStoreImpl {
         let oldest_snapshot = registry.values().map(|info| info.timestamp).min();
         let newest_snapshot = registry.values().map(|info| info.timestamp).max();
 
+        let corrupted_snapshots = self
+            .inner
+            .corrupted_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+
         SnapshotStats {
             total_snapshots,
             total_size,
             oldest_snapshot,
             newest_snapshot,
             disk_usage: total_size, // Approximate
+            corrupted_snapshots,
         }
     }
 }
