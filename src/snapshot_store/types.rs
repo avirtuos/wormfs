@@ -194,6 +194,9 @@ pub struct SnapshotStats {
 
     /// Disk usage in bytes
     pub disk_usage: u64,
+
+    /// Number of corrupted snapshots encountered during initialization
+    pub corrupted_snapshots: usize,
 }
 
 /// Snapshot reader for accessing snapshot data.
