@@ -116,7 +116,12 @@ pub trait SnapshotStore: Send + Sync {
         snapshot_id: u64,
         log_index: u64,
         log_term: u64,
+        snapshot_leader_node_id: u64,
         metadata_db_path: &Path,
+        membership_log_index: Option<u64>,
+        membership_log_term: Option<u64>,
+        membership_leader_node_id: Option<u64>,
+        membership_config: String,
     ) -> Result<SnapshotInfo, Error>;
 
     /// Get the latest snapshot.

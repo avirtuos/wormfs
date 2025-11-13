@@ -72,6 +72,9 @@ pub(crate) struct StateMachineInner {
     /// Last applied log term
     last_applied_term: u64,
 
+    /// Last applied leader node ID
+    last_applied_leader_id: NodeId,
+
     /// Last applied membership configuration
     last_membership: StoredMembership<NodeId, super::raft_config::WormFsNode>,
 
@@ -89,6 +92,9 @@ pub(crate) struct StateMachineInner {
 
     /// Next snapshot ID (incremented for each snapshot)
     next_snapshot_id: u64,
+
+    /// Mutex to serialize snapshot creation (prevents concurrent MetadataStore backups)
+    snapshot_creation_lock: Arc<tokio::sync::Mutex<()>>,
 
     /// Path to the temporary snapshot file being received
     /// Set by begin_receiving_snapshot(), used by install_snapshot()
@@ -178,26 +184,21 @@ impl WormFsStateMachine {
         let snapshot_store =
             SnapshotStoreImpl::new(snapshot_store_config).expect("Failed to create SnapshotStore");
 
-        // Initialize snapshot store (scan existing snapshots)
         let snapshot_store_arc = Arc::new(snapshot_store);
-        let snapshot_store_clone = Arc::clone(&snapshot_store_arc);
-        tokio::spawn(async move {
-            if let Err(e) = snapshot_store_clone.initialize().await {
-                error!("Failed to initialize SnapshotStore: {:?}", e);
-            }
-        });
 
         Self {
             inner: Arc::new(RwLock::new(StateMachineInner {
                 metadata_store,
                 last_applied_index: 0,
                 last_applied_term: 0,
+                last_applied_leader_id: NodeId(0),
                 last_membership: StoredMembership::default(),
                 transactions: HashMap::new(),
                 snapshot_directory,
                 snapshot_store: snapshot_store_arc,
                 snapshot_compression,
                 next_snapshot_id: 1,
+                snapshot_creation_lock: Arc::new(tokio::sync::Mutex::new(())),
                 incoming_snapshot_path: None,
                 subscriptions: Vec::new(),
                 needs_resync: AtomicBool::new(false),
@@ -207,6 +208,15 @@ impl WormFsStateMachine {
                 read_only_mode: AtomicBool::new(false),
             })),
         }
+    }
+
+    /// Initialize the state machine (must be called after construction).
+    ///
+    /// This initializes the SnapshotStore, creating the snapshot directory and scanning
+    /// for existing snapshots.
+    pub async fn initialize(&self) -> Result<(), crate::snapshot_store::Error> {
+        let inner = self.inner.read().await;
+        inner.snapshot_store.initialize().await
     }
 
     /// Get a handle to the inner state (for accessing subscriptions from StorageRaftMember).
@@ -846,13 +856,14 @@ impl WormFsStateMachine {
         &self,
         last_included_index: u64,
         last_included_term: u64,
+        membership: &openraft::StoredMembership<NodeId, super::raft_config::WormFsNode>,
     ) -> Result<WormFsSnapshotData, String> {
         info!(
             "Creating snapshot at index {} term {}",
             last_included_index, last_included_term
         );
 
-        let (snapshot_store, snapshot_id, snapshot_compression) = {
+        let (snapshot_store, snapshot_id, snapshot_compression, snapshot_lock) = {
             let mut inner = self.inner.write().await;
             let snapshot_id = inner.next_snapshot_id;
             inner.next_snapshot_id += 1;
@@ -860,14 +871,26 @@ impl WormFsStateMachine {
                 Arc::clone(&inner.snapshot_store),
                 snapshot_id,
                 inner.snapshot_compression,
+                Arc::clone(&inner.snapshot_creation_lock),
             )
         };
 
+        // Acquire lock to prevent concurrent snapshot creation
+        // This is critical because MetadataStore.create_snapshot() uses SQLite backup API
+        // which can fail with IOERR_DATA if multiple backups run concurrently
+        let _guard = snapshot_lock.lock().await;
+        info!(
+            "Acquired snapshot creation lock for snapshot {}",
+            snapshot_id
+        );
+
         // Create temporary snapshot file using MetadataStore
+        // Use UUID to ensure uniqueness across concurrent snapshot creation on multiple nodes
+        let unique_id = uuid::Uuid::new_v4();
         let temp_dir = std::env::temp_dir();
         let temp_snapshot_file = temp_dir.join(format!(
-            "wormfs_snapshot_{}_{}_temp.db",
-            last_included_index, last_included_term
+            "wormfs_snapshot_{}_{}_{}_{}_temp.db",
+            unique_id, snapshot_id, last_included_index, last_included_term
         ));
 
         info!(
@@ -883,13 +906,40 @@ impl WormFsStateMachine {
                 .map_err(|e| format!("Failed to create snapshot: {:?}", e))?;
         }
 
+        // Serialize membership configuration to JSON
+        let membership_config = serde_json::to_string(membership.membership())
+            .map_err(|e| format!("Failed to serialize membership: {:?}", e))?;
+
+        // Extract membership log_id and leader node ID
+        let (membership_log_index, membership_log_term, membership_leader_node_id) =
+            if let Some(log_id) = membership.log_id() {
+                (
+                    Some(log_id.index),
+                    Some(log_id.leader_id.term),
+                    Some(log_id.leader_id.node_id.0),
+                )
+            } else {
+                (None, None, None)
+            };
+
+        // Get snapshot leader node ID from the state machine
+        let snapshot_leader_node_id = {
+            let inner = self.inner.read().await;
+            inner.last_applied_leader_id.0
+        };
+
         // Ingest snapshot into SnapshotStore (handles compression and persistence)
         let snapshot_info = snapshot_store
             .ingest_snapshot(
                 snapshot_id,
                 last_included_index,
                 last_included_term,
+                snapshot_leader_node_id,
                 &temp_snapshot_file,
+                membership_log_index,
+                membership_log_term,
+                membership_leader_node_id,
+                membership_config,
             )
             .await
             .map_err(|e| format!("Failed to ingest snapshot into SnapshotStore: {:?}", e))?;
@@ -913,26 +963,27 @@ impl WormFsStateMachine {
             membership.len()
         );
 
-        // Calculate CRC32 checksum of the stored file for compatibility with existing code
-        let checksum = Self::calculate_checksum(&snapshot_info.storage_path.join(
-            match snapshot_compression {
-                CompressionAlgorithm::None => "metadata.db",
-                CompressionAlgorithm::Zstd { .. } => "metadata.db.zst",
-            },
-        ))
-        .await?;
+        // Determine the actual snapshot file name within the snapshot directory
+        let snapshot_db_filename = match snapshot_compression {
+            CompressionAlgorithm::None => "metadata.db",
+            CompressionAlgorithm::Zstd { .. } => "metadata.db.zst",
+        };
 
-        // Build filename that includes snapshot ID for tracking
-        let snapshot_filename = format!(
-            "snapshot_{:06}_{}_{}.db",
-            snapshot_id, last_included_index, last_included_term
-        );
+        // Calculate CRC32 checksum of the stored file
+        let checksum =
+            Self::calculate_checksum(&snapshot_info.storage_path.join(snapshot_db_filename))
+                .await?;
+
+        // Build relative path from snapshot_directory to the actual snapshot file
+        // Format: snapshot_{id}/metadata.db or snapshot_{id}/metadata.db.zst
+        let snapshot_relative_path =
+            format!("snapshot_{:06}/{}", snapshot_id, snapshot_db_filename);
 
         let snapshot = WormFsSnapshotData::new(
             last_included_index,
             last_included_term,
             membership,
-            snapshot_filename,
+            snapshot_relative_path,
             snapshot_info.metadata_db_size,
             checksum,
             matches!(snapshot_compression, CompressionAlgorithm::Zstd { .. }),
@@ -1289,7 +1340,10 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
 
         let last_log_id = if inner.last_applied_index > 0 {
             Some(openraft::LogId::new(
-                openraft::CommittedLeaderId::new(inner.last_applied_term, NodeId(0)),
+                openraft::CommittedLeaderId::new(
+                    inner.last_applied_term,
+                    inner.last_applied_leader_id,
+                ),
                 inner.last_applied_index,
             ))
         } else {
@@ -1312,11 +1366,13 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
         for entry in entries {
             let log_index = entry.log_id.index;
             let log_term = entry.log_id.leader_id.term;
+            let leader_id = entry.log_id.leader_id.node_id;
 
             trace!(
-                "[StateMachine] Processing entry at index {}, term {}",
+                "[StateMachine] Processing entry at index {}, term {}, leader {}",
                 log_index,
-                log_term
+                log_term,
+                leader_id.0
             );
 
             // Extract the operation from the entry payload
@@ -1328,6 +1384,7 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
                     inner.last_membership = StoredMembership::new(Some(entry.log_id), membership);
                     inner.last_applied_index = log_index;
                     inner.last_applied_term = log_term;
+                    inner.last_applied_leader_id = leader_id;
                     // Add empty response for membership changes
                     responses.push(WormFsResponse::Empty);
                     continue;
@@ -1337,6 +1394,7 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
                     let mut inner = self.inner.write().await;
                     inner.last_applied_index = log_index;
                     inner.last_applied_term = log_term;
+                    inner.last_applied_leader_id = leader_id;
                     // Add empty response for blank entries
                     responses.push(WormFsResponse::Empty);
                     continue;
@@ -1476,11 +1534,16 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
         snapshot: Box<<WormFsTypeConfig as RaftTypeConfig>::SnapshotData>,
     ) -> Result<(), StorageError<NodeId>> {
         let last_log_id = meta.last_log_id.as_ref();
-        let (last_included_index, last_included_term) = if let Some(log_id) = last_log_id {
-            (log_id.index, log_id.leader_id.term)
-        } else {
-            (0, 0)
-        };
+        let (last_included_index, last_included_term, last_included_leader_id) =
+            if let Some(log_id) = last_log_id {
+                (
+                    log_id.index,
+                    log_id.leader_id.term,
+                    log_id.leader_id.node_id,
+                )
+            } else {
+                (0, 0, NodeId(0))
+            };
 
         info!(
             "Installing snapshot at index {} term {}",
@@ -1530,13 +1593,69 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
             inner.snapshot_directory.join(&final_filename)
         };
 
-        // Move temp file to final location
+        // Check if the snapshot is compressed by examining the snapshot_id in metadata
+        // The snapshot_id contains the filename like "snapshot_000001/metadata.db.zst"
+        let is_compressed = meta.snapshot_id.ends_with(".zst");
+
+        // If compressed, decompress the temp file before moving it
+        let decompressed_path = if is_compressed {
+            info!("Snapshot is compressed, decompressing...");
+
+            // Create path for decompressed file
+            let decompressed_path = temp_path.with_extension("db");
+
+            // Decompress using zstd
+            let compressed_data = tokio::fs::read(&temp_path).await.map_err(|e| {
+                error!("Failed to read compressed snapshot: {:?}", e);
+                let io_error = openraft::StorageIOError::new(
+                    openraft::ErrorSubject::Snapshot(None),
+                    openraft::ErrorVerb::Read,
+                    openraft::AnyError::new(&e),
+                );
+                StorageError::IO { source: io_error }
+            })?;
+
+            let decompressed_data = zstd::bulk::decompress(&compressed_data, 100 * 1024 * 1024) // 100MB max
+                .map_err(|e| {
+                    error!("Failed to decompress snapshot: {:?}", e);
+                    let io_error = openraft::StorageIOError::new(
+                        openraft::ErrorSubject::Snapshot(None),
+                        openraft::ErrorVerb::Read,
+                        openraft::AnyError::error(format!("Decompression failed: {:?}", e)),
+                    );
+                    StorageError::IO { source: io_error }
+                })?;
+
+            let decompressed_size = decompressed_data.len();
+
+            tokio::fs::write(&decompressed_path, decompressed_data)
+                .await
+                .map_err(|e| {
+                    error!("Failed to write decompressed snapshot: {:?}", e);
+                    let io_error = openraft::StorageIOError::new(
+                        openraft::ErrorSubject::Snapshot(None),
+                        openraft::ErrorVerb::Write,
+                        openraft::AnyError::new(&e),
+                    );
+                    StorageError::IO { source: io_error }
+                })?;
+
+            // Remove the compressed temp file
+            let _ = tokio::fs::remove_file(&temp_path).await;
+
+            info!("Decompression complete: {} bytes", decompressed_size);
+            decompressed_path
+        } else {
+            temp_path
+        };
+
+        // Move decompressed file to final location
         info!(
             "Moving snapshot from {} to {}",
-            temp_path.display(),
+            decompressed_path.display(),
             final_path.display()
         );
-        tokio::fs::rename(&temp_path, &final_path)
+        tokio::fs::rename(&decompressed_path, &final_path)
             .await
             .map_err(|e| {
                 error!("Failed to move snapshot to final location: {:?}", e);
@@ -1571,6 +1690,7 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
         let mut inner = self.inner.write().await;
         inner.last_applied_index = last_included_index;
         inner.last_applied_term = last_included_term;
+        inner.last_applied_leader_id = last_included_leader_id;
         inner.last_membership = meta.last_membership.clone();
 
         // Clear all transaction state - obsolete after snapshot
@@ -1593,29 +1713,76 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
 
     /// Get the current snapshot.
     ///
-    /// Returns the most recent snapshot file for transfer to followers.
+    /// Returns the most recent snapshot from the SnapshotStore if one exists.
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<WormFsTypeConfig>>, StorageError<NodeId>> {
-        let snapshot_directory = {
+        let (snapshot_store, snapshot_directory) = {
             let inner = self.inner.read().await;
-            inner.snapshot_directory.clone()
+            (
+                Arc::clone(&inner.snapshot_store),
+                inner.snapshot_directory.clone(),
+            )
         };
 
-        // Check if snapshot directory exists
-        if !tokio::fs::try_exists(&snapshot_directory)
-            .await
-            .unwrap_or(false)
-        {
-            debug!("Snapshot directory does not exist yet");
-            return Ok(None);
-        }
+        // Get the latest snapshot from SnapshotStore
+        let snapshot_info = snapshot_store.get_latest_snapshot().await.map_err(|e| {
+            error!("Failed to get latest snapshot: {}", e);
+            let io_error = openraft::StorageIOError::new(
+                openraft::ErrorSubject::Snapshot(None),
+                openraft::ErrorVerb::Read,
+                openraft::AnyError::error(e),
+            );
+            StorageError::IO { source: io_error }
+        })?;
 
-        // Read directory entries
-        let mut entries = tokio::fs::read_dir(&snapshot_directory)
-            .await
-            .map_err(|e| {
-                error!("Failed to read snapshot directory: {:?}", e);
+        if let Some(info) = snapshot_info {
+            info!(
+                "get_current_snapshot() found snapshot: id={}, index={}, term={}, membership_log_id={:?}",
+                info.snapshot_id, info.log_index, info.log_term, info.membership_log_index
+            );
+
+            // Deserialize the stored membership configuration
+            let membership: openraft::Membership<NodeId, super::raft_config::WormFsNode> =
+                serde_json::from_str(&info.membership_config).map_err(|e| {
+                    error!("Failed to deserialize membership: {:?}", e);
+                    let io_error = openraft::StorageIOError::new(
+                        openraft::ErrorSubject::Snapshot(None),
+                        openraft::ErrorVerb::Read,
+                        openraft::AnyError::error(e),
+                    );
+                    StorageError::IO { source: io_error }
+                })?;
+
+            // Reconstruct the StoredMembership with the log_id from the snapshot
+            let membership_log_id = match (
+                info.membership_log_index,
+                info.membership_log_term,
+                info.membership_leader_node_id,
+            ) {
+                (Some(index), Some(term), Some(node_id)) => Some(openraft::LogId::new(
+                    openraft::CommittedLeaderId::new(term, NodeId(node_id)),
+                    index,
+                )),
+                _ => None,
+            };
+
+            let last_membership = openraft::StoredMembership::new(membership_log_id, membership);
+
+            // Construct the full path to the snapshot file
+            let snapshot_path = snapshot_directory.join(format!(
+                "snapshot_{:06}/{}",
+                info.snapshot_id,
+                if info.compression != crate::snapshot_store::CompressionAlgorithm::None {
+                    "metadata.db.zst"
+                } else {
+                    "metadata.db"
+                }
+            ));
+
+            // Open the snapshot file for reading
+            let snapshot_file = tokio::fs::File::open(&snapshot_path).await.map_err(|e| {
+                error!("Failed to open snapshot file for reading: {:?}", e);
                 let io_error = openraft::StorageIOError::new(
                     openraft::ErrorSubject::Snapshot(None),
                     openraft::ErrorVerb::Read,
@@ -1624,90 +1791,41 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
                 StorageError::IO { source: io_error }
             })?;
 
-        // Find all snapshot files and parse their indices/terms
-        let mut snapshots: Vec<(u64, u64, std::path::PathBuf)> = Vec::new();
+            // Create LogId from snapshot info
+            let last_log_id = Some(openraft::LogId::new(
+                openraft::CommittedLeaderId::new(
+                    info.log_term,
+                    NodeId(info.snapshot_leader_node_id),
+                ),
+                info.log_index,
+            ));
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            let io_error = openraft::StorageIOError::new(
-                openraft::ErrorSubject::Snapshot(None),
-                openraft::ErrorVerb::Read,
-                openraft::AnyError::new(&e),
-            );
-            StorageError::IO { source: io_error }
-        })? {
-            let path = entry.path();
-            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                // Parse filename: snapshot-{index}-{term}.db
-                if filename.starts_with("snapshot-") && filename.ends_with(".db") {
-                    let parts: Vec<&str> = filename
-                        .trim_start_matches("snapshot-")
-                        .trim_end_matches(".db")
-                        .split('-')
-                        .collect();
-
-                    if parts.len() == 2 {
-                        if let (Ok(index), Ok(term)) =
-                            (parts[0].parse::<u64>(), parts[1].parse::<u64>())
-                        {
-                            snapshots.push((index, term, path));
-                        }
-                    }
+            let snapshot_id = format!(
+                "snapshot_{:06}/metadata.db{}",
+                info.snapshot_id,
+                if info.compression != crate::snapshot_store::CompressionAlgorithm::None {
+                    ".zst"
+                } else {
+                    ""
                 }
-            }
-        }
-
-        // Return None if no snapshots found
-        if snapshots.is_empty() {
-            debug!("No snapshots found in directory");
-            return Ok(None);
-        }
-
-        // Sort by index (descending) to get the most recent
-        snapshots.sort_by(|a, b| b.0.cmp(&a.0));
-        let (last_index, last_term, snapshot_path) = &snapshots[0];
-
-        info!(
-            "Found most recent snapshot: index={}, term={}, path={}",
-            last_index,
-            last_term,
-            snapshot_path.display()
-        );
-
-        // Open the snapshot file
-        let snapshot_file = tokio::fs::File::open(snapshot_path).await.map_err(|e| {
-            error!("Failed to open snapshot file: {:?}", e);
-            let io_error = openraft::StorageIOError::new(
-                openraft::ErrorSubject::Snapshot(None),
-                openraft::ErrorVerb::Read,
-                openraft::AnyError::new(&e),
             );
-            StorageError::IO { source: io_error }
-        })?;
 
-        // Get current membership and create snapshot metadata
-        let (last_membership, snapshot_id) = {
-            let inner = self.inner.read().await;
-            let snapshot_id = format!("snapshot-{}-{}.db", last_index, last_term);
-            (inner.last_membership.clone(), snapshot_id)
-        };
+            let meta = SnapshotMeta {
+                last_log_id,
+                last_membership,
+                snapshot_id,
+            };
 
-        let last_log_id = Some(openraft::LogId::new(
-            openraft::CommittedLeaderId::new(*last_term, NodeId(0)),
-            *last_index,
-        ));
+            let snapshot_data = Box::new(tokio::io::BufReader::new(snapshot_file));
 
-        let meta = SnapshotMeta {
-            last_log_id,
-            last_membership,
-            snapshot_id,
-        };
-
-        let snapshot_data = Box::new(tokio::io::BufReader::new(snapshot_file));
-
-        Ok(Some(Snapshot {
-            meta,
-            snapshot: snapshot_data,
-        }))
+            Ok(Some(Snapshot {
+                meta,
+                snapshot: snapshot_data,
+            }))
+        } else {
+            debug!("get_current_snapshot() - no snapshot available");
+            Ok(None)
+        }
     }
 }
 
@@ -1715,14 +1833,23 @@ impl RaftSnapshotBuilder<WormFsTypeConfig> for WormFsStateMachine {
     /// Build a snapshot of the current state.
     async fn build_snapshot(&mut self) -> Result<Snapshot<WormFsTypeConfig>, StorageError<NodeId>> {
         // Get current state to determine snapshot parameters
-        let (last_included_index, last_included_term, last_log_id, last_membership) = {
+        let (
+            last_included_index,
+            last_included_term,
+            last_log_id,
+            snapshot_store,
+            snapshot_directory,
+        ) = {
             let inner = self.inner.read().await;
 
             info!("Building snapshot at index {}", inner.last_applied_index);
 
             let last_log_id = if inner.last_applied_index > 0 {
                 Some(openraft::LogId::new(
-                    openraft::CommittedLeaderId::new(inner.last_applied_term, NodeId(0)),
+                    openraft::CommittedLeaderId::new(
+                        inner.last_applied_term,
+                        inner.last_applied_leader_id,
+                    ),
                     inner.last_applied_index,
                 ))
             } else {
@@ -1733,13 +1860,60 @@ impl RaftSnapshotBuilder<WormFsTypeConfig> for WormFsStateMachine {
                 inner.last_applied_index,
                 inner.last_applied_term,
                 last_log_id,
-                inner.last_membership.clone(),
+                Arc::clone(&inner.snapshot_store),
+                inner.snapshot_directory.clone(),
             )
         };
 
+        // Determine the correct membership to use for this snapshot
+        // The membership must have a log_id <= the snapshot's last_log_id
+        let last_membership = {
+            let inner = self.inner.read().await;
+            let current_membership = &inner.last_membership;
+
+            info!(
+                "Checking membership: membership_log_id={:?}, snapshot_log_id={:?}",
+                current_membership.log_id(),
+                last_log_id
+            );
+
+            // Check if the current membership's log_id is valid for this snapshot
+            match (current_membership.log_id(), &last_log_id) {
+                (Some(membership_log_id), Some(snapshot_log_id))
+                    if membership_log_id.index > snapshot_log_id.index =>
+                {
+                    // Current membership is newer than the snapshot
+                    // We need to use a membership with log_id <= snapshot_log_id
+                    info!(
+                        "Current membership log_id {} > snapshot log_id {}, using snapshot_log_id as membership log_id",
+                        membership_log_id.index, snapshot_log_id.index
+                    );
+
+                    // Use the current membership configuration but with the snapshot's log_id
+                    // This is a conservative approach - the membership at snapshot_log_id might have been
+                    // different, but since we don't track historical membership, we use the current one
+                    // with an adjusted log_id
+                    StoredMembership::new(
+                        Some(snapshot_log_id.clone()),
+                        current_membership.membership().clone(),
+                    )
+                }
+                _ => {
+                    // Current membership is valid for this snapshot
+                    current_membership.clone()
+                }
+            }
+        };
+
         // Create the actual snapshot using our implementation
+        info!(
+            "Calling create_snapshot() for index={}, term={} with membership log_id={:?}",
+            last_included_index,
+            last_included_term,
+            last_membership.log_id()
+        );
         let snapshot_data = self
-            .create_snapshot(last_included_index, last_included_term)
+            .create_snapshot(last_included_index, last_included_term, &last_membership)
             .await
             .map_err(|e| {
                 error!("Failed to create snapshot: {}", e);
@@ -1751,11 +1925,56 @@ impl RaftSnapshotBuilder<WormFsTypeConfig> for WormFsStateMachine {
                 StorageError::IO { source: io_error }
             })?;
 
+        info!(
+            "create_snapshot() returned: snapshot_file={}, file_size={}, checksum={:08x}",
+            snapshot_data.snapshot_file, snapshot_data.file_size, snapshot_data.checksum
+        );
+
         // Construct full path to the snapshot file
         let snapshot_path = {
             let inner = self.inner.read().await;
-            inner.snapshot_directory.join(&snapshot_data.snapshot_file)
+            let path = inner.snapshot_directory.join(&snapshot_data.snapshot_file);
+            info!(
+                "Constructed snapshot path: {} (snapshot_directory={}, snapshot_file={})",
+                path.display(),
+                inner.snapshot_directory.display(),
+                snapshot_data.snapshot_file
+            );
+            path
         };
+
+        // Verify file exists before trying to open it
+        if !tokio::fs::try_exists(&snapshot_path).await.unwrap_or(false) {
+            error!(
+                "Snapshot file DOES NOT EXIST at constructed path: {}",
+                snapshot_path.display()
+            );
+
+            // List what files DO exist in the snapshot directory
+            let snapshot_dir = {
+                let inner = self.inner.read().await;
+                inner.snapshot_directory.clone()
+            };
+
+            if let Ok(mut entries) = tokio::fs::read_dir(&snapshot_dir).await {
+                error!("Files in snapshot directory {}:", snapshot_dir.display());
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    error!("  - {}", entry.path().display());
+                }
+            }
+
+            let io_error = openraft::StorageIOError::new(
+                openraft::ErrorSubject::Snapshot(None),
+                openraft::ErrorVerb::Read,
+                openraft::AnyError::error("snapshot file not found after creation"),
+            );
+            return Err(StorageError::IO { source: io_error });
+        }
+
+        info!(
+            "Snapshot file exists, opening for reading: {}",
+            snapshot_path.display()
+        );
 
         // Open the snapshot file for reading
         let snapshot_file = tokio::fs::File::open(&snapshot_path).await.map_err(|e| {

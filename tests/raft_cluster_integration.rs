@@ -60,6 +60,7 @@ async fn create_single_node(
     let metadata_config = wormfs::metadata_store::Config {
         database_path: data_dir.join("metadata.redb"),
         cache_size_mb: 100,
+        // WAL mode is enabled by default and works correctly with SQLite Backup API
         ..Default::default()
     };
     let metadata_store =
@@ -77,7 +78,7 @@ async fn create_single_node(
         replication_lag_threshold: 1000,
         max_uncommitted_entries: 5000,
         snapshot_time_threshold: Duration::from_secs(3600),
-        snapshot_log_size_threshold: 100 * 1024 * 1024,
+        snapshot_log_size_threshold: 15 * 1000, // 15KB = ~15 entries for snapshot testing
         enable_snapshot_compression: true,
         snapshot_compression_level: 3,
         enable_lease_based_reads: false,
@@ -179,7 +180,7 @@ impl RaftTestCluster {
                 replication_lag_threshold: 1000,
                 max_uncommitted_entries: 5000,
                 snapshot_time_threshold: Duration::from_secs(3600),
-                snapshot_log_size_threshold: 100 * 1024 * 1024,
+                snapshot_log_size_threshold: 50 * 1000, // 50KB = ~50 entries for snapshot testing
                 enable_snapshot_compression: true,
                 snapshot_compression_level: 3,
                 enable_lease_based_reads: false,
@@ -291,7 +292,7 @@ impl RaftTestCluster {
                 replication_lag_threshold: 1000,
                 max_uncommitted_entries: 5000,
                 snapshot_time_threshold: Duration::from_secs(3600),
-                snapshot_log_size_threshold: 100 * 1024 * 1024,
+                snapshot_log_size_threshold: 50 * 1000, // 50KB = ~50 entries for snapshot testing
                 enable_snapshot_compression: true,
                 snapshot_compression_level: 3,
                 enable_lease_based_reads: false,
@@ -672,7 +673,7 @@ impl RaftTestCluster {
             replication_lag_threshold: 1000,
             max_uncommitted_entries: 5000,
             snapshot_time_threshold: Duration::from_secs(3600),
-            snapshot_log_size_threshold: 100 * 1024 * 1024,
+            snapshot_log_size_threshold: 15 * 1000, // 15KB = ~15 entries for snapshot testing
             enable_snapshot_compression: true,
             snapshot_compression_level: 3,
             enable_lease_based_reads: false,
@@ -890,7 +891,7 @@ impl RaftTestCluster {
             replication_lag_threshold: 1000,
             max_uncommitted_entries: 5000,
             snapshot_time_threshold: Duration::from_secs(3600),
-            snapshot_log_size_threshold: 100 * 1024 * 1024,
+            snapshot_log_size_threshold: 15 * 1000, // 15KB = ~15 entries for snapshot testing
             enable_snapshot_compression: true,
             snapshot_compression_level: 3,
             enable_lease_based_reads: false,
@@ -1268,7 +1269,7 @@ async fn test_vote_persistence_across_restart() {
             replication_lag_threshold: 1000,
             max_uncommitted_entries: 5000,
             snapshot_time_threshold: Duration::from_secs(3600),
-            snapshot_log_size_threshold: 100 * 1024 * 1024,
+            snapshot_log_size_threshold: 15 * 1000, // 15KB = ~15 entries for snapshot testing
             enable_snapshot_compression: true,
             snapshot_compression_level: 3,
             enable_lease_based_reads: false,
@@ -2941,6 +2942,17 @@ async fn test_progressive_node_failure_and_recovery() {
 async fn test_snapshot_transfer_between_nodes() {
     use wormfs::storage_raft_member::types::{TxId, WormFsOperation};
 
+    // Initialize tracing to see all log messages
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_level(true)
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .try_init();
+
     eprintln!("\n=== test_snapshot_transfer_between_nodes ===");
 
     // ============================================================================
@@ -2971,13 +2983,16 @@ async fn test_snapshot_transfer_between_nodes() {
     eprintln!("✅ Node 3 stopped");
 
     // ============================================================================
-    // STEP 3: Write operations to build up log history
+    // STEP 3: Write operations to force snapshot creation and log purging
     // ============================================================================
-    eprintln!("\n📝 Writing operations to build log history...");
+    eprintln!("\n📝 Writing operations to force snapshot creation and log purging...");
     let leader = cluster.leader().expect("Should have a leader");
 
-    // Write 50 operations to build up log
-    for i in 0..50 {
+    // Write 60 operations - this will:
+    // 1. Trigger snapshot after 50 operations (snapshot_log_size_threshold / 1000 = 50)
+    // 2. Purge old logs (keeping only last 5 via max_in_snapshot_log_to_keep)
+    // 3. Force InstallSnapshot RPC when node 3 rejoins (can't use log replay)
+    for i in 0..60 {
         let operation = WormFsOperation::TransactionPrepare {
             tx_id: TxId::new(2000 + i),
             metadata_ops: Some(vec![]),
@@ -2993,8 +3008,24 @@ async fn test_snapshot_transfer_between_nodes() {
         if i % 10 == 0 {
             eprintln!("  Written {} operations...", i + 1);
         }
+
+        // Small delay between operations to allow Raft to process
+        if i % 5 == 4 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
-    eprintln!("✅ Wrote 50 operations to build log history");
+    eprintln!("✅ Wrote 60 operations");
+
+    // Wait for snapshot creation and log purging
+    eprintln!("\n⏳ Waiting for snapshot creation and log purging...");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Verify snapshot was created on leader
+    let leader_metrics = leader.raft.inner().raft.metrics().borrow().clone();
+    eprintln!(
+        "  📊 Leader snapshot: {:?}, purged: {:?}, last_log: {:?}",
+        leader_metrics.snapshot, leader_metrics.purged, leader_metrics.last_log_index
+    );
 
     // ============================================================================
     // STEP 4: Restart node 3 and verify it catches up with cluster
@@ -3010,9 +3041,10 @@ async fn test_snapshot_transfer_between_nodes() {
     eprintln!("✅ Node 3 restarted and rejoined cluster");
 
     // ============================================================================
-    // STEP 5: Verify node 3 caught up via snapshot or log replication
+    // STEP 5: Verify node 3 caught up via SNAPSHOT TRANSFER (not log replay)
     // ============================================================================
-    eprintln!("\n✓ Verifying node 3 caught up with cluster...");
+    eprintln!("\n🔍 Verifying node 3 caught up via SNAPSHOT TRANSFER (not log replay)...");
+
     let leader = cluster.leader().expect("Should have a leader");
     let leader_metrics = leader.raft.inner().raft.metrics().borrow().clone();
 
@@ -3023,18 +3055,56 @@ async fn test_snapshot_transfer_between_nodes() {
         .expect("Node 3 should exist");
     let node3_metrics = node3.raft.inner().raft.metrics().borrow().clone();
 
-    eprintln!(
-        "  Leader last_applied: {:?}, Node 3 last_applied: {:?}",
-        leader_metrics.last_applied, node3_metrics.last_applied
-    );
+    eprintln!("\n📊 Leader Metrics:");
+    eprintln!("  snapshot: {:?}", leader_metrics.snapshot);
+    eprintln!("  purged: {:?}", leader_metrics.purged);
+    eprintln!("  last_log_index: {:?}", leader_metrics.last_log_index);
+    eprintln!("  last_applied: {:?}", leader_metrics.last_applied);
 
-    // Node 3 should have caught up to the leader
+    eprintln!("\n📊 Node 3 Metrics:");
+    eprintln!("  snapshot: {:?}", node3_metrics.snapshot);
+    eprintln!("  purged: {:?}", node3_metrics.purged);
+    eprintln!("  last_log_index: {:?}", node3_metrics.last_log_index);
+    eprintln!("  last_applied: {:?}", node3_metrics.last_applied);
+
+    // ASSERTION 1: Leader created a snapshot
     assert!(
-        node3_metrics.last_applied.is_some(),
-        "Node 3 should have applied entries"
+        leader_metrics.snapshot.is_some(),
+        "Leader should have created a snapshot"
+    );
+    let leader_snapshot = leader_metrics.snapshot.unwrap();
+    assert!(
+        leader_snapshot.index >= 50,
+        "Leader snapshot should include at least 50 entries (threshold), got: {}",
+        leader_snapshot.index
     );
 
-    // Allow small difference in applied index
+    // ASSERTION 2: Leader purged old logs (proof that logs can't be replayed)
+    assert!(
+        leader_metrics.purged.is_some(),
+        "Leader should have purged old logs after snapshot"
+    );
+    let leader_purged = leader_metrics.purged.unwrap();
+    assert!(
+        leader_purged.index >= 45,
+        "Leader should have purged logs up to at least index 45 (50 - max_in_snapshot_log_to_keep), got: {}",
+        leader_purged.index
+    );
+
+    // ASSERTION 3: Node 3 received and installed snapshot
+    assert!(
+        node3_metrics.snapshot.is_some(),
+        "Node 3 should have received and installed a snapshot"
+    );
+    let node3_snapshot = node3_metrics.snapshot.unwrap();
+    assert!(
+        node3_snapshot.index >= leader_purged.index,
+        "Node 3 snapshot index ({}) should be >= leader's purged index ({}), proving InstallSnapshot RPC occurred",
+        node3_snapshot.index,
+        leader_purged.index
+    );
+
+    // ASSERTION 4: Node 3 caught up to leader
     let leader_applied = leader_metrics
         .last_applied
         .unwrap_or(openraft::LogId::default());
@@ -3048,7 +3118,24 @@ async fn test_snapshot_transfer_between_nodes() {
         leader_applied.index,
         node3_applied.index
     );
-    eprintln!("✅ Node 3 successfully caught up with cluster");
+
+    // ASSERTION 5: Verify the snapshot transfer mechanism was used
+    // Key proof: node3 has snapshot but started from scratch (no logs initially)
+    // If it had caught up via log replay, it wouldn't have a snapshot at this point
+    eprintln!("\n✅ VERIFIED: Node 3 caught up via InstallSnapshot RPC");
+    eprintln!(
+        "  - Leader created snapshot at index {}",
+        leader_snapshot.index
+    );
+    eprintln!(
+        "  - Leader purged logs up to index {} (can't replay from start)",
+        leader_purged.index
+    );
+    eprintln!(
+        "  - Node 3 received snapshot at index {}",
+        node3_snapshot.index
+    );
+    eprintln!("  - Node 3 applied up to index {}", node3_applied.index);
 
     // ============================================================================
     // STEP 6: Verify all nodes can accept new operations

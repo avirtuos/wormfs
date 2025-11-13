@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rusqlite::Connection;
+use tracing::{error, info};
 
 // Import MetricService for instrumentation
 use crate::metric_service::MetricService;
@@ -1807,6 +1808,11 @@ impl MetadataStore for MetadataStoreImpl {
     async fn create_snapshot(&self, snapshot_path: &Path) -> Result<(), Error> {
         let snapshot_path_buf = snapshot_path.to_path_buf();
 
+        info!(
+            "MetadataStore::create_snapshot() called with path: {}",
+            snapshot_path.display()
+        );
+
         // Create parent directory if needed
         if let Some(parent) = snapshot_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -1814,19 +1820,91 @@ impl MetadataStore for MetadataStoreImpl {
             })?;
         }
 
+        // Remove existing snapshot file and associated files if they exist
+        // (VACUUM INTO requires target doesn't exist)
+        if tokio::fs::try_exists(&snapshot_path).await.unwrap_or(false) {
+            info!(
+                "Removing existing snapshot file: {}",
+                snapshot_path.display()
+            );
+            tokio::fs::remove_file(&snapshot_path).await.map_err(|e| {
+                Error::SnapshotFailed(format!("Failed to remove existing snapshot file: {}", e))
+            })?;
+        }
+
+        // Also remove WAL and SHM files if they exist
+        let wal_path = snapshot_path_buf.with_extension("db-wal");
+        if tokio::fs::try_exists(&wal_path).await.unwrap_or(false) {
+            let _ = tokio::fs::remove_file(&wal_path).await; // Ignore errors
+        }
+
+        let shm_path = snapshot_path_buf.with_extension("db-shm");
+        if tokio::fs::try_exists(&shm_path).await.unwrap_or(false) {
+            let _ = tokio::fs::remove_file(&shm_path).await; // Ignore errors
+        }
+
         self.inner
             .conn
             .call(move |conn| {
-                // Use SQLite backup API
-                let mut snapshot_conn = rusqlite::Connection::open(&snapshot_path_buf)?;
+                // Use VACUUM INTO to create the snapshot
+                // This is the recommended approach for SQLite snapshots (since SQLite 3.27.0).
+                // VACUUM INTO:
+                // - Creates a completely fresh database file
+                // - Copies all data from the source
+                // - Handles WAL mode correctly
+                // - Works with concurrent access to the source database
+                // - Creates a clean, optimized copy
+                // Reference: https://sqlite.org/lang_vacuum.html
 
-                let backup = rusqlite::backup::Backup::new(conn, &mut snapshot_conn)?;
-                backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+                info!(
+                    "Executing VACUUM INTO for snapshot: {}",
+                    snapshot_path_buf.display()
+                );
+                conn.execute(
+                    &format!("VACUUM INTO '{}'", snapshot_path_buf.display()),
+                    [],
+                )?;
 
+                // Now open the snapshot and set it to DELETE journal mode
+                // (ensures the snapshot is a single self-contained file)
+                let snapshot_conn = rusqlite::Connection::open(&snapshot_path_buf)?;
+                snapshot_conn.execute_batch(
+                    "PRAGMA journal_mode=DELETE;
+                     PRAGMA synchronous=FULL;",
+                )?;
+                drop(snapshot_conn);
+
+                info!(
+                    "Snapshot created successfully at: {}",
+                    snapshot_path_buf.display()
+                );
                 Ok(())
             })
             .await
-            .map_err(|e| Error::SnapshotFailed(format!("Snapshot creation failed: {}", e)))
+            .map_err(|e| Error::SnapshotFailed(format!("Snapshot creation failed: {}", e)))?;
+
+        // Verify the file exists
+        if tokio::fs::try_exists(&snapshot_path).await.unwrap_or(false) {
+            let metadata = tokio::fs::metadata(&snapshot_path).await.map_err(|e| {
+                Error::SnapshotFailed(format!("Failed to get snapshot metadata: {}", e))
+            })?;
+            info!(
+                "Snapshot file verified: {} (size: {} bytes)",
+                snapshot_path.display(),
+                metadata.len()
+            );
+        } else {
+            error!(
+                "Snapshot file NOT FOUND after creation: {}",
+                snapshot_path.display()
+            );
+            return Err(Error::SnapshotFailed(format!(
+                "Snapshot file not found after creation: {}",
+                snapshot_path.display()
+            )));
+        }
+
+        Ok(())
     }
 
     async fn restore_from_snapshot(&self, snapshot_path: &Path) -> Result<(), Error> {
