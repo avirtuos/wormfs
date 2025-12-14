@@ -17,8 +17,8 @@ use super::membership_manager::{MembershipError, MembershipManager};
 use super::types::{ClusterEvent, NodeHealth};
 use crate::metric_service::MetricService;
 use crate::storage_raft_member::types::NodeId;
+use crate::storage_raft_member::utils::derive_keypair_from_node_id;
 use crate::storage_raft_member::{StorageRaftMember, StorageRaftMemberImpl};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,30 +26,6 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
-
-/// Derive a deterministic Ed25519 keypair from a node ID.
-///
-/// Uses SHA-256 to hash the full u64 node_id into a 32-byte seed,
-/// ensuring unique keypairs for all possible node IDs. The domain separator
-/// prevents collision with other uses of SHA-256 in the system.
-///
-/// # Arguments
-/// * `node_id` - The u64 node identifier
-///
-/// # Returns
-/// * `Ok(Keypair)` - The derived Ed25519 keypair
-/// * `Err(String)` - Error message if keypair creation fails
-fn derive_keypair_from_node_id(node_id: u64) -> Result<libp2p::identity::Keypair, String> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"wormfs-node-keypair-v1:"); // Domain separator
-    hasher.update(node_id.to_le_bytes());
-    let hash = hasher.finalize();
-
-    // hash is 32 bytes, exactly what ed25519_from_bytes needs
-    let seed: [u8; 32] = hash.into();
-    libp2p::identity::Keypair::ed25519_from_bytes(seed)
-        .map_err(|e| format!("Failed to create keypair: {}", e))
-}
 
 /// The main ClusterManager that coordinates failure detection and membership management.
 ///
