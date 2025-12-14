@@ -15,6 +15,7 @@ use super::config::ClusterManagerConfig;
 use super::failure_detector::FailureDetector;
 use super::membership_manager::{MembershipError, MembershipManager};
 use super::types::{ClusterEvent, NodeHealth};
+use crate::metric_service::MetricService;
 use crate::storage_raft_member::types::NodeId;
 use crate::storage_raft_member::{StorageRaftMember, StorageRaftMemberImpl};
 use std::collections::HashMap;
@@ -59,6 +60,9 @@ pub struct ClusterManager {
 
     /// Heartbeat tracker for discovering new/restarted nodes
     heartbeat_tracker: Option<Arc<super::HeartbeatTracker>>,
+
+    /// Optional metrics service for instrumentation
+    metrics: Arc<RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>>,
 }
 
 impl ClusterManager {
@@ -105,7 +109,16 @@ impl ClusterManager {
             last_known_health: Arc::new(RwLock::new(HashMap::new())),
             is_running: Arc::new(RwLock::new(false)),
             heartbeat_tracker,
+            metrics: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set the metrics service for this ClusterManager.
+    ///
+    /// This allows metrics to be configured after construction.
+    pub async fn set_metrics(&self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
+        let mut metrics_guard = self.metrics.write().await;
+        *metrics_guard = Some(metrics);
     }
 
     /// Start the cluster manager background monitoring task.
@@ -251,6 +264,7 @@ impl ClusterManager {
         let event_sender = self.event_sender.clone();
         let last_known_health = self.last_known_health.clone();
         let is_running = self.is_running.clone();
+        let metrics_svc = self.metrics.clone();
 
         tokio::spawn(async move {
             let mut check_interval = interval(config.health_check_interval);
@@ -343,6 +357,10 @@ impl ClusterManager {
                         e
                     );
                 }
+
+                // Publish cluster health metrics
+                Self::publish_cluster_metrics(&metrics_svc, &failure_detector, &membership_manager)
+                    .await;
             }
 
             info!("ClusterManager monitoring task stopped");
@@ -638,6 +656,65 @@ impl ClusterManager {
         }
 
         Ok(())
+    }
+
+    /// Publish cluster health metrics.
+    ///
+    /// Called periodically from the monitoring loop to emit metrics about cluster health.
+    async fn publish_cluster_metrics(
+        metrics: &Arc<RwLock<Option<Arc<crate::metric_service::MetricServiceImpl>>>>,
+        failure_detector: &Arc<Mutex<FailureDetector>>,
+        membership_manager: &Arc<Mutex<MembershipManager>>,
+    ) {
+        let metrics_opt = metrics.read().await.clone();
+        if let Some(ref metrics_svc) = metrics_opt {
+            let detector = failure_detector.lock().await;
+            let all_health = detector.get_all_node_health();
+
+            // Count nodes by health status
+            let mut healthy_count = 0;
+            let mut degraded_count = 0;
+            let mut failed_count = 0;
+            let mut recovering_count = 0;
+
+            for health in all_health.values() {
+                match health {
+                    NodeHealth::Healthy => healthy_count += 1,
+                    NodeHealth::Degraded => degraded_count += 1,
+                    NodeHealth::Failed => failed_count += 1,
+                    NodeHealth::Recovering => recovering_count += 1,
+                }
+            }
+
+            // Publish health gauges
+            let _ = metrics_svc.publish_gauge(
+                "cluster.healthy_nodes",
+                healthy_count as f64,
+                crate::metric_service::UnitType::Count,
+            );
+            let _ = metrics_svc.publish_gauge(
+                "cluster.degraded_nodes",
+                degraded_count as f64,
+                crate::metric_service::UnitType::Count,
+            );
+            let _ = metrics_svc.publish_gauge(
+                "cluster.failed_nodes",
+                failed_count as f64,
+                crate::metric_service::UnitType::Count,
+            );
+            let _ = metrics_svc.publish_gauge(
+                "cluster.recovering_nodes",
+                recovering_count as f64,
+                crate::metric_service::UnitType::Count,
+            );
+
+            // Count learner nodes
+            let manager = membership_manager.lock().await;
+            // Note: Actual learner count would need to be retrieved from Raft membership
+            // For now, we'll add a placeholder that can be enhanced later
+            drop(manager);
+            drop(detector);
+        }
     }
 
     /// Check if the cluster manager is currently running.

@@ -4,6 +4,7 @@
 /// promoting learners to voters, and ensuring quorum is always maintained.
 use super::config::ClusterManagerConfig;
 use super::types::MembershipAction;
+use crate::metric_service::MetricService;
 use crate::storage_raft_member::types::NodeId;
 use crate::storage_raft_member::{StorageRaftMember, StorageRaftMemberImpl};
 use futures::FutureExt; // For catch_unwind on Futures
@@ -66,6 +67,9 @@ pub struct MembershipManager {
     /// For example, in a 5-node cluster, quorum is always 3, even if some nodes are
     /// demoted to learners.
     total_membership_size: usize,
+
+    /// Optional metrics service for instrumentation
+    metrics: Option<Arc<crate::metric_service::MetricServiceImpl>>,
 }
 
 impl MembershipManager {
@@ -86,7 +90,15 @@ impl MembershipManager {
             raft,
             last_membership_change: HashMap::new(),
             total_membership_size,
+            metrics: None,
         }
+    }
+
+    /// Set the metrics service for this MembershipManager.
+    ///
+    /// This allows metrics to be configured after construction.
+    pub fn set_metrics(&mut self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
+        self.metrics = Some(metrics);
     }
 
     /// Check if a membership change is allowed (rate limiting)
@@ -441,6 +453,15 @@ impl MembershipManager {
         // 7. Record change for rate limiting
         self.record_membership_change(node_id);
 
+        // 8. Publish membership change metric
+        if let Some(ref metrics) = self.metrics {
+            let _ = metrics.publish_counter(
+                "cluster.membership_changes.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+        }
+
         info!("Successfully demoted node {:?} to learner", node_id);
         Ok(())
     }
@@ -518,6 +539,15 @@ impl MembershipManager {
 
         // 5. Record change for rate limiting
         self.record_membership_change(node_id);
+
+        // 6. Publish membership change metric
+        if let Some(ref metrics) = self.metrics {
+            let _ = metrics.publish_counter(
+                "cluster.membership_changes.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+        }
 
         info!("Successfully promoted node {:?} to voter", node_id);
         Ok(())

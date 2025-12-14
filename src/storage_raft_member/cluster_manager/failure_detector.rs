@@ -4,6 +4,7 @@
 /// and other signals. It determines when nodes should be considered failed or recovering.
 use super::config::ClusterManagerConfig;
 use super::types::{ClusterEvent, NodeHealth, NodeState};
+use crate::metric_service::MetricService;
 use crate::storage_raft_member::types::{NodeId, RaftMetrics};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +24,9 @@ pub struct FailureDetector {
 
     /// Event transmission channel for emitting cluster events
     event_tx: Option<mpsc::UnboundedSender<ClusterEvent>>,
+
+    /// Optional metrics service for instrumentation
+    metrics: Option<Arc<crate::metric_service::MetricServiceImpl>>,
 }
 
 impl FailureDetector {
@@ -32,6 +36,7 @@ impl FailureDetector {
             config,
             node_states: HashMap::new(),
             event_tx: None,
+            metrics: None,
         }
     }
 
@@ -46,8 +51,16 @@ impl FailureDetector {
             config,
             node_states: HashMap::new(),
             event_tx: Some(tx),
+            metrics: None,
         };
         (detector, rx)
+    }
+
+    /// Set the metrics service for this FailureDetector.
+    ///
+    /// This allows metrics to be configured after construction.
+    pub fn set_metrics(&mut self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
+        self.metrics = Some(metrics);
     }
 
     /// Emit a cluster event if event channel is configured
@@ -300,6 +313,15 @@ impl FailureDetector {
                         consecutive_failures: state.consecutive_failures,
                         time_since_heartbeat: state.time_since_heartbeat(),
                     });
+
+                    // Publish failure metric
+                    if let Some(ref metrics) = self.metrics {
+                        let _ = metrics.publish_counter(
+                            "cluster.failures_detected.total",
+                            1,
+                            crate::metric_service::UnitType::Operations,
+                        );
+                    }
                 }
                 // Degraded → Healthy: Consecutive successes (hysteresis)
                 else if state.consecutive_successes >= self.config.max_consecutive_failures {
@@ -336,6 +358,15 @@ impl FailureDetector {
                         node_id,
                         consecutive_successes: state.consecutive_successes,
                     });
+
+                    // Publish recovery metric
+                    if let Some(ref metrics) = self.metrics {
+                        let _ = metrics.publish_counter(
+                            "cluster.recoveries_detected.total",
+                            1,
+                            crate::metric_service::UnitType::Operations,
+                        );
+                    }
                 }
             }
             NodeHealth::Recovering => {
