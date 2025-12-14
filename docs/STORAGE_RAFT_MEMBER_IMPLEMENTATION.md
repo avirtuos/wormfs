@@ -99,11 +99,11 @@ TransactionAbort → Discard changes, cleanup staged chunks
 - [x] Test scaffolding (1 test passing)
 
 **TODO for Full Implementation**:
-- [ ] Implement `RaftLogReader` trait with correct lifetimes
-- [ ] Implement `RaftLogStorage` trait with correct lifetimes
-- [ ] Convert between WormFS LogEntry and OpenRaft Entry formats
-- [ ] Persist vote in redb table (currently in-memory in stub comments)
-- [ ] Handle log compaction via trim() method
+- [x] Implement `RaftLogReader` trait with correct lifetimes
+- [x] Implement `RaftLogStorage` trait with correct lifetimes
+- [x] Convert between WormFS LogEntry and OpenRaft Entry formats
+- [x] Persist vote in redb table (COMPLETE - `save_vote_bytes()`/`read_vote_bytes()` in TransactionLogStore)
+- [x] Handle log compaction via trim() method
 
 #### 6. Network Adapter (`src/storage_raft_member/network_adapter.rs`)
 

@@ -870,10 +870,11 @@ Several MetadataOperations don't include all fields needed for complete events:
 - Fix: Either pre-generate IDs before proposing, or make event emission async with metadata queries
 
 #### Vote Persistence
-- **Current**: Votes stored in memory only (RwLock<VoteState>)
-- **Impact**: Node restart loses vote, could violate "vote once per term" rule
-- **Future**: Persist votes to redb table within TransactionLogStore
-- **Acceptable**: For testing and development; must fix before production
+- **Status**: ✅ **IMPLEMENTED** - Votes fully persisted to redb
+- **Implementation**: `TransactionLogStore::save_vote_bytes()` / `read_vote_bytes()`
+- **Storage**: `VOTE_TABLE` in redb, serialized via bincode
+- **OpenRaft Integration**: `RaftLogStorageAdapter` implements `save_vote()` / `read_vote()`
+- **Testing**: Unit test `test_vote_persistence()` in `log_storage.rs` validates persistence
 
 #### Testing Gaps
 - **Unit Tests**: ✅ Comprehensive coverage of state machine, log storage, serialization
