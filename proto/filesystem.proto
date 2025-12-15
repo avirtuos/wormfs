@@ -1,0 +1,155 @@
+syntax = "proto3";
+
+package wormfs.filesystem;
+
+import "common.proto";
+
+// Client-facing Filesystem Service
+// Provides file and directory operations for FUSE clients
+
+service FilesystemService {
+  // File operations
+  rpc CreateFile(CreateFileRequest) returns (CreateFileResponse);
+  rpc ReadFile(ReadFileRequest) returns (stream FileChunk);
+  rpc WriteFile(stream FileChunk) returns (WriteFileResponse);
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  rpc GetFileMetadata(GetFileMetadataRequest) returns (FileMetadataResponse);
+
+  // Directory operations
+  rpc CreateDirectory(CreateDirectoryRequest) returns (CreateDirectoryResponse);
+  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
+  rpc DeleteDirectory(DeleteDirectoryRequest) returns (DeleteDirectoryResponse);
+
+  // Lock operations
+  rpc AcquireLock(AcquireLockRequest) returns (AcquireLockResponse);
+  rpc ReleaseLock(ReleaseLockRequest) returns (ReleaseLockResponse);
+  rpc ExtendLock(ExtendLockRequest) returns (ExtendLockResponse);
+
+  // Stripe operations (low-level data access)
+  rpc ReadStripe(ReadStripeRequest) returns (ReadStripeResponse);
+  rpc WriteStripe(WriteStripeRequest) returns (WriteStripeResponse);
+}
+
+// ===== File Operation Messages =====
+
+message CreateFileRequest {
+  string path = 1;
+  wormfs.common.FileMetadata metadata = 2;
+}
+
+message CreateFileResponse {
+  bytes file_id = 1;
+  uint64 inode = 2;
+}
+
+message ReadFileRequest {
+  bytes file_id = 1;
+  uint64 offset = 2;
+  uint32 size = 3;
+}
+
+message FileChunk {
+  bytes data = 1;
+  uint64 offset = 2;
+}
+
+message WriteFileResponse {
+  uint64 bytes_written = 1;
+}
+
+message DeleteFileRequest {
+  bytes file_id = 1;
+}
+
+message DeleteFileResponse {
+  bool success = 1;
+}
+
+message GetFileMetadataRequest {
+  bytes file_id = 1;
+}
+
+message FileMetadataResponse {
+  wormfs.common.FileMetadata metadata = 1;
+}
+
+// ===== Directory Operation Messages =====
+
+message CreateDirectoryRequest {
+  string path = 1;
+  uint32 permissions = 2;
+}
+
+message CreateDirectoryResponse {
+  uint64 inode = 1;
+}
+
+message ListDirectoryRequest {
+  bytes dir_id = 1;
+}
+
+message ListDirectoryResponse {
+  repeated wormfs.common.FileMetadata entries = 1;
+}
+
+message DeleteDirectoryRequest {
+  bytes dir_id = 1;
+}
+
+message DeleteDirectoryResponse {
+  bool success = 1;
+}
+
+// ===== Stripe Operation Messages =====
+
+message ReadStripeRequest {
+  bytes file_id = 1;
+  bytes stripe_id = 2;
+}
+
+message ReadStripeResponse {
+  bytes data = 1;
+}
+
+message WriteStripeRequest {
+  bytes file_id = 1;
+  bytes stripe_id = 2;
+  bytes data = 3;
+  wormfs.common.StoragePolicy policy = 4;
+}
+
+message WriteStripeResponse {
+  bytes stripe_id = 1;
+  repeated wormfs.common.ChunkLocation chunks = 2;
+}
+
+// ===== Lock Operation Messages =====
+
+message AcquireLockRequest {
+  bytes file_id = 1;
+  string client_id = 2;
+  wormfs.common.LockType lock_type = 3;
+  int64 duration_secs = 4;
+}
+
+message AcquireLockResponse {
+  uint64 lock_id = 1;
+  int64 expires_at = 2;
+}
+
+message ReleaseLockRequest {
+  uint64 lock_id = 1;
+}
+
+message ReleaseLockResponse {
+  bool success = 1;
+}
+
+message ExtendLockRequest {
+  uint64 lock_id = 1;
+  int64 duration_secs = 2;
+}
+
+message ExtendLockResponse {
+  int64 new_expires_at = 1;
+}

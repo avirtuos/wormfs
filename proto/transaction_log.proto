@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package wormfs.transaction_log;
+
+import "common.proto";
+
+// Inter-Node Transaction Log Service
+// Provides access to Raft log entries for replication and debugging
+
+service TransactionLogService {
+  rpc GetLogEntries(GetLogEntriesRequest) returns (stream LogEntry);
+  rpc GetLogState(GetLogStateRequest) returns (LogStateResponse);
+}
+
+// ===== Transaction Log Messages =====
+
+message GetLogEntriesRequest {
+  uint64 start_index = 1;
+  uint64 end_index = 2;
+}
+
+message LogEntry {
+  uint64 index = 1;
+  uint64 term = 2;
+  bytes data = 3;
+  int64 timestamp = 4;
+}
+
+message GetLogStateRequest {
+  // Empty - returns current log state
+}
+
+message LogStateResponse {
+  uint64 first_index = 1;
+  uint64 last_index = 2;
+  uint64 commit_index = 3;
+}

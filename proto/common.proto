@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package wormfs.common;
+
+// Common types shared across all WormFS services
+
+// ===== Error Handling =====
+
+enum ErrorCode {
+  OK = 0;
+  NOT_FOUND = 1;
+  ALREADY_EXISTS = 2;
+  PERMISSION_DENIED = 3;
+  RESOURCE_EXHAUSTED = 4;
+  FAILED_PRECONDITION = 5;
+  ABORTED = 6;
+  OUT_OF_RANGE = 7;
+  UNIMPLEMENTED = 8;
+  INTERNAL = 9;
+  UNAVAILABLE = 10;
+  DATA_LOSS = 11;
+  UNAUTHENTICATED = 12;
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+  map<string, string> details = 3;
+}
+
+// ===== Authentication =====
+
+message AuthToken {
+  string token = 1;
+  int64 expires_at = 2;
+}
+
+message RequestMetadata {
+  string request_id = 1;
+  string client_id = 2;
+  AuthToken auth = 3;
+  map<string, string> headers = 4;
+}
+
+// ===== File Metadata =====
+
+message FileMetadata {
+  uint64 inode = 1;
+  string path = 2;
+  uint64 size = 3;
+  uint32 permissions = 4;
+  uint32 uid = 5;
+  uint32 gid = 6;
+  int64 created_at = 7;
+  int64 modified_at = 8;
+  int64 accessed_at = 9;
+}
+
+// ===== Storage Configuration =====
+
+message StoragePolicy {
+  uint32 data_shards = 1;
+  uint32 parity_shards = 2;
+  uint64 stripe_size = 3;
+}
+
+message ChunkLocation {
+  bytes chunk_id = 1;
+  string node_id = 2;
+  string disk_id = 3;
+  uint32 chunk_index = 4;
+}
+
+// ===== Lock Types =====
+
+enum LockType {
+  READ = 0;
+  WRITE = 1;
+}
