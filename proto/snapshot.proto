@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package wormfs.snapshot;
+
+import "common.proto";
+
+// Inter-Node Snapshot Service
+// Handles Raft snapshot streaming between storage nodes
+
+service SnapshotService {
+  rpc GetLatestSnapshot(GetLatestSnapshotRequest) returns (SnapshotInfo);
+  rpc StreamSnapshot(StreamSnapshotRequest) returns (stream SnapshotChunk);
+  rpc GetSnapshotInfo(GetSnapshotInfoRequest) returns (SnapshotInfo);
+}
+
+// ===== Snapshot Messages =====
+
+message GetLatestSnapshotRequest {
+  // Empty - returns latest snapshot
+}
+
+message SnapshotInfo {
+  uint64 snapshot_id = 1;
+  uint64 log_index = 2;
+  uint64 log_term = 3;
+  int64 created_at = 4;
+  uint64 size_bytes = 5;
+}
+
+message StreamSnapshotRequest {
+  uint64 snapshot_id = 1;
+}
+
+message SnapshotChunk {
+  bytes data = 1;
+  uint64 offset = 2;
+  bool last_chunk = 3;
+}
+
+message GetSnapshotInfoRequest {
+  uint64 snapshot_id = 1;
+}

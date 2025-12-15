@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package wormfs.chunk;
+
+import "common.proto";
+
+// Inter-Node Chunk Service
+// Handles chunk storage, retrieval, verification and repair operations
+
+service ChunkService {
+  // Basic chunk operations
+  rpc WriteChunk(WriteChunkRequest) returns (WriteChunkResponse);
+  rpc ReadChunk(ReadChunkRequest) returns (ReadChunkResponse);
+  rpc CheckChunk(CheckChunkRequest) returns (CheckChunkResponse);
+  rpc VerifyChunk(VerifyChunkRequest) returns (VerifyChunkResponse);
+  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
+
+  // Advanced operations (from issue #80)
+  rpc StoreChunk(StoreChunkRequest) returns (StoreChunkResponse);
+  rpc RetrieveChunk(RetrieveChunkRequest) returns (stream RetrieveChunkResponse);
+  rpc BatchStore(stream BatchStoreRequest) returns (BatchStoreResponse);
+  rpc ListChunks(ListChunksRequest) returns (ListChunksResponse);
+  rpc RepairChunk(RepairChunkRequest) returns (RepairChunkResponse);
+  rpc RebalanceChunks(RebalanceRequest) returns (stream RebalanceResponse);
+}
+
+// ===== Chunk Types =====
+
+enum ChunkType {
+  DATA = 0;
+  PARITY = 1;
+}
+
+message Chunk {
+  string chunk_id = 1;
+  string stripe_id = 2;
+  uint32 index = 3;  // Position in stripe
+  bytes data = 4;
+  uint32 checksum = 5;
+  ChunkType type = 6;
+}
+
+// ===== Basic Chunk Operation Messages =====
+
+message WriteChunkRequest {
+  bytes chunk_id = 1;
+  bytes chunk_data = 2;
+}
+
+message WriteChunkResponse {
+  bool success = 1;
+}
+
+message ReadChunkRequest {
+  bytes chunk_id = 1;
+}
+
+message ReadChunkResponse {
+  bytes chunk_data = 1;
+}
+
+message CheckChunkRequest {
+  bytes chunk_id = 1;
+}
+
+message CheckChunkResponse {
+  bool exists = 1;
+  uint64 size = 2;
+}
+
+message VerifyChunkRequest {
+  bytes chunk_id = 1;
+}
+
+message VerifyChunkResponse {
+  bool valid = 1;
+  string checksum = 2;
+}
+
+message DeleteChunkRequest {
+  bytes chunk_id = 1;
+}
+
+message DeleteChunkResponse {
+  bool success = 1;
+}
+
+// ===== Advanced Chunk Operation Messages (Issue #80) =====
+
+message StoreChunkRequest {
+  Chunk chunk = 1;
+  bool is_staging = 2;  // True during prepare phase
+  string transaction_id = 3;
+}
+
+message StoreChunkResponse {
+  bool success = 1;
+  wormfs.common.Error error = 2;
+}
+
+message RetrieveChunkRequest {
+  string chunk_id = 1;
+  bool verify_checksum = 2;
+}
+
+message RetrieveChunkResponse {
+  bytes data = 1;
+  uint64 offset = 2;
+  bool last_chunk = 3;
+}
+
+message BatchStoreRequest {
+  oneof request {
+    BatchHeader header = 1;
+    Chunk chunk = 2;
+  }
+}
+
+message BatchHeader {
+  string transaction_id = 1;
+  uint32 chunk_count = 2;
+}
+
+message BatchStoreResponse {
+  uint32 stored_count = 1;
+  repeated wormfs.common.Error errors = 2;
+}
+
+message ListChunksRequest {
+  string stripe_id = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListChunksResponse {
+  repeated Chunk chunks = 1;
+  string next_page_token = 2;
+}
+
+message RepairChunkRequest {
+  string chunk_id = 1;
+  string stripe_id = 2;
+  repeated bytes reconstruction_data = 3;
+}
+
+message RepairChunkResponse {
+  bool success = 1;
+  wormfs.common.Error error = 2;
+}
+
+message RebalanceRequest {
+  string source_node = 1;
+  string target_node = 2;
+  repeated string chunk_ids = 3;
+}
+
+message RebalanceResponse {
+  string chunk_id = 1;
+  bool transferred = 2;
+  uint64 bytes_transferred = 3;
+  wormfs.common.Error error = 4;
+}
