@@ -32,8 +32,8 @@ enum ChunkType {
 }
 
 message Chunk {
-  string chunk_id = 1;
-  string stripe_id = 2;
+  bytes chunk_id = 1;
+  bytes stripe_id = 2;
   uint32 index = 3;  // Position in stripe
   bytes data = 4;
   uint32 checksum = 5;
@@ -99,7 +99,7 @@ message StoreChunkResponse {
 }
 
 message RetrieveChunkRequest {
-  string chunk_id = 1;
+  bytes chunk_id = 1;
   bool verify_checksum = 2;
 }
 
@@ -127,7 +127,7 @@ message BatchStoreResponse {
 }
 
 message ListChunksRequest {
-  string stripe_id = 1;
+  bytes stripe_id = 1;
   uint32 page_size = 2;
   string page_token = 3;
 }
@@ -138,8 +138,8 @@ message ListChunksResponse {
 }
 
 message RepairChunkRequest {
-  string chunk_id = 1;
-  string stripe_id = 2;
+  bytes chunk_id = 1;
+  bytes stripe_id = 2;
   repeated bytes reconstruction_data = 3;
 }
 
@@ -151,11 +151,11 @@ message RepairChunkResponse {
 message RebalanceRequest {
   string source_node = 1;
   string target_node = 2;
-  repeated string chunk_ids = 3;
+  repeated bytes chunk_ids = 3;
 }
 
 message RebalanceResponse {
-  string chunk_id = 1;
+  bytes chunk_id = 1;
   bool transferred = 2;
   uint64 bytes_transferred = 3;
   wormfs.common.Error error = 4;
