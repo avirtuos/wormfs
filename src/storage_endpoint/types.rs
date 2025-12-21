@@ -33,6 +33,14 @@ pub struct EndpointConfig {
     /// Which PSK file in identities_dir to use for this node's identity
     pub node_identity: Option<String>,
 
+    /// TLS certificate file path (PEM format)
+    /// Required when enable_tls is true
+    pub tls_cert_path: Option<PathBuf>,
+
+    /// TLS private key file path (PEM format)
+    /// Required when enable_tls is true
+    pub tls_key_path: Option<PathBuf>,
+
     /// Per-client rate limit (requests per second per identity)
     pub rate_limit_per_client: Option<usize>,
 
@@ -60,6 +68,8 @@ impl Default for EndpointConfig {
             enable_auth: true,
             identities_dir: Some(PathBuf::from("/etc/wormfs/identities")),
             node_identity: Some("storage_node".to_string()),
+            tls_cert_path: None,
+            tls_key_path: None,
             rate_limit_per_client: Some(100),
             rate_limit_overall: Some(1000),
             rate_limit_burst_size: 100,

@@ -113,7 +113,7 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
             .await
             .map_err(filestore_error_to_status)?;
 
-        info!("Chunk deleted successfully");
+        debug!("Chunk deleted successfully");
 
         Ok(Response::new(DeleteChunkResponse { success: true }))
     }
@@ -171,7 +171,7 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
                 .map_err(filestore_error_to_status)?;
         }
 
-        info!("Chunk stored successfully");
+        debug!("Chunk stored successfully");
 
         Ok(Response::new(StoreChunkResponse {
             success: true,
