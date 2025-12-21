@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::conversions::{
     bytes_to_chunk_id, bytes_to_file_id, bytes_to_stripe_id, chunk_id_to_bytes,
@@ -353,19 +353,17 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         request: Request<RepairChunkRequest>,
     ) -> Result<Response<RepairChunkResponse>, Status> {
         let req = request.into_inner();
-        debug!("RepairChunk request");
+        let chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
+        let stripe_id = bytes_to_stripe_id(&req.stripe_id)?;
 
-        let _chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
-        let _stripe_id = bytes_to_stripe_id(&req.stripe_id)?;
+        error!(
+            "RepairChunk request for chunk_id={:?}, stripe_id={:?} - NOT IMPLEMENTED",
+            chunk_id, stripe_id
+        );
 
         // TODO: Implement chunk repair
         // This would use rebuild_stripe to reconstruct the missing/corrupt chunk
-        warn!("RepairChunk not yet fully implemented");
-
-        Ok(Response::new(RepairChunkResponse {
-            success: true,
-            error: None,
-        }))
+        Err(Status::unimplemented("RepairChunk not yet implemented"))
     }
 
     type RebalanceChunksStream =

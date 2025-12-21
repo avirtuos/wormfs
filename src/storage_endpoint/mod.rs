@@ -182,9 +182,6 @@ pub trait StorageEndpoint: Send + Sync {
     /// a write operation. The token allows clients to upload the specified chunk
     /// directly to storage nodes without additional authentication.
     ///
-    /// Tokens are currently implemented as simple hardcoded strings but will be
-    /// replaced with public/private key-based tokens in the future.
-    ///
     /// # Arguments
     ///
     /// * `chunk_id` - Identifier of the chunk this token is valid for
@@ -193,11 +190,15 @@ pub trait StorageEndpoint: Send + Sync {
     /// # Returns
     ///
     /// An upload token string that can be used to upload the specified chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if secure token generation is not yet implemented.
     fn generate_upload_token(
         &self,
         chunk_id: crate::file_store::ChunkId,
         valid_for: std::time::Duration,
-    ) -> String;
+    ) -> Result<String, EndpointError>;
 
     /// Validate an upload token for a chunk.
     ///
@@ -212,8 +213,16 @@ pub trait StorageEndpoint: Send + Sync {
     ///
     /// # Returns
     ///
-    /// `true` if the token is valid for the specified chunk, `false` otherwise.
-    fn validate_upload_token(&self, chunk_id: crate::file_store::ChunkId, token: &str) -> bool;
+    /// `Ok(())` if the token is valid for the specified chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the token is invalid, expired, or secure validation is not yet implemented.
+    fn validate_upload_token(
+        &self,
+        chunk_id: crate::file_store::ChunkId,
+        token: &str,
+    ) -> Result<(), EndpointError>;
 
     // ===== Administrative Operations =====
 

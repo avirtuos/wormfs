@@ -262,24 +262,22 @@ where
         ))
     }
 
-    fn generate_upload_token(&self, chunk_id: ChunkId, valid_for: Duration) -> String {
-        debug!(
-            "Generating upload token for chunk_id (valid_for={:?})",
-            valid_for
-        );
-
-        // TODO: Implement proper token generation with expiration
-        // For now, return a simple hardcoded token
-        warn!("generate_upload_token using hardcoded token - NOT SECURE");
-        format!("upload-token-{:?}", chunk_id)
+    fn generate_upload_token(
+        &self,
+        _chunk_id: ChunkId,
+        _valid_for: Duration,
+    ) -> Result<String, EndpointError> {
+        error!("generate_upload_token called but secure token generation is not yet implemented");
+        Err(EndpointError::InternalError(
+            "Secure upload token generation not yet implemented".to_string(),
+        ))
     }
 
-    fn validate_upload_token(&self, chunk_id: ChunkId, token: &str) -> bool {
-        debug!("Validating upload token for chunk_id");
-
-        // TODO: Implement proper token validation
-        warn!("validate_upload_token using hardcoded validation - NOT SECURE");
-        token.starts_with("upload-token-")
+    fn validate_upload_token(&self, _chunk_id: ChunkId, _token: &str) -> Result<(), EndpointError> {
+        error!("validate_upload_token called but secure token validation is not yet implemented");
+        Err(EndpointError::InternalError(
+            "Secure upload token validation not yet implemented".to_string(),
+        ))
     }
 
     async fn trigger_deep_check(&self) -> Result<(), EndpointError> {
