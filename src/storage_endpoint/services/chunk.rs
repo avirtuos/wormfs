@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use super::conversions::{
     bytes_to_chunk_id, bytes_to_file_id, bytes_to_stripe_id, chunk_id_to_bytes,
-    filestore_error_to_status,
+    filestore_error_to_status, proto_to_compression_algorithm, proto_to_erasure_algorithm,
 };
 use crate::file_store::{ChunkData, ChunkHeader, FileStore};
 use crate::storage_endpoint::proto::wormfs::chunk::chunk_service_server::ChunkService;
@@ -40,40 +40,20 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         request: Request<WriteChunkRequest>,
     ) -> Result<Response<WriteChunkResponse>, Status> {
         let req = request.into_inner();
-        debug!("WriteChunk request");
-
         let chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
 
-        // Create ChunkData from proto bytes
-        // TODO: Proper ChunkData deserialization with full header metadata
-        let chunk_data = ChunkData {
-            header: ChunkHeader {
-                magic: [b'W', b'O', b'R', b'M'],
-                format_version: 1,
-                chunk_checksum: 0,
-                chunk_id,
-                stripe_id: bytes_to_stripe_id(&[0; 16])?, // TODO: Get from request
-                file_id: bytes_to_file_id(&[0; 16])?,     // TODO: Get from request
-                stripe_start_offset: 0,                   // TODO: Get from request
-                stripe_end_offset: 0,                     // TODO: Get from request
-                chunk_index: 0,                           // TODO: Get from request
-                data_shards: 4,                           // TODO: Get from storage policy
-                parity_shards: 2,                         // TODO: Get from storage policy
-                erasure_algorithm: crate::file_store::ErasureAlgorithm::ReedSolomon,
-                compression_algorithm: crate::file_store::CompressionAlgorithm::None,
-                stripe_checksum: 0, // TODO: Calculate
-            },
-            data: req.chunk_data,
-        };
+        error!(
+            "WriteChunk called for chunk_id={:?} - NOT IMPLEMENTED. Use StoreChunk instead.",
+            chunk_id
+        );
 
-        self.file_store
-            .write_chunk_local(chunk_id, chunk_data)
-            .await
-            .map_err(filestore_error_to_status)?;
-
-        info!("Chunk written successfully");
-
-        Ok(Response::new(WriteChunkResponse { success: true }))
+        // WriteChunkRequest only contains chunk_id and chunk_data, but ChunkData requires
+        // extensive metadata (stripe_id, file_id, erasure coding parameters, etc.) that
+        // this simple API doesn't provide. Clients should use StoreChunk which includes
+        // the full Chunk message with all required metadata.
+        Err(Status::unimplemented(
+            "WriteChunk is deprecated. Use StoreChunk with full chunk metadata instead.",
+        ))
     }
 
     async fn read_chunk(
@@ -169,10 +149,17 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         let chunk = req
             .chunk
             .ok_or_else(|| Status::invalid_argument("chunk is required"))?;
+
+        // Extract and validate all IDs
         let chunk_id = bytes_to_chunk_id(&chunk.chunk_id)?;
         let stripe_id = bytes_to_stripe_id(&chunk.stripe_id)?;
+        let file_id = bytes_to_file_id(&chunk.file_id)?;
 
-        // Create ChunkData
+        // Convert algorithms from proto enums
+        let erasure_algorithm = proto_to_erasure_algorithm(chunk.erasure_algorithm)?;
+        let compression_algorithm = proto_to_compression_algorithm(chunk.compression_algorithm)?;
+
+        // Create ChunkData with all fields from proto
         let chunk_data = ChunkData {
             header: ChunkHeader {
                 magic: [b'W', b'O', b'R', b'M'],
@@ -180,15 +167,15 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
                 chunk_checksum: chunk.chunk_checksum,
                 chunk_id,
                 stripe_id,
-                file_id: bytes_to_file_id(&[0; 16])?, // TODO: Get from request
-                stripe_start_offset: 0,               // TODO: Get from request
-                stripe_end_offset: 0,                 // TODO: Get from request
+                file_id,
+                stripe_start_offset: chunk.stripe_start_offset,
+                stripe_end_offset: chunk.stripe_end_offset,
                 chunk_index: chunk.chunk_index as u8,
-                data_shards: 4,   // TODO: Get from storage policy
-                parity_shards: 2, // TODO: Get from storage policy
-                erasure_algorithm: crate::file_store::ErasureAlgorithm::ReedSolomon,
-                compression_algorithm: crate::file_store::CompressionAlgorithm::None,
-                stripe_checksum: 0, // TODO: Calculate
+                data_shards: chunk.data_shards as u8,
+                parity_shards: chunk.parity_shards as u8,
+                erasure_algorithm,
+                compression_algorithm,
+                stripe_checksum: chunk.stripe_checksum,
             },
             data: chunk.data,
         };
