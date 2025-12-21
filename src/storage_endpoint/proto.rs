@@ -23,11 +23,6 @@ pub mod wormfs {
         tonic::include_proto!("wormfs.chunk");
     }
 
-    /// Administrative operations for cluster management.
-    pub mod admin {
-        tonic::include_proto!("wormfs.admin");
-    }
-
     /// Snapshot transfer for Raft state synchronization.
     pub mod snapshot {
         tonic::include_proto!("wormfs.snapshot");

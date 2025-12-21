@@ -143,6 +143,7 @@ ntest = "0.9"  # For test timeouts
 [features]
 default = ["openraft", "rusqlite", "tokio-rusqlite", "redb", "reed-solomon-erasure", "fuser"]
 test-utils = ["mockall"]
+tonic = ["dep:tonic", "dep:prost", "dep:tokio-stream", "dep:tower", "dep:http"]
 # Note: sqlx and rusqlite cannot be used together due to libsqlite3-sys version conflicts
 # Note: libp2p is now always enabled (no longer optional)
 full = [
@@ -152,9 +153,5 @@ full = [
     "redb",
     "reed-solomon-erasure",
     "tonic",
-    "prost",
-    "tokio-stream",
-    "tower",
-    "http",
     "fuser",
 ]
