@@ -8,7 +8,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/common.proto",
                 "proto/filesystem.proto",
                 "proto/chunk.proto",
-                "proto/admin.proto",
                 "proto/snapshot.proto",
                 "proto/transaction_log.proto",
                 "proto/health.proto",
