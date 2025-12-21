@@ -3,6 +3,10 @@
 //! This module contains implementations of all gRPC services exposed by the
 //! StorageEndpoint. Each service delegates to the appropriate internal components.
 
+/// Buffer size for gRPC streaming response channels
+#[cfg(feature = "tonic")]
+pub(crate) const GRPC_STREAM_CHANNEL_BUFFER_SIZE: usize = 32;
+
 #[cfg(feature = "tonic")]
 pub mod chunk;
 #[cfg(feature = "tonic")]

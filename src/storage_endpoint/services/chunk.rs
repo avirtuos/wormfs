@@ -11,6 +11,7 @@ use super::conversions::{
     bytes_to_chunk_id, bytes_to_file_id, bytes_to_stripe_id, chunk_id_to_bytes,
     filestore_error_to_status, proto_to_compression_algorithm, proto_to_erasure_algorithm,
 };
+use super::GRPC_STREAM_CHANNEL_BUFFER_SIZE;
 use crate::file_store::{ChunkData, ChunkHeader, FileStore};
 use crate::storage_endpoint::proto::wormfs::chunk::chunk_service_server::ChunkService;
 use crate::storage_endpoint::proto::wormfs::chunk::*;
@@ -192,7 +193,7 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         let chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
         let file_store = self.file_store.clone();
 
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let (tx, rx) = tokio::sync::mpsc::channel(GRPC_STREAM_CHANNEL_BUFFER_SIZE);
 
         // Spawn task to stream chunk data
         tokio::spawn(async move {
@@ -382,7 +383,7 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         let req = request.into_inner();
         debug!("RebalanceChunks request: force={}", req.force);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let (tx, rx) = tokio::sync::mpsc::channel(GRPC_STREAM_CHANNEL_BUFFER_SIZE);
 
         // TODO: Implement chunk rebalancing with progress streaming
         tokio::spawn(async move {

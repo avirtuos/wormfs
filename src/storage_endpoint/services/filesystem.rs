@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 use super::conversions::{
     bytes_to_file_id, file_id_to_bytes, filesystem_error_to_status, proto_to_lock_type,
 };
+use super::GRPC_STREAM_CHANNEL_BUFFER_SIZE;
 use crate::filesystem_service::{ClientId, FileSystemService};
 use crate::storage_endpoint::proto::wormfs::common::FileMetadata as ProtoFileMetadata;
 use crate::storage_endpoint::proto::wormfs::filesystem::filesystem_service_server::FilesystemService;
@@ -193,7 +194,7 @@ impl<F: FileSystemService + 'static> FilesystemService for FilesystemServiceImpl
         let inode = self.file_id_to_inode(&req.file_id)?;
 
         let filesystem = self.filesystem.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let (tx, rx) = tokio::sync::mpsc::channel(GRPC_STREAM_CHANNEL_BUFFER_SIZE);
 
         // Spawn task to read and stream file data
         tokio::spawn(async move {
