@@ -111,7 +111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_log_state() {
-        let mut mock_store = MockTransactionLogStore::new();
+        let mut mock_store = MockTransactionLogStore::default();
         mock_store.expect_get_first_index().returning(|| 1);
         mock_store.expect_get_last_index().returning(|| 100);
 

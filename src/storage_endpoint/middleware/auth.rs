@@ -216,7 +216,7 @@ mod tests {
             .insert("x-wormfs-identity", MetadataValue::from_static("client1"));
         request
             .metadata_mut()
-            .insert("x-wormfs-psk", MetadataValue::from_bytes(b"secret1"));
+            .insert("x-wormfs-psk", MetadataValue::from_static("secret1"));
 
         let result = auth.intercept(request).await;
         assert!(result.is_ok());
@@ -235,7 +235,7 @@ mod tests {
             .insert("x-wormfs-identity", MetadataValue::from_static("client1"));
         request
             .metadata_mut()
-            .insert("x-wormfs-psk", MetadataValue::from_bytes(b"wrong_secret"));
+            .insert("x-wormfs-psk", MetadataValue::from_static("wrong_secret"));
 
         let result = auth.intercept(request).await;
         assert!(result.is_err());
@@ -255,7 +255,7 @@ mod tests {
             .insert("x-wormfs-identity", MetadataValue::from_static("unknown"));
         request
             .metadata_mut()
-            .insert("x-wormfs-psk", MetadataValue::from_bytes(b"secret"));
+            .insert("x-wormfs-psk", MetadataValue::from_static("secret"));
 
         let result = auth.intercept(request).await;
         assert!(result.is_err());

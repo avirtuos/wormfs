@@ -111,13 +111,13 @@ mod tests {
 
         let result = StorageEndpointFactory::create(
             config,
-            Arc::new(MockFileSystemService::new()),
-            Arc::new(MockFileStore::new()),
-            Arc::new(MockSnapshotStore::new()),
-            Arc::new(MockTransactionLogStore::new()),
-            Arc::new(MockStorageRaftMember::new()),
-            Arc::new(MockStorageNode::new()),
-            MockMetricService::new(),
+            Arc::new(MockFileSystemService::default()),
+            Arc::new(MockFileStore::default()),
+            Arc::new(MockSnapshotStore::default()),
+            Arc::new(MockTransactionLogStore::default()),
+            Arc::new(MockStorageRaftMember::default()),
+            Arc::new(MockStorageNode::default()),
+            MockMetricService::default(),
         )
         .await;
 
@@ -135,13 +135,13 @@ mod tests {
 
         let result = StorageEndpointFactory::create(
             config,
-            Arc::new(MockFileSystemService::new()),
-            Arc::new(MockFileStore::new()),
-            Arc::new(MockSnapshotStore::new()),
-            Arc::new(MockTransactionLogStore::new()),
-            Arc::new(MockStorageRaftMember::new()),
-            Arc::new(MockStorageNode::new()),
-            MockMetricService::new(),
+            Arc::new(MockFileSystemService::default()),
+            Arc::new(MockFileStore::default()),
+            Arc::new(MockSnapshotStore::default()),
+            Arc::new(MockTransactionLogStore::default()),
+            Arc::new(MockStorageRaftMember::default()),
+            Arc::new(MockStorageNode::default()),
+            MockMetricService::default(),
         )
         .await;
 
