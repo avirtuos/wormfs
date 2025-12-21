@@ -128,21 +128,17 @@ impl RateLimiter {
     ///
     /// `Ok(())` if the request is within rate limits, or a `Status::resource_exhausted` error.
     pub async fn check_limit(&self, client_identity: &str) -> Result<(), Status> {
-        // Check overall rate limit first
-        {
-            let mut overall = self.overall.write().await;
-            if !overall.try_acquire() {
-                warn!("Overall rate limit exceeded");
-                return Err(Status::resource_exhausted("Overall rate limit exceeded"));
-            }
-        }
-
-        // Check per-client rate limit
+        // Check per-client rate limit first (before consuming from overall bucket)
         {
             let mut per_client = self.per_client.write().await;
             let bucket = per_client
                 .entry(client_identity.to_string())
-                .or_insert_with(|| TokenBucket::new(self.per_client_rate, self.burst_size));
+                .or_insert_with(|| {
+                    // Use the smaller of burst_size and per_client_rate for per-client buckets
+                    // This ensures per-client limits are more strict than overall limits
+                    let client_burst = self.burst_size.min(self.per_client_rate);
+                    TokenBucket::new(self.per_client_rate, client_burst)
+                });
 
             if !bucket.try_acquire() {
                 warn!("Rate limit exceeded for client: {}", client_identity);
@@ -150,6 +146,17 @@ impl RateLimiter {
                     "Rate limit exceeded for client {}",
                     client_identity
                 )));
+            }
+        }
+
+        // Then check overall rate limit
+        {
+            let mut overall = self.overall.write().await;
+            if !overall.try_acquire() {
+                warn!("Overall rate limit exceeded");
+                // Note: We've already consumed from per-client bucket above,
+                // but this is acceptable as it prevents the client from making progress
+                return Err(Status::resource_exhausted("Overall rate limit exceeded"));
             }
         }
 
@@ -270,16 +277,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limiter_per_client_limit() {
-        let limiter = RateLimiter::new(Some(2), Some(100), 2);
+        // Use larger burst size for overall bucket to not interfere with per-client testing
+        let limiter = RateLimiter::new(Some(2), Some(100), 10);
 
         // First two from same client should succeed
         assert!(limiter.check_limit("client1").await.is_ok());
         assert!(limiter.check_limit("client1").await.is_ok());
 
-        // Third from same client should fail
+        // Third from same client should fail (per-client limit of 2)
         assert!(limiter.check_limit("client1").await.is_err());
 
-        // Different client should still succeed
+        // Different client should still succeed (has its own quota)
         assert!(limiter.check_limit("client2").await.is_ok());
     }
 

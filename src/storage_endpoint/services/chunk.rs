@@ -406,7 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_chunk_exists() {
-        let mut mock_store = MockFileStore::new();
+        let mut mock_store = MockFileStore::default();
 
         let test_chunk_id = crate::file_store::ChunkId(uuid::Uuid::new_v4());
         let test_chunk_data = ChunkData {
@@ -448,13 +448,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_chunk_not_exists() {
-        let mut mock_store = MockFileStore::new();
+        let mut mock_store = MockFileStore::default();
 
-        mock_store.expect_read_chunk_local().returning(|_| {
-            Err(crate::file_store::Error::ChunkNotFound(
-                "not found".to_string(),
-            ))
-        });
+        mock_store
+            .expect_read_chunk_local()
+            .returning(|chunk_id| Err(crate::file_store::Error::ChunkNotFound(chunk_id)));
 
         let service = ChunkServiceImpl::new(Arc::new(mock_store));
 

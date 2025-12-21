@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_metrics_disabled() {
-        let mock_metrics = MockMetricService::new();
+        let mock_metrics = MockMetricService::default();
         let middleware = MetricsMiddleware::new(mock_metrics, false);
 
         let start = middleware.request_start("test", "method");
@@ -183,46 +183,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_request_flow() {
-        let mut mock_metrics = MockMetricService::new();
-
-        // Expect metrics to be published
-        mock_metrics
-            .expect_publish_counter()
-            .returning(|_, _, _| Ok(()));
-        mock_metrics
-            .expect_publish_histogram()
-            .returning(|_, _, _| Ok(()));
-
+        let mock_metrics = MockMetricService::default();
         let middleware = MetricsMiddleware::new(mock_metrics, true);
 
         let start = middleware.request_start("filesystem", "create_file");
         tokio::time::sleep(Duration::from_millis(10)).await;
+        // Should not panic - metrics are published internally
         middleware.request_end("filesystem", "create_file", start, true);
     }
 
     #[test]
     fn test_metrics_error_recording() {
-        let mut mock_metrics = MockMetricService::new();
-
-        mock_metrics
-            .expect_publish_counter()
-            .returning(|_, _, _| Ok(()));
-
+        let mock_metrics = MockMetricService::default();
         let middleware = MetricsMiddleware::new(mock_metrics, true);
 
+        // Should not panic - metrics are published internally
         middleware.record_error("chunk", "write_chunk", "permission_denied");
     }
 
     #[test]
     fn test_metrics_stream_recording() {
-        let mut mock_metrics = MockMetricService::new();
-
-        mock_metrics
-            .expect_publish_counter()
-            .returning(|_, _, _| Ok(()));
-
+        let mock_metrics = MockMetricService::default();
         let middleware = MetricsMiddleware::new(mock_metrics, true);
 
+        // Should not panic - metrics are published internally
         middleware.record_stream("filesystem", "read_file", 10, 65536);
     }
 }

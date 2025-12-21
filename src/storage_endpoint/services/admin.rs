@@ -393,10 +393,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_node() {
-        let mut mock_raft = MockStorageRaftMember::new();
+        let mut mock_raft = MockStorageRaftMember::default();
         mock_raft.expect_add_node().returning(|_, _, _| Ok(()));
 
-        let mock_node = MockStorageNode::new();
+        let mock_node = MockStorageNode::default();
         let service = AdminServiceImpl::new(Arc::new(mock_raft), Arc::new(mock_node));
 
         let request = Request::new(AddNodeRequest {
@@ -411,10 +411,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_node() {
-        let mut mock_raft = MockStorageRaftMember::new();
+        let mut mock_raft = MockStorageRaftMember::default();
         mock_raft.expect_remove_node().returning(|_| Ok(()));
 
-        let mock_node = MockStorageNode::new();
+        let mock_node = MockStorageNode::default();
         let service = AdminServiceImpl::new(Arc::new(mock_raft), Arc::new(mock_node));
 
         let request = Request::new(RemoveNodeRequest {
@@ -428,10 +428,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_snapshot() {
-        let mut mock_raft = MockStorageRaftMember::new();
+        let mut mock_raft = MockStorageRaftMember::default();
         mock_raft.expect_trigger_snapshot().returning(|| Ok(()));
 
-        let mock_node = MockStorageNode::new();
+        let mock_node = MockStorageNode::default();
         let service = AdminServiceImpl::new(Arc::new(mock_raft), Arc::new(mock_node));
 
         let request = Request::new(CreateSnapshotRequest {

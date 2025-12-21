@@ -218,12 +218,19 @@ where
     fn local_addr(&self) -> SocketAddr {
         self.inner
             .local_addr
-            .blocking_read()
+            .try_read()
+            .map(|addr| *addr)
+            .ok()
+            .flatten()
             .unwrap_or(self.config.listen_address)
     }
 
     fn is_serving(&self) -> bool {
-        *self.inner.is_serving.blocking_read()
+        self.inner
+            .is_serving
+            .try_read()
+            .map(|serving| *serving)
+            .unwrap_or(false)
     }
 
     async fn upload_chunk(
@@ -307,13 +314,13 @@ mod tests {
 
         StorageEndpointImpl::new_with_dependencies(
             config,
-            Arc::new(MockFileSystemService::new()),
-            Arc::new(MockFileStore::new()),
-            Arc::new(MockSnapshotStore::new()),
-            Arc::new(MockTransactionLogStore::new()),
-            Arc::new(MockStorageRaftMember::new()),
-            Arc::new(MockStorageNode::new()),
-            MockMetricService::new(),
+            Arc::new(MockFileSystemService::default()),
+            Arc::new(MockFileStore::default()),
+            Arc::new(MockSnapshotStore::default()),
+            Arc::new(MockTransactionLogStore::default()),
+            Arc::new(MockStorageRaftMember::default()),
+            Arc::new(MockStorageNode::default()),
+            MockMetricService::default(),
             auth,
             rate_limiter,
         )

@@ -173,10 +173,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_latest_snapshot_none() {
-        let mut mock_store = MockSnapshotStore::new();
+        let mut mock_store = MockSnapshotStore::default();
         mock_store
             .expect_get_latest_snapshot()
-            .returning(|| Ok(None));
+            .returning(|| Box::pin(async { Ok(None) }));
 
         let service = SnapshotServiceImpl::new(Arc::new(mock_store));
         let request = Request::new(GetLatestSnapshotRequest {});

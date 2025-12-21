@@ -210,7 +210,7 @@ pub mod mock {
     use super::*;
 
     /// Manual mock for MetricService (cannot use mockall due to Clone bound).
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     pub struct MockMetricService;
 
     impl MockMetricService {
@@ -261,6 +261,7 @@ pub mod mock {
             MetricSnapshot {
                 timestamp: std::time::SystemTime::now(),
                 metrics: HashMap::new(),
+                time_series: None,
             }
         }
 
