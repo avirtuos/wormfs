@@ -35,27 +35,6 @@ impl<F: FileStore> ChunkServiceImpl<F> {
 
 #[tonic::async_trait]
 impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
-    async fn write_chunk(
-        &self,
-        request: Request<WriteChunkRequest>,
-    ) -> Result<Response<WriteChunkResponse>, Status> {
-        let req = request.into_inner();
-        let chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
-
-        error!(
-            "WriteChunk called for chunk_id={:?} - NOT IMPLEMENTED. Use StoreChunk instead.",
-            chunk_id
-        );
-
-        // WriteChunkRequest only contains chunk_id and chunk_data, but ChunkData requires
-        // extensive metadata (stripe_id, file_id, erasure coding parameters, etc.) that
-        // this simple API doesn't provide. Clients should use StoreChunk which includes
-        // the full Chunk message with all required metadata.
-        Err(Status::unimplemented(
-            "WriteChunk is deprecated. Use StoreChunk with full chunk metadata instead.",
-        ))
-    }
-
     async fn read_chunk(
         &self,
         request: Request<ReadChunkRequest>,
