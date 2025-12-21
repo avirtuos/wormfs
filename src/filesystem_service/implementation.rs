@@ -2962,6 +2962,22 @@ impl FileSystemService for FileSystemServiceImpl {
         result
     }
 
+    async fn resolve_path(&self, path: &std::path::Path) -> Result<u64, Error> {
+        let _start = Instant::now();
+
+        // Query metadata store to resolve path to inode
+        let record = self
+            .metadata_store
+            .get_file_by_path(path)
+            .await
+            .map_err(|e| self.convert_metadata_error(e))?;
+
+        self.api_metrics
+            .record_call("resolve_path", _start.elapsed().as_secs_f64());
+
+        Ok(record.inode)
+    }
+
     async fn setattr(
         &self,
         inode: u64,

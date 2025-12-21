@@ -444,6 +444,25 @@ pub trait FileSystemService: Send + Sync {
     /// Returns an error if file not found.
     async fn getattr(&self, inode: u64) -> Result<FileAttr, Error>;
 
+    /// Resolve a path to an inode.
+    ///
+    /// This method resolves an absolute path to its corresponding inode.
+    /// It traverses the directory hierarchy using the metadata store.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path to resolve (must start with `/`)
+    ///
+    /// # Returns
+    ///
+    /// The inode for the given path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFound` if the path doesn't exist or any parent
+    /// directory in the path is missing.
+    async fn resolve_path(&self, path: &std::path::Path) -> Result<u64, Error>;
+
     /// Set file attributes.
     ///
     /// # Arguments

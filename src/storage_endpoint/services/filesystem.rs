@@ -45,20 +45,37 @@ impl<F: FileSystemService> FilesystemServiceImpl<F> {
 
     /// Parse a path into (parent_inode, name).
     ///
-    /// TODO: Implement proper path resolution.
-    /// For now, returns a placeholder parent inode (1 = root).
-    fn parse_path(&self, path: &str) -> Result<(u64, String), Status> {
+    /// This method extracts the parent directory path and filename from a full path,
+    /// then resolves the parent directory to its inode using the metadata store.
+    async fn parse_path(&self, path: &str) -> Result<(u64, String), Status> {
         let path = path.trim_start_matches('/');
         if path.is_empty() {
             return Err(Status::invalid_argument("Empty path"));
         }
 
-        let parts: Vec<&str> = path.rsplitn(2, '/').collect();
-        let name = parts[0].to_string();
+        // Build path and extract filename
+        let path_buf = std::path::PathBuf::from(format!("/{}", path));
+        let name = path_buf
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| Status::invalid_argument("Invalid path"))?
+            .to_string();
 
-        // TODO: Resolve parent path to inode
-        // For now, use root inode (1)
-        Ok((1, name))
+        // Get parent path
+        let parent_path = path_buf.parent().unwrap_or(std::path::Path::new("/"));
+
+        // Resolve parent to inode (root "/" has inode 1)
+        const ROOT_INODE: u64 = 1;
+        let parent_inode = if parent_path == std::path::Path::new("/") {
+            ROOT_INODE
+        } else {
+            self.filesystem
+                .resolve_path(parent_path)
+                .await
+                .map_err(|e| filesystem_error_to_status(e))?
+        };
+
+        Ok((parent_inode, name))
     }
 
     /// Convert file_id bytes to inode.
@@ -124,7 +141,7 @@ impl<F: FileSystemService + 'static> FilesystemService for FilesystemServiceImpl
         debug!("CreateFile request: path={}", req.path);
 
         // Parse path into (parent_inode, name)
-        let (parent_inode, name) = self.parse_path(&req.path)?;
+        let (parent_inode, name) = self.parse_path(&req.path).await?;
 
         // Extract metadata or use defaults
         let (mode, uid, gid) = if let Some(metadata) = req.metadata {
@@ -361,7 +378,7 @@ impl<F: FileSystemService + 'static> FilesystemService for FilesystemServiceImpl
         );
 
         // Parse path into (parent_inode, name)
-        let (parent_inode, name) = self.parse_path(&req.path)?;
+        let (parent_inode, name) = self.parse_path(&req.path).await?;
 
         // Use provided permissions or default
         let mode = if req.permissions != 0 {
