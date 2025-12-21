@@ -8,6 +8,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info};
 
 use super::conversions::transaction_log_error_to_status;
+use super::GRPC_STREAM_CHANNEL_BUFFER_SIZE;
 use crate::storage_endpoint::proto::wormfs::transaction_log::transaction_log_service_server::TransactionLogService;
 use crate::storage_endpoint::proto::wormfs::transaction_log::*;
 use crate::transaction_log_store::TransactionLogStore;
@@ -47,7 +48,7 @@ impl<T: TransactionLogStore + 'static> TransactionLogService for TransactionLogS
         );
 
         let transaction_log_store = self.transaction_log_store.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let (tx, rx) = tokio::sync::mpsc::channel(GRPC_STREAM_CHANNEL_BUFFER_SIZE);
 
         // Spawn task to stream log entries
         tokio::spawn(async move {

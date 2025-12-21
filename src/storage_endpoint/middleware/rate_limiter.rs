@@ -7,6 +7,18 @@ use tokio::sync::RwLock;
 use tonic::Status;
 use tracing::{debug, warn};
 
+/// Default requests per second allowed per client identity
+const DEFAULT_PER_CLIENT_RATE_LIMIT: usize = 100;
+
+/// Default total requests per second allowed for the node
+const DEFAULT_OVERALL_RATE_LIMIT: usize = 1000;
+
+/// Interval in seconds between rate limiter cleanup cycles
+const RATE_LIMITER_CLEANUP_INTERVAL_SECS: u64 = 60;
+
+/// Seconds of inactivity before a client's rate limit bucket is removed
+const RATE_LIMITER_IDLE_TIMEOUT_SECS: u64 = 5 * 60;
+
 /// Token bucket for rate limiting.
 ///
 /// Implements the token bucket algorithm where tokens are refilled at a constant rate
@@ -113,8 +125,8 @@ impl RateLimiter {
         overall_rate: Option<usize>,
         burst_size: usize,
     ) -> Self {
-        let per_client_rate_f64 = per_client_rate.unwrap_or(100) as f64;
-        let overall_rate_f64 = overall_rate.unwrap_or(1000) as f64;
+        let per_client_rate_f64 = per_client_rate.unwrap_or(DEFAULT_PER_CLIENT_RATE_LIMIT) as f64;
+        let overall_rate_f64 = overall_rate.unwrap_or(DEFAULT_OVERALL_RATE_LIMIT) as f64;
         let burst_size_f64 = burst_size as f64;
 
         Self {
@@ -127,7 +139,7 @@ impl RateLimiter {
             overall_rate: overall_rate_f64,
             burst_size: burst_size_f64,
             last_cleanup: Arc::new(RwLock::new(Instant::now())),
-            cleanup_interval: Duration::from_secs(60),
+            cleanup_interval: Duration::from_secs(RATE_LIMITER_CLEANUP_INTERVAL_SECS),
         }
     }
 
@@ -199,13 +211,13 @@ impl RateLimiter {
         drop(last_cleanup); // Release the lock early
 
         // Remove clients that haven't been accessed in the last 5 minutes
-        const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+        let idle_timeout = Duration::from_secs(RATE_LIMITER_IDLE_TIMEOUT_SECS);
         let mut per_client = self.per_client.write().await;
         let initial_count = per_client.len();
 
         per_client.retain(|_, bucket| {
             // Keep buckets that have been accessed recently (not idle)
-            !bucket.is_idle(IDLE_TIMEOUT)
+            !bucket.is_idle(idle_timeout)
         });
 
         let removed = initial_count - per_client.len();

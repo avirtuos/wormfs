@@ -8,6 +8,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info};
 
 use super::conversions::snapshot_error_to_status;
+use super::GRPC_STREAM_CHANNEL_BUFFER_SIZE;
 use crate::snapshot_store::SnapshotStore;
 use crate::storage_endpoint::proto::wormfs::snapshot::snapshot_service_server::SnapshotService;
 use crate::storage_endpoint::proto::wormfs::snapshot::*;
@@ -71,7 +72,7 @@ impl<S: SnapshotStore + 'static> SnapshotService for SnapshotServiceImpl<S> {
         info!("StreamSnapshot request: snapshot_id={}", req.snapshot_id);
 
         let snapshot_store = self.snapshot_store.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let (tx, rx) = tokio::sync::mpsc::channel(GRPC_STREAM_CHANNEL_BUFFER_SIZE);
 
         // Spawn task to stream snapshot data
         tokio::spawn(async move {
