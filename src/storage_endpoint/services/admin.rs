@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::conversions::{raft_error_to_status, storage_node_error_to_status};
 use crate::storage_endpoint::proto::wormfs::admin::admin_service_server::AdminService;
@@ -255,13 +255,16 @@ where
         request: Request<SetStoragePolicyRequest>,
     ) -> Result<Response<SetStoragePolicyResponse>, Status> {
         let req = request.into_inner();
-        debug!("SetStoragePolicy request: {:?}", req.policy);
+        error!(
+            "SetStoragePolicy request: {:?} - NOT IMPLEMENTED",
+            req.policy
+        );
 
         // TODO: Implement storage policy update
         // This would need to propagate through Raft to update default policy
-        warn!("SetStoragePolicy not yet fully implemented");
-
-        Ok(Response::new(SetStoragePolicyResponse { success: true }))
+        Err(Status::unimplemented(
+            "SetStoragePolicy not yet implemented",
+        ))
     }
 
     async fn trigger_rebalance(
@@ -269,20 +272,17 @@ where
         request: Request<TriggerRebalanceRequest>,
     ) -> Result<Response<TriggerRebalanceResponse>, Status> {
         let req = request.into_inner();
-        info!(
-            "TriggerRebalance request: force={}, targets={}",
+        error!(
+            "TriggerRebalance request: force={}, targets={} - NOT IMPLEMENTED",
             req.force,
             req.target_nodes.len()
         );
 
         // TODO: Implement data rebalancing trigger
         // This would coordinate with StorageWatchdog or a dedicated rebalancer component
-        warn!("TriggerRebalance not yet fully implemented");
-
-        Ok(Response::new(TriggerRebalanceResponse {
-            started: true,
-            rebalance_id: uuid::Uuid::new_v4().to_string(),
-        }))
+        Err(Status::unimplemented(
+            "TriggerRebalance not yet implemented",
+        ))
     }
 
     // ===== Maintenance Operations =====

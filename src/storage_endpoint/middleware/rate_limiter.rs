@@ -55,6 +55,13 @@ impl TokenBucket {
         }
     }
 
+    /// Refund a token (used when a request is rejected after token acquisition).
+    ///
+    /// This adds one token back to the bucket, capped at max_tokens.
+    fn refund(&mut self) {
+        self.tokens = (self.tokens + 1.0).min(self.max_tokens);
+    }
+
     /// Get the current number of available tokens.
     fn available_tokens(&self) -> f64 {
         self.tokens
@@ -128,7 +135,16 @@ impl RateLimiter {
     ///
     /// `Ok(())` if the request is within rate limits, or a `Status::resource_exhausted` error.
     pub async fn check_limit(&self, client_identity: &str) -> Result<(), Status> {
-        // Check per-client rate limit first (before consuming from overall bucket)
+        // Check overall rate limit first to avoid penalizing clients for system-wide overload
+        {
+            let mut overall = self.overall.write().await;
+            if !overall.try_acquire() {
+                warn!("Overall rate limit exceeded");
+                return Err(Status::resource_exhausted("Overall rate limit exceeded"));
+            }
+        }
+
+        // Only consume per-client token if overall check passed
         {
             let mut per_client = self.per_client.write().await;
             let bucket = per_client
@@ -142,21 +158,13 @@ impl RateLimiter {
 
             if !bucket.try_acquire() {
                 warn!("Rate limit exceeded for client: {}", client_identity);
+                // Need to refund the overall token since we're rejecting the request
+                let mut overall = self.overall.write().await;
+                overall.refund();
                 return Err(Status::resource_exhausted(format!(
                     "Rate limit exceeded for client {}",
                     client_identity
                 )));
-            }
-        }
-
-        // Then check overall rate limit
-        {
-            let mut overall = self.overall.write().await;
-            if !overall.try_acquire() {
-                warn!("Overall rate limit exceeded");
-                // Note: We've already consumed from per-client bucket above,
-                // but this is acceptable as it prevents the client from making progress
-                return Err(Status::resource_exhausted("Overall rate limit exceeded"));
             }
         }
 
