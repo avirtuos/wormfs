@@ -9,7 +9,6 @@ import "common.proto";
 
 service ChunkService {
   // Basic chunk operations
-  rpc WriteChunk(WriteChunkRequest) returns (WriteChunkResponse);
   rpc ReadChunk(ReadChunkRequest) returns (ReadChunkResponse);
   rpc CheckChunk(CheckChunkRequest) returns (CheckChunkResponse);
   rpc VerifyChunk(VerifyChunkRequest) returns (VerifyChunkResponse);
@@ -49,15 +48,6 @@ message Chunk {
 }
 
 // ===== Basic Chunk Operation Messages =====
-
-message WriteChunkRequest {
-  bytes chunk_id = 1;
-  bytes chunk_data = 2;
-}
-
-message WriteChunkResponse {
-  bool success = 1;
-}
 
 message ReadChunkRequest {
   bytes chunk_id = 1;
