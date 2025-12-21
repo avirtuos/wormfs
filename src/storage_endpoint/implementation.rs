@@ -18,7 +18,6 @@ use crate::transaction_log_store::TransactionLogStore;
 use super::middleware::{
     AuthInterceptor, AuthLayer, MetricsLayer, MetricsMiddleware, RateLimitLayer, RateLimiter,
 };
-use super::proto::wormfs::admin::admin_service_server::AdminServiceServer;
 use super::proto::wormfs::chunk::chunk_service_server::ChunkServiceServer;
 use super::proto::wormfs::filesystem::filesystem_service_server::FilesystemServiceServer;
 use super::proto::wormfs::health::health_server::HealthServer;
@@ -144,7 +143,6 @@ where
         let chunk_svc = ChunkServiceImpl::new(self.file_store.clone());
         let snapshot_svc = SnapshotServiceImpl::new(self.snapshot_store.clone());
         let txlog_svc = TransactionLogServiceImpl::new(self.transaction_log_store.clone());
-        let admin_svc = AdminServiceImpl::new(self.raft_member.clone(), self.storage_node.clone());
         let filesystem_svc = FilesystemServiceImpl::new(self.file_system.clone());
 
         info!("Building gRPC server with all services and middleware");
@@ -168,7 +166,6 @@ where
             .add_service(ChunkServiceServer::new(chunk_svc))
             .add_service(SnapshotServiceServer::new(snapshot_svc))
             .add_service(TransactionLogServiceServer::new(txlog_svc))
-            .add_service(AdminServiceServer::new(admin_svc))
             .add_service(FilesystemServiceServer::new(filesystem_svc));
 
         // Update state

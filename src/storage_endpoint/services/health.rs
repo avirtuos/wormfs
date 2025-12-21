@@ -56,7 +56,6 @@ impl Health for HealthServiceImpl {
                     health_check_response::ServingStatus::Serving
                 }
                 "wormfs.chunk.ChunkService" => health_check_response::ServingStatus::Serving,
-                "wormfs.admin.AdminService" => health_check_response::ServingStatus::Serving,
                 "wormfs.snapshot.SnapshotService" => health_check_response::ServingStatus::Serving,
                 "wormfs.transaction_log.TransactionLogService" => {
                     health_check_response::ServingStatus::Serving

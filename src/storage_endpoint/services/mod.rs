@@ -4,8 +4,6 @@
 //! StorageEndpoint. Each service delegates to the appropriate internal components.
 
 #[cfg(feature = "tonic")]
-pub mod admin;
-#[cfg(feature = "tonic")]
 pub mod chunk;
 #[cfg(feature = "tonic")]
 pub mod conversions;
@@ -18,8 +16,6 @@ pub mod snapshot;
 #[cfg(feature = "tonic")]
 pub mod transaction_log;
 
-#[cfg(feature = "tonic")]
-pub use admin::AdminServiceImpl;
 #[cfg(feature = "tonic")]
 pub use chunk::ChunkServiceImpl;
 #[cfg(feature = "tonic")]
