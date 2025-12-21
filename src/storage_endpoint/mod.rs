@@ -57,7 +57,15 @@
 //! The service is defined using Protocol Buffers and compiled with `tonic`.
 //! See `proto/wormfs.proto` for the complete service definition.
 
+pub mod middleware;
+pub mod proto;
+pub mod services;
 pub mod types;
+
+#[cfg(feature = "tonic")]
+pub mod factory;
+#[cfg(feature = "tonic")]
+pub mod implementation;
 
 use async_trait::async_trait;
 use std::net::SocketAddr;

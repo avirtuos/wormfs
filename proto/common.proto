@@ -61,7 +61,21 @@ message FileMetadata {
 message StoragePolicy {
   uint32 data_shards = 1;
   uint32 parity_shards = 2;
-  uint64 stripe_size = 3;
+  uint32 stripe_size_kb = 3;
+}
+
+// ===== Erasure Coding Configuration =====
+
+enum ErasureAlgorithm {
+  REED_SOLOMON = 0;
+  // Future: CRS, LRC, etc.
+}
+
+enum CompressionAlgorithm {
+  NONE = 0;
+  ZSTD = 1;
+  LZ4 = 2;
+  SNAPPY = 3;
 }
 
 message ChunkLocation {

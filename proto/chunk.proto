@@ -34,10 +34,18 @@ enum ChunkType {
 message Chunk {
   bytes chunk_id = 1;
   bytes stripe_id = 2;
-  uint32 index = 3;  // Position in stripe
-  bytes data = 4;
-  uint32 checksum = 5;
-  ChunkType type = 6;
+  bytes file_id = 3;
+  uint32 chunk_index = 4;  // Position in stripe (0 to total_shards-1)
+  bytes data = 5;
+  uint32 chunk_checksum = 6;
+  uint32 stripe_checksum = 7;
+  uint64 stripe_start_offset = 8;
+  uint64 stripe_end_offset = 9;
+  uint32 data_shards = 10;
+  uint32 parity_shards = 11;
+  wormfs.common.ErasureAlgorithm erasure_algorithm = 12;
+  wormfs.common.CompressionAlgorithm compression_algorithm = 13;
+  ChunkType type = 14;  // DATA or PARITY
 }
 
 // ===== Basic Chunk Operation Messages =====
@@ -122,7 +130,7 @@ message BatchHeader {
 }
 
 message BatchStoreResponse {
-  uint32 stored_count = 1;
+  uint32 chunks_stored = 1;
   repeated wormfs.common.Error errors = 2;
 }
 
@@ -149,14 +157,15 @@ message RepairChunkResponse {
 }
 
 message RebalanceRequest {
-  string source_node = 1;
-  string target_node = 2;
-  repeated bytes chunk_ids = 3;
+  bool force = 1;
+  string source_node = 2;
+  string target_node = 3;
+  repeated bytes chunk_ids = 4;
 }
 
 message RebalanceResponse {
-  bytes chunk_id = 1;
-  bool transferred = 2;
-  uint64 bytes_transferred = 3;
-  wormfs.common.Error error = 4;
+  uint32 chunks_moved = 1;
+  uint32 chunks_remaining = 2;
+  float progress_percent = 3;
+  bool complete = 4;
 }
