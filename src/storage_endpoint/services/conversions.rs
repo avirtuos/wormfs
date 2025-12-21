@@ -53,6 +53,46 @@ pub fn stripe_id_to_bytes(stripe_id: StripeId) -> Vec<u8> {
     stripe_id.0.as_bytes().to_vec()
 }
 
+// ===== Algorithm Conversions =====
+
+/// Convert protobuf ErasureAlgorithm to internal type.
+pub fn proto_to_erasure_algorithm(
+    algo: i32,
+) -> Result<crate::file_store::ErasureAlgorithm, Status> {
+    use crate::file_store::ErasureAlgorithm;
+    use crate::storage_endpoint::proto::wormfs::common::ErasureAlgorithm as ProtoErasure;
+
+    match ProtoErasure::try_from(algo) {
+        Ok(ProtoErasure::ReedSolomon) => Ok(ErasureAlgorithm::ReedSolomon),
+        _ => Err(Status::invalid_argument(format!(
+            "Invalid erasure algorithm: {}",
+            algo
+        ))),
+    }
+}
+
+/// Convert protobuf CompressionAlgorithm to internal type.
+pub fn proto_to_compression_algorithm(
+    algo: i32,
+) -> Result<crate::file_store::CompressionAlgorithm, Status> {
+    use crate::file_store::CompressionAlgorithm;
+    use crate::storage_endpoint::proto::wormfs::common::CompressionAlgorithm as ProtoCompression;
+
+    match ProtoCompression::try_from(algo) {
+        Ok(ProtoCompression::None) => Ok(CompressionAlgorithm::None),
+        Ok(ProtoCompression::Zstd) | Ok(ProtoCompression::Lz4) | Ok(ProtoCompression::Snappy) => {
+            Err(Status::unimplemented(format!(
+                "Compression algorithm {} not yet implemented",
+                algo
+            )))
+        }
+        _ => Err(Status::invalid_argument(format!(
+            "Invalid compression algorithm: {}",
+            algo
+        ))),
+    }
+}
+
 // ===== Error Conversions =====
 
 /// Convert FileStore error to gRPC Status.

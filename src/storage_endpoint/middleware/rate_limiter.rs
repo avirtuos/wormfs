@@ -62,6 +62,14 @@ impl TokenBucket {
         self.tokens = (self.tokens + 1.0).min(self.max_tokens);
     }
 
+    /// Check if this bucket has been idle for longer than the given duration.
+    ///
+    /// A bucket is considered idle if it hasn't been accessed (no try_acquire calls)
+    /// for longer than the specified duration.
+    fn is_idle(&self, idle_duration: Duration) -> bool {
+        Instant::now().duration_since(self.last_refill) > idle_duration
+    }
+
     /// Get the current number of available tokens.
     fn available_tokens(&self) -> f64 {
         self.tokens
@@ -178,7 +186,7 @@ impl RateLimiter {
     /// Clean up idle client buckets to prevent unbounded memory growth.
     ///
     /// This is called periodically (every 60 seconds) to remove client buckets
-    /// that haven't been used recently.
+    /// that haven't been accessed in the last 5 minutes.
     async fn cleanup_idle_clients(&self) {
         let now = Instant::now();
         let mut last_cleanup = self.last_cleanup.write().await;
@@ -190,13 +198,14 @@ impl RateLimiter {
         *last_cleanup = now;
         drop(last_cleanup); // Release the lock early
 
-        // Remove clients with full token buckets (indicating they haven't been active)
+        // Remove clients that haven't been accessed in the last 5 minutes
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
         let mut per_client = self.per_client.write().await;
         let initial_count = per_client.len();
 
         per_client.retain(|_, bucket| {
-            // Keep buckets that have been recently used (not at max capacity)
-            bucket.available_tokens() < bucket.max_tokens
+            // Keep buckets that have been accessed recently (not idle)
+            !bucket.is_idle(IDLE_TIMEOUT)
         });
 
         let removed = initial_count - per_client.len();
