@@ -260,20 +260,39 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         debug!("BatchStore request");
 
         let mut stream = request.into_inner();
-        let mut chunks_stored = 0;
+        let mut chunks_stored = 0u32;
+        let mut expected_count: Option<u32> = None;
+        let mut transaction_id: Option<String> = None;
+        let mut header_received = false;
 
         // Process each message in the stream
         while let Some(req) = stream.message().await? {
             // Handle oneof pattern
             match req.request {
                 Some(batch_store_request::Request::Header(header)) => {
+                    if header_received {
+                        return Err(Status::invalid_argument("Duplicate header in batch"));
+                    }
+                    if chunks_stored > 0 {
+                        return Err(Status::invalid_argument(
+                            "Header must be first message in batch",
+                        ));
+                    }
                     debug!(
                         "Batch header: transaction_id={}, chunk_count={}",
                         header.transaction_id, header.chunk_count
                     );
-                    // Header is informational only
+                    header_received = true;
+                    expected_count = Some(header.chunk_count);
+                    transaction_id = Some(header.transaction_id);
                 }
                 Some(batch_store_request::Request::Chunk(chunk)) => {
+                    if !header_received {
+                        return Err(Status::invalid_argument(
+                            "Header required before chunks in batch",
+                        ));
+                    }
+
                     let chunk_id = bytes_to_chunk_id(&chunk.chunk_id)?;
                     let stripe_id = bytes_to_stripe_id(&chunk.stripe_id)?;
 
@@ -310,10 +329,31 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
             }
         }
 
-        info!("Batch store completed: {} chunks", chunks_stored);
+        // Validate chunk count matches declared count
+        if let Some(expected) = expected_count {
+            if chunks_stored != expected {
+                warn!(
+                    "Batch chunk count mismatch: expected {}, received {}",
+                    expected, chunks_stored
+                );
+                return Err(Status::failed_precondition(format!(
+                    "Chunk count mismatch: expected {}, received {}",
+                    expected, chunks_stored
+                )));
+            }
+        }
+
+        if let Some(txn_id) = transaction_id {
+            info!(
+                "Batch store completed: transaction_id={}, chunks={}",
+                txn_id, chunks_stored
+            );
+        } else {
+            info!("Batch store completed: {} chunks", chunks_stored);
+        }
 
         Ok(Response::new(BatchStoreResponse {
-            chunks_stored: chunks_stored as u32,
+            chunks_stored,
             errors: vec![],
         }))
     }
