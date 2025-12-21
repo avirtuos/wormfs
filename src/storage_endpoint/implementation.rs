@@ -15,7 +15,9 @@ use crate::storage_node::StorageNode;
 use crate::storage_raft_member::StorageRaftMember;
 use crate::transaction_log_store::TransactionLogStore;
 
-use super::middleware::{AuthInterceptor, MetricsMiddleware, RateLimiter};
+use super::middleware::{
+    AuthInterceptor, AuthLayer, MetricsLayer, MetricsMiddleware, RateLimitLayer, RateLimiter,
+};
 use super::proto::wormfs::admin::admin_service_server::AdminServiceServer;
 use super::proto::wormfs::chunk::chunk_service_server::ChunkServiceServer;
 use super::proto::wormfs::filesystem::filesystem_service_server::FilesystemServiceServer;
@@ -145,11 +147,23 @@ where
         let admin_svc = AdminServiceImpl::new(self.raft_member.clone(), self.storage_node.clone());
         let filesystem_svc = FilesystemServiceImpl::new(self.file_system.clone());
 
-        info!("Building gRPC server with all services");
+        info!("Building gRPC server with all services and middleware");
 
-        // Build server with all services
-        // Note: Middleware like auth, rate limiting will be added in future iterations
+        // Create middleware layers
+        let auth_layer = AuthLayer::new(self.auth_interceptor.clone());
+        let rate_limit_layer = RateLimitLayer::new((*self.rate_limiter).clone());
+        let metrics_layer = MetricsLayer::new(MetricsMiddleware::new(
+            self.metrics.clone(),
+            self.config.enable_metrics,
+        ));
+
+        // Build server with middleware layers
+        // Layers are applied in reverse order: metrics -> rate_limit -> auth -> services
+        // So a request flows: auth -> rate_limit -> metrics -> service
         let server = Server::builder()
+            .layer(auth_layer)
+            .layer(rate_limit_layer)
+            .layer(metrics_layer)
             .add_service(HealthServer::new(health_svc))
             .add_service(ChunkServiceServer::new(chunk_svc))
             .add_service(SnapshotServiceServer::new(snapshot_svc))

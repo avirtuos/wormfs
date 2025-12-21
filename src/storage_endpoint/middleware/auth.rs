@@ -169,6 +169,43 @@ impl AuthInterceptor {
     pub fn node_identity(&self) -> &str {
         &self.node_identity
     }
+
+    /// Check if authentication is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Validate credentials without consuming a request.
+    ///
+    /// # Arguments
+    ///
+    /// * `identity` - Client identity string
+    /// * `psk` - Pre-shared key bytes
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if credentials are valid, Status error otherwise.
+    pub async fn validate_credentials(&self, identity: &str, psk: &[u8]) -> Result<(), Status> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let identities = self.identities.read().await;
+        match identities.get(identity) {
+            Some(expected_psk) if expected_psk.as_slice() == psk => {
+                debug!("Authenticated request from identity: {}", identity);
+                Ok(())
+            }
+            Some(_) => {
+                error!("Invalid PSK for identity: {}", identity);
+                Err(Status::permission_denied("Invalid PSK"))
+            }
+            None => {
+                error!("Unknown identity: {}", identity);
+                Err(Status::unauthenticated("Unknown identity"))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
