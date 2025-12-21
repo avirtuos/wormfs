@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use tonic::transport::Server;
+use tower::limit::ConcurrencyLimitLayer;
 use tracing::{debug, error, info, warn};
 
 use crate::file_store::{ChunkData, ChunkId, FileStore};
@@ -138,14 +139,35 @@ where
         // Create shutdown receiver
         let mut shutdown_rx = self.inner.shutdown_tx.subscribe();
 
-        // Build service implementations
-        let health_svc = HealthServiceImpl::new();
-        let chunk_svc = ChunkServiceImpl::new(self.file_store.clone());
-        let snapshot_svc = SnapshotServiceImpl::new(self.snapshot_store.clone());
-        let txlog_svc = TransactionLogServiceImpl::new(self.transaction_log_store.clone());
-        let filesystem_svc = FilesystemServiceImpl::new(self.file_system.clone());
+        // Build service implementations with message size limits applied
+        let max_message_size = self.config.max_message_size;
 
-        info!("Building gRPC server with all services and middleware");
+        let health_svc = HealthServer::new(HealthServiceImpl::new());
+
+        let chunk_svc = ChunkServiceServer::new(ChunkServiceImpl::new(self.file_store.clone()))
+            .max_decoding_message_size(max_message_size)
+            .max_encoding_message_size(max_message_size);
+
+        let snapshot_svc =
+            SnapshotServiceServer::new(SnapshotServiceImpl::new(self.snapshot_store.clone()))
+                .max_decoding_message_size(max_message_size)
+                .max_encoding_message_size(max_message_size);
+
+        let txlog_svc = TransactionLogServiceServer::new(TransactionLogServiceImpl::new(
+            self.transaction_log_store.clone(),
+        ))
+        .max_decoding_message_size(max_message_size)
+        .max_encoding_message_size(max_message_size);
+
+        let filesystem_svc =
+            FilesystemServiceServer::new(FilesystemServiceImpl::new(self.file_system.clone()))
+                .max_decoding_message_size(max_message_size)
+                .max_encoding_message_size(max_message_size);
+
+        info!(
+            "Building gRPC server with all services and middleware (max_message_size={} bytes)",
+            max_message_size
+        );
 
         // Create middleware layers
         let auth_layer = AuthLayer::new(self.auth_interceptor.clone());
@@ -155,24 +177,59 @@ where
             self.config.enable_metrics,
         ));
 
+        // Concurrency limit layer
+        let concurrency_layer = ConcurrencyLimitLayer::new(self.config.max_concurrent_requests);
+
+        // Build base server with timeout
+        let server_builder = Server::builder().timeout(self.config.request_timeout);
+
+        // TODO: TLS support requires enabling the "tls" feature on tonic dependency
+        // See: https://github.com/hyperium/tonic/tree/master/examples/src/tls
+        if self.config.enable_tls {
+            warn!(
+                "TLS is enabled in config but not yet implemented - requires tonic 'tls' feature"
+            );
+        }
+
         // Build server with middleware layers
-        // Layers are applied in reverse order: metrics -> rate_limit -> auth -> services
-        // So a request flows: auth -> rate_limit -> metrics -> service
-        let server = Server::builder()
-            .layer(auth_layer)
-            .layer(rate_limit_layer)
+        // Layer application order (outermost to innermost when processing request):
+        //   1. concurrency_layer - limits concurrent requests
+        //   2. auth_layer - authenticates request
+        //   3. rate_limit_layer - rate limits per identity
+        //   4. metrics_layer - records metrics
+        //   5. service - actual service handler
+        //
+        // Note: Layers are added in reverse order (last added = outermost)
+        // Note: Timeout is applied at server level, not as a layer
+        // Note: Request logging is done via debug! logs in each service method
+
+        if self.config.enable_logging {
+            info!("Request logging enabled - service methods will log at debug level");
+        }
+
+        let server = server_builder
             .layer(metrics_layer)
-            .add_service(HealthServer::new(health_svc))
-            .add_service(ChunkServiceServer::new(chunk_svc))
-            .add_service(SnapshotServiceServer::new(snapshot_svc))
-            .add_service(TransactionLogServiceServer::new(txlog_svc))
-            .add_service(FilesystemServiceServer::new(filesystem_svc));
+            .layer(rate_limit_layer)
+            .layer(auth_layer)
+            .layer(concurrency_layer)
+            .add_service(health_svc)
+            .add_service(chunk_svc)
+            .add_service(snapshot_svc)
+            .add_service(txlog_svc)
+            .add_service(filesystem_svc);
 
         // Update state
         *self.inner.is_serving.write().await = true;
         *self.inner.local_addr.write().await = Some(addr);
 
-        info!("StorageEndpoint gRPC server starting on {}", addr);
+        info!(
+            "StorageEndpoint gRPC server starting on {} (tls={}, logging={}, max_concurrent={}, timeout={:?})",
+            addr,
+            self.config.enable_tls,
+            self.config.enable_logging,
+            self.config.max_concurrent_requests,
+            self.config.request_timeout
+        );
 
         // Serve with graceful shutdown
         let serve_future = server.serve_with_shutdown(addr, async move {

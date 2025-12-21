@@ -93,7 +93,7 @@ zstd = "0.13"
 tonic = { version = "0.11", optional = true }
 prost = { version = "0.12", optional = true }
 tokio-stream = { version = "0.1", optional = true }
-tower = { version = "0.4", optional = true }
+tower = { version = "0.4", optional = true, features = ["limit", "timeout"] }
 http = { version = "0.2", optional = true }
 
 # Mocking (test utilities)
