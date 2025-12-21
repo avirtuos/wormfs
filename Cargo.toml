@@ -92,6 +92,7 @@ zstd = "0.13"
 # gRPC
 tonic = { version = "0.11", optional = true }
 prost = { version = "0.12", optional = true }
+tokio-stream = { version = "0.1", optional = true }
 
 # Mocking (test utilities)
 mockall = { version = "0.12", optional = true }
@@ -150,5 +151,6 @@ full = [
     "reed-solomon-erasure",
     "tonic",
     "prost",
+    "tokio-stream",
     "fuser",
 ]

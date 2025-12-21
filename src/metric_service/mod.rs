@@ -204,3 +204,76 @@ pub trait MetricService: Send + Sync + Clone {
         duration: Duration,
     ) -> Vec<(std::time::SystemTime, f64)>;
 }
+
+#[cfg(test)]
+pub mod mock {
+    use super::*;
+
+    /// Manual mock for MetricService (cannot use mockall due to Clone bound).
+    #[derive(Clone)]
+    pub struct MockMetricService;
+
+    impl MockMetricService {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+
+    #[async_trait]
+    impl MetricService for MockMetricService {
+        fn new(_config: Config) -> Result<Self, Error> {
+            Ok(Self)
+        }
+
+        async fn run(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn publish_counter(&self, _name: &str, _value: u64, _unit: UnitType) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn publish_gauge(&self, _name: &str, _value: f64, _unit: UnitType) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn publish_histogram(
+            &self,
+            _name: &str,
+            _value: f64,
+            _unit: UnitType,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn publish_labeled(
+            &self,
+            _name: &str,
+            _value: MetricValue,
+            _metric_type: MetricType,
+            _unit: UnitType,
+            _labels: HashMap<String, String>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn snapshot(&self) -> MetricSnapshot {
+            MetricSnapshot {
+                timestamp: std::time::SystemTime::now(),
+                metrics: HashMap::new(),
+            }
+        }
+
+        fn get_time_series(
+            &self,
+            _name: &str,
+            _labels: Option<HashMap<String, String>>,
+            _duration: Duration,
+        ) -> Vec<(std::time::SystemTime, f64)> {
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
+pub use mock::MockMetricService;
