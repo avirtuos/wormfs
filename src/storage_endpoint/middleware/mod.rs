@@ -6,12 +6,16 @@
 #[cfg(feature = "tonic")]
 pub mod auth;
 #[cfg(feature = "tonic")]
+pub mod layers;
+#[cfg(feature = "tonic")]
 pub mod metrics;
 #[cfg(feature = "tonic")]
 pub mod rate_limiter;
 
 #[cfg(feature = "tonic")]
 pub use auth::AuthInterceptor;
+#[cfg(feature = "tonic")]
+pub use layers::{AuthLayer, MetricsLayer, RateLimitLayer};
 #[cfg(feature = "tonic")]
 pub use metrics::MetricsMiddleware;
 #[cfg(feature = "tonic")]
