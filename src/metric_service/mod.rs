@@ -205,7 +205,7 @@ pub trait MetricService: Send + Sync + Clone {
     ) -> Vec<(std::time::SystemTime, f64)>;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock {
     use super::*;
 
@@ -276,5 +276,5 @@ pub mod mock {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub use mock::MockMetricService;

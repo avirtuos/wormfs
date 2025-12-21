@@ -41,11 +41,10 @@ pub mod mocks {
     pub use crate::file_store::MockFileStore;
     // Note: MetadataStore does not have automock due to Clone trait + 6 associated types
     // Manual mocks can be created as needed
+    pub use crate::filesystem_service::MockFileSystemService;
+    pub use crate::metric_service::MockMetricService;
     pub use crate::snapshot_store::MockSnapshotStore;
     pub use crate::storage_endpoint::MockStorageEndpoint;
     pub use crate::storage_watchdog::MockStorageWatchdog;
     pub use crate::transaction_log_store::MockTransactionLogStore;
-    // Note: MetricService does not have automock due to Clone trait requirement
-    // Manual mocks can be created as needed
-    pub use crate::filesystem_service::MockFileSystemService;
 }
