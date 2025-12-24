@@ -73,11 +73,13 @@
 
 pub mod erasure_coding;
 pub mod implementation;
+pub mod placement;
 pub mod stripe_builder;
 pub mod types;
 
 use async_trait::async_trait;
 pub use implementation::FileStoreImpl;
+pub use placement::{ChunkPlacement, PlacementConfig, PlacementEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
 pub use stripe_builder::StripeBuilder;

@@ -778,6 +778,9 @@ impl super::StorageNetworkInner {
                     heartbeat.current_leader,
                     heartbeat.is_voter,
                     heartbeat.startup_time,
+                    None, // TODO: Add total_bytes from heartbeat message
+                    None, // TODO: Add available_bytes from heartbeat message
+                    None, // TODO: Add chunk_count from heartbeat message
                 );
 
                 // Update peer's last_heartbeat time and metadata
