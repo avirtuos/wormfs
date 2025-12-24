@@ -312,16 +312,20 @@ mod tests {
 
     #[test]
     fn test_select_placements_basic() {
+        use crate::storage_raft_member::utils::current_time_ms;
+
         let tracker = Arc::new(HeartbeatTracker::new(5000, 60000));
         let my_node_id = NodeId(1);
         let config = PlacementConfig::default();
 
         let engine = PlacementEngine::new(tracker.clone(), my_node_id, config);
 
+        let now = current_time_ms();
+
         // Record some heartbeats with capacity
         tracker.record_heartbeat(
             "1".to_string(),
-            1000,
+            now,
             1,
             None,
             None,
@@ -337,7 +341,7 @@ mod tests {
         );
         tracker.record_heartbeat(
             "2".to_string(),
-            1000,
+            now,
             1,
             None,
             None,
@@ -358,6 +362,8 @@ mod tests {
 
     #[test]
     fn test_node_diversity() {
+        use crate::storage_raft_member::utils::current_time_ms;
+
         let tracker = Arc::new(HeartbeatTracker::new(5000, 60000));
         let my_node_id = NodeId(1);
         let config = PlacementConfig {
@@ -367,10 +373,12 @@ mod tests {
 
         let engine = PlacementEngine::new(tracker.clone(), my_node_id, config);
 
+        let now = current_time_ms();
+
         // Add 2 nodes
         tracker.record_heartbeat(
             "1".to_string(),
-            1000,
+            now,
             1,
             None,
             None,
@@ -386,7 +394,7 @@ mod tests {
         );
         tracker.record_heartbeat(
             "2".to_string(),
-            1000,
+            now,
             1,
             None,
             None,

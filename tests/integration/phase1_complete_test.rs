@@ -54,7 +54,18 @@ impl WormFSTestMount {
             .into());
         }
 
-        // Start WormFS mount in background
+        // Create log file for debugging in /tmp (won't be cleaned up)
+        let log_file_path = PathBuf::from(format!("/tmp/wormfs_test_{}.log", std::process::id()));
+        let log_file = fs::File::create(&log_file_path)?;
+        let log_file_clone = log_file.try_clone()?;
+
+        // Also store path in data_dir for easy access
+        fs::write(
+            data_dir.path().join("log_path.txt"),
+            log_file_path.to_string_lossy().as_bytes(),
+        )?;
+
+        // Start WormFS mount in background with debug logging
         let process = Command::new(&binary_path)
             .arg("mount")
             .arg("--mount-point")
@@ -64,9 +75,10 @@ impl WormFSTestMount {
             .arg("--data-dir")
             .arg(&chunks_dir)
             .arg("--foreground")
+            .arg("--debug") // Enable debug logging
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_clone))
             .spawn()?;
 
         // Wait for mount to complete
@@ -99,6 +111,17 @@ impl WormFSTestMount {
     fn chunks_dir(&self) -> PathBuf {
         self.data_dir.path().join("chunks")
     }
+
+    /// Get the log file path for debugging
+    fn log_file(&self) -> PathBuf {
+        // Read the log path from the stored file
+        if let Ok(path_str) = fs::read_to_string(self.data_dir.path().join("log_path.txt")) {
+            PathBuf::from(path_str.trim())
+        } else {
+            // Fallback (shouldn't happen)
+            PathBuf::from(format!("/tmp/wormfs_test_{}.log", std::process::id()))
+        }
+    }
 }
 
 impl Drop for WormFSTestMount {
@@ -125,6 +148,8 @@ impl Drop for WormFSTestMount {
 fn test_basic_operations() {
     let mount = WormFSTestMount::new().expect("Failed to create test mount");
     let mount_point = mount.mount_point();
+    let log_file = mount.log_file();
+    println!("WormFS logs: {:?}", log_file);
 
     // Test 1: List empty root directory
     let entries: Vec<_> = fs::read_dir(mount_point)

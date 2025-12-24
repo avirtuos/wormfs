@@ -364,16 +364,71 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
     // Initialize node and disks in database
     tracing::info!("Initializing node and disks...");
     metadata_store
-        .initialize_node_and_disks(&config.file_store_config.disk_paths)
+        .initialize_node_and_disks(
+            config.filesystem_config.node_id,
+            &config.file_store_config.disk_paths,
+        )
         .await
         .map_err(|e| Error::MetadataError(format!("Failed to initialize node and disks: {}", e)))?;
 
     // Initialize FileStore
     tracing::info!("Initializing FileStore...");
-    let file_store = Arc::new(
-        FileStore::new(config.file_store_config.clone())
-            .map_err(|e| Error::DataFailed(format!("Failed to create FileStore: {}", e)))?,
+    let mut file_store =
+        <crate::file_store::FileStoreImpl as FileStore>::new(config.file_store_config.clone())
+            .map_err(|e| Error::DataFailed(format!("Failed to create FileStore: {}", e)))?;
+
+    // Configure distributed components for FileStore (required for all operations)
+    use crate::file_store::{ChunkClientConfig, ChunkClientPool, PlacementConfig, PlacementEngine};
+    use crate::storage_raft_member::cluster_manager::heartbeat_tracker::HeartbeatTracker;
+
+    let my_node_id = crate::file_store::types::NodeId::new(config.filesystem_config.node_id);
+
+    // Create heartbeat tracker and record local node
+    // Use longer stale threshold since we don't have a background heartbeat task in mount mode
+    let tracker = Arc::new(HeartbeatTracker::new(300_000, 300_000)); // 5 minutes stale, 5 minutes grace
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    tracker.record_heartbeat(
+        config.filesystem_config.node_id.to_string(),
+        now,
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(now),           // Set startup_time to keep node in grace period
+        Some(1_000_000_000), // 1GB total capacity
+        Some(900_000_000),   // 900MB available
+        Some(0),             // 0 chunks initially
     );
+
+    // Create placement engine configured to always select local node
+    let placement_config = PlacementConfig {
+        min_node_diversity: 1,
+        prefer_local: true,
+    };
+    let placement_engine = Arc::new(PlacementEngine::new(
+        tracker.clone(),
+        my_node_id,
+        placement_config,
+    ));
+
+    // Create chunk client pool for distributed operations
+    let chunk_client_config = ChunkClientConfig::default();
+    let chunk_client: Arc<dyn crate::file_store::ChunkClient> =
+        Arc::new(ChunkClientPool::new(tracker, chunk_client_config));
+
+    // Configure distributed operations
+    file_store.set_distributed_config(my_node_id, placement_engine, chunk_client);
+
+    let file_store = Arc::new(file_store);
+
+    tracing::info!("FileStore initialized successfully with distributed configuration");
 
     // Initialize MetricService if configured
     let metrics = if let Some(metric_config) = config.metric_config.clone() {

@@ -71,6 +71,7 @@
 //!   └── ...
 //! ```
 
+pub mod chunk_client;
 pub mod erasure_coding;
 pub mod implementation;
 pub mod placement;
@@ -78,6 +79,7 @@ pub mod stripe_builder;
 pub mod types;
 
 use async_trait::async_trait;
+pub use chunk_client::{ChunkClient, ChunkClientConfig, ChunkClientPool};
 pub use implementation::FileStoreImpl;
 pub use placement::{ChunkPlacement, PlacementConfig, PlacementEngine};
 use std::path::PathBuf;
