@@ -71,12 +71,14 @@
 //!   └── ...
 //! ```
 
+pub mod chunk_client;
 pub mod erasure_coding;
 pub mod implementation;
 pub mod stripe_builder;
 pub mod types;
 
 use async_trait::async_trait;
+pub use chunk_client::{ChunkClient, ChunkClientConfig, ChunkClientPool};
 pub use implementation::FileStoreImpl;
 use std::path::PathBuf;
 use std::sync::Arc;

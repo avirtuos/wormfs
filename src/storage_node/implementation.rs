@@ -107,15 +107,67 @@ impl StorageNodeImpl {
             stripe_cache_tti_secs: 600,     // 10 minutes TTI
         };
 
-        let file_store =
+        let mut file_store =
             FileStoreImpl::new(file_store_config).map_err(|e| Error::ComponentInitFailed {
                 component: "FileStore".to_string(),
                 reason: e.to_string(),
             })?;
 
+        // Configure distributed components for FileStore
+        use crate::file_store::{
+            ChunkClientConfig, ChunkClientPool, PlacementConfig, PlacementEngine,
+        };
+        use crate::storage_raft_member::cluster_manager::heartbeat_tracker::HeartbeatTracker;
+
+        let my_node_id =
+            crate::file_store::types::NodeId::new(config.node_id.parse::<u64>().unwrap_or(1));
+
+        // Create heartbeat tracker and record local node
+        // Use longer stale threshold since we don't have a background heartbeat task yet
+        let tracker = Arc::new(HeartbeatTracker::new(300_000, 300_000)); // 5 minutes stale, 5 minutes grace
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        tracker.record_heartbeat(
+            config.node_id.clone(),
+            now,
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(now),           // Set startup_time to keep node in grace period
+            Some(1_000_000_000), // 1GB total capacity
+            Some(900_000_000),   // 900MB available
+            Some(0),             // 0 chunks initially
+        );
+
+        // Create placement engine configured to always select local node
+        let placement_config = PlacementConfig {
+            min_node_diversity: 1,
+            prefer_local: true,
+        };
+        let placement_engine = Arc::new(PlacementEngine::new(
+            tracker.clone(),
+            my_node_id,
+            placement_config,
+        ));
+
+        // Create chunk client pool for distributed operations
+        let chunk_client_config = ChunkClientConfig::default();
+        let chunk_client: Arc<dyn crate::file_store::ChunkClient> =
+            Arc::new(ChunkClientPool::new(tracker, chunk_client_config));
+
+        // Configure distributed operations
+        file_store.set_distributed_config(my_node_id, placement_engine, chunk_client);
+
         let file_store = Arc::new(file_store);
 
-        info!("FileStore initialized successfully");
+        info!("FileStore initialized successfully with distributed configuration");
 
         // Step 3: Initialize FileSystemService
         info!("Initializing FileSystemService...");

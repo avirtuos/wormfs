@@ -74,6 +74,53 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
         .await
         .expect("Failed to add disk");
 
+    // Configure distributed components for tests
+    use wormfs::file_store::types::NodeId;
+    use wormfs::file_store::{
+        ChunkClientConfig, ChunkClientPool, PlacementConfig, PlacementEngine,
+    };
+    use wormfs::storage_raft_member::cluster_manager::heartbeat_tracker::HeartbeatTracker;
+
+    let my_node_id = NodeId::new(1);
+
+    // Create heartbeat tracker and record local node
+    let tracker = Arc::new(HeartbeatTracker::new(5000, 60000));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    tracker.record_heartbeat(
+        "1".to_string(),
+        now,
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(1_000_000_000), // 1GB total
+        Some(900_000_000),   // 900MB available
+        Some(0),             // 0 chunks
+    );
+
+    // Create placement engine configured to always select local node
+    let config = PlacementConfig {
+        min_node_diversity: 1,
+        prefer_local: true,
+    };
+    let placement_engine = Arc::new(PlacementEngine::new(tracker.clone(), my_node_id, config));
+
+    // Create chunk client pool for distributed operations
+    let chunk_client_config = ChunkClientConfig::default();
+    let chunk_client: Arc<dyn wormfs::file_store::ChunkClient> =
+        Arc::new(ChunkClientPool::new(tracker, chunk_client_config));
+
+    // Configure distributed operations
+    file_store.set_distributed_config(my_node_id, placement_engine, chunk_client);
+
     let file_store = Arc::new(file_store);
 
     // Create FileSystemService using the factory

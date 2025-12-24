@@ -2,9 +2,9 @@
 
 use super::erasure_coding;
 use super::{
-    ChunkCacheEntry, ChunkData, ChunkHeader, ChunkId, ChunkMetadata, Config, DiskId, DiskStats,
-    ErasureAlgorithm, Error, FileId, FileStore, NodeId, PrefetchPolicy, RebuildResult,
-    StoragePolicy, StripeId, StripeMetadata, VerificationResult,
+    ChunkCacheEntry, ChunkClient, ChunkData, ChunkHeader, ChunkId, ChunkMetadata, Config, DiskId,
+    DiskStats, ErasureAlgorithm, Error, FileId, FileStore, NodeId, PlacementEngine, PrefetchPolicy,
+    RebuildResult, StoragePolicy, StripeId, StripeMetadata, VerificationResult,
 };
 use async_trait::async_trait;
 use moka::future::Cache;
@@ -38,8 +38,15 @@ struct FileStoreInner {
     /// In-memory cache for decoded stripe data
     /// Key: StripeId, Value: Arc<Vec<u8>> (Arc-wrapped decoded stripe data for zero-copy sharing)
     stripe_cache: Cache<StripeId, Arc<Vec<u8>>>,
-    // NOTE: MetadataStore integration will be added in Phase 2+
-    // For Phase 1, FileStore operates independently
+
+    /// Node ID of this storage node
+    my_node_id: NodeId,
+
+    /// Placement engine for chunk distribution across cluster (must be set via set_distributed_config)
+    placement_engine: Option<Arc<PlacementEngine>>,
+
+    /// Chunk client for remote chunk operations (must be set via set_distributed_config)
+    chunk_client: Option<Arc<dyn ChunkClient>>,
 }
 
 /// Information about a local disk
@@ -276,6 +283,9 @@ impl FileStore for FileStoreImpl {
             disks: TokioRwLock::new(disks),
             metrics: std::sync::RwLock::new(None),
             stripe_cache,
+            my_node_id: NodeId::new(0), // Must be set via set_distributed_config()
+            placement_engine: None,     // Must be set via set_distributed_config()
+            chunk_client: None,         // Must be set via set_distributed_config()
         };
 
         Ok(Self {
@@ -316,61 +326,40 @@ impl FileStore for FileStoreImpl {
         // Calculate total encoded size (sum of all shards)
         let encoded_size: u64 = shards.iter().map(|s| s.len() as u64).sum();
 
-        // Get a disk to write to
-        let disks = self.inner.disks.read().await;
-        let disk_info = disks
-            .values()
-            .next()
-            .ok_or_else(|| Error::InsufficientStorage {
-                needed: policy.total_shards() as usize,
-                available: 0,
-            })?;
+        // Distributed write: select placements and stage chunks across nodes
+        let placement_engine = self
+            .inner
+            .placement_engine
+            .as_ref()
+            .ok_or_else(|| Error::ConfigError("PlacementEngine not configured".to_string()))?;
 
-        let disk_id = disk_info.disk_id;
-        let disk_path = disk_info.path.clone();
-        drop(disks);
+        let placements = placement_engine.select_placements(shards.len())?;
+        let transaction_id = uuid::Uuid::new_v4().to_string();
 
-        // Create chunks from shards
-        let mut chunk_metadata = Vec::new();
-
-        for (chunk_index, shard) in shards.iter().enumerate() {
-            let chunk_id = ChunkId::generate();
-            let chunk_checksum = ChunkHeader::compute_checksum(shard);
-
-            let header = ChunkHeader::new(
-                chunk_id,
+        let chunk_metadata = self
+            .stage_chunks_distributed(
+                &shards,
+                &placements,
                 stripe_id,
                 file_id,
-                stripe_offset, // stripe_start_offset - where stripe starts in file
-                stripe_offset + original_size as u64, // stripe_end_offset - where stripe ends in file
-                chunk_index as u8,
-                policy.data_shards,
-                policy.parity_shards,
-                ErasureAlgorithm::ReedSolomon,
-                policy.compression,
+                stripe_offset,
+                stripe_offset + original_size as u64,
                 stripe_checksum,
-                chunk_checksum,
-            );
+                &policy,
+                &transaction_id,
+            )
+            .await?;
 
-            let chunk_data = ChunkData::new(header, shard.clone());
-
-            // Write chunk to disk
-            self.write_chunk_to_disk(&disk_path, file_id, stripe_id, chunk_id, &chunk_data)
-                .await?;
-
-            eprintln!(
-                "[FileStore] Wrote chunk: chunk_id={:?}, stripe_id={:?}, index={}, disk_id={:?}",
-                chunk_id, stripe_id, chunk_index, disk_id
-            );
-
-            // Add to metadata
-            chunk_metadata.push(ChunkMetadata::new(
-                chunk_id,
-                NodeId::new(0), // Phase 1: local only, no node concept yet
-                disk_id,
-                chunk_index as u8,
-            ));
-        }
+        eprintln!(
+            "[FileStore] Distributed write: staged {} chunks across {} nodes (tx={})",
+            chunk_metadata.len(),
+            placements
+                .iter()
+                .map(|p| p.target_node_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            transaction_id
+        );
 
         eprintln!(
             "[FileStore] Successfully wrote {} chunks for stripe_id={:?}",
@@ -469,64 +458,45 @@ impl FileStore for FileStoreImpl {
         let mut chunks_sorted = chunks;
         chunks_sorted.sort_by_key(|c| c.chunk_index);
 
-        let disks = self.inner.disks.read().await;
+        // Distributed read: fetch chunks from local and remote nodes
+        let chunk_data_vec = self
+            .fetch_chunks_parallel(file_id, stripe_id, &chunks_sorted)
+            .await?;
 
-        // Read chunks using provided metadata
+        // Convert ChunkData to shards and extract policy/size
         let mut shards = Vec::new();
         let mut policy: Option<StoragePolicy> = None;
         let mut original_size = 0;
-        let mut encoded_size: u64 = 0; // Track total bytes read from disk
+        let mut encoded_size: u64 = 0;
 
-        for chunk_meta in chunks_sorted.iter() {
-            let disk_info = disks
-                .get(&chunk_meta.disk_id)
-                .ok_or_else(|| Error::DiskNotFound(chunk_meta.disk_id))?;
-
-            match self
-                .read_chunk_from_disk(&disk_info.path, file_id, stripe_id, chunk_meta.chunk_id)
-                .await
-            {
-                Ok(chunk_data) => {
+        for (chunk_meta, chunk_data_opt) in chunks_sorted.iter().zip(chunk_data_vec.iter()) {
+            if let Some(chunk_data) = chunk_data_opt {
+                // Verify checksum
+                let computed = ChunkHeader::compute_checksum(&chunk_data.data);
+                if computed != chunk_data.header.chunk_checksum {
                     eprintln!(
-                        "[FileStore] Read chunk: chunk_id={:?}, stripe_id={:?}, index={}, disk_id={:?}",
-                        chunk_meta.chunk_id, stripe_id, chunk_meta.chunk_index, chunk_meta.disk_id
+                        "[FileStore] Chunk checksum mismatch: chunk_id={:?}, will reconstruct",
+                        chunk_meta.chunk_id
                     );
-
-                    // Verify checksum
-                    let computed = ChunkHeader::compute_checksum(&chunk_data.data);
-                    if computed != chunk_data.header.chunk_checksum {
-                        eprintln!(
-                            "[FileStore] Chunk checksum mismatch: chunk_id={:?}, will reconstruct",
-                            chunk_meta.chunk_id
-                        );
-                        // Corrupt, will reconstruct
-                        shards.push(None);
-                    } else {
-                        // Extract policy from first valid chunk
-                        if policy.is_none() {
-                            // Derive chunk_size from actual shard size
-                            let chunk_size = chunk_data.data.len() as u64;
-                            policy = Some(StoragePolicy {
-                                data_shards: chunk_data.header.data_shards,
-                                parity_shards: chunk_data.header.parity_shards,
-                                chunk_size,
-                                compression: chunk_data.header.compression_algorithm,
-                            });
-                            original_size = chunk_data.header.stripe_end_offset as usize;
-                        }
-                        // Track encoded bytes read from disk
-                        encoded_size += chunk_data.data.len() as u64;
-                        shards.push(Some(chunk_data.data));
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[FileStore] Failed to read chunk: chunk_id={:?}, error={}, will reconstruct",
-                        chunk_meta.chunk_id, e
-                    );
-                    // Missing, will reconstruct
                     shards.push(None);
+                } else {
+                    // Extract policy from first valid chunk
+                    if policy.is_none() {
+                        let chunk_size = chunk_data.data.len() as u64;
+                        policy = Some(StoragePolicy {
+                            data_shards: chunk_data.header.data_shards,
+                            parity_shards: chunk_data.header.parity_shards,
+                            chunk_size,
+                            compression: chunk_data.header.compression_algorithm,
+                        });
+                        original_size = chunk_data.header.stripe_end_offset as usize;
+                    }
+                    encoded_size += chunk_data.data.len() as u64;
+                    shards.push(Some(chunk_data.data.clone()));
                 }
+            } else {
+                // Missing/failed chunk - will reconstruct
+                shards.push(None);
             }
         }
 
@@ -535,8 +505,6 @@ impl FileStore for FileStoreImpl {
             shards.len(),
             stripe_id
         );
-
-        drop(disks);
 
         let policy = policy.ok_or_else(|| Error::InsufficientChunks {
             needed: 1,
@@ -722,11 +690,29 @@ impl FileStore for FileStoreImpl {
         Ok(result)
     }
 
-    async fn stage_chunk(&self, _chunk_data: ChunkData) -> Result<ChunkId, Error> {
-        // Phase 2/3: Two-phase commit support
-        Err(Error::NotImplemented(
-            "stage_chunk is for Phase 2+".to_string(),
-        ))
+    async fn stage_chunk(&self, chunk_data: ChunkData) -> Result<ChunkId, Error> {
+        // Stage chunk locally to disk. The chunk is written but not yet in metadata.
+        // Activation occurs when metadata is committed via Raft.
+
+        let file_id = chunk_data.header.file_id;
+        let stripe_id = chunk_data.header.stripe_id;
+        let chunk_id = chunk_data.header.chunk_id;
+
+        // Get first available disk
+        let disks = self.inner.disks.read().await;
+        let disk_info = disks
+            .values()
+            .next()
+            .ok_or_else(|| Error::ConfigError("No disks available".to_string()))?;
+
+        let disk_path = disk_info.path.clone();
+        drop(disks);
+
+        // Write chunk to disk
+        self.write_chunk_to_disk(&disk_path, file_id, stripe_id, chunk_id, &chunk_data)
+            .await?;
+
+        Ok(chunk_id)
     }
 
     async fn activate_chunk(&self, _chunk_id: ChunkId) -> Result<(), Error> {
@@ -876,6 +862,231 @@ impl FileStore for FileStoreImpl {
     }
 }
 
+// Additional methods for distributed operations
+impl FileStoreImpl {
+    /// Configure distributed storage settings.
+    ///
+    /// This method must be called before using write/read operations.
+    /// It sets the node ID, placement engine, and chunk client for distributed operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `my_node_id` - ID of this storage node
+    /// * `placement_engine` - Placement engine for distributed chunk selection
+    /// * `chunk_client` - Client for remote chunk operations
+    pub fn set_distributed_config(
+        &mut self,
+        my_node_id: NodeId,
+        placement_engine: Arc<PlacementEngine>,
+        chunk_client: Arc<dyn ChunkClient>,
+    ) {
+        // Since FileStoreInner is wrapped in Arc, we need to mutate it
+        // This is safe because set_distributed_config is called during initialization
+        // before any concurrent access occurs
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("FileStore already shared, cannot set distributed config");
+
+        inner.my_node_id = my_node_id;
+        inner.placement_engine = Some(placement_engine);
+        inner.chunk_client = Some(chunk_client);
+    }
+
+    /// Stage chunks across the cluster during distributed write (2PC phase 1).
+    ///
+    /// This method distributes chunks to target nodes based on placement decisions.
+    /// Local chunks are staged via stage_chunk(), remote chunks via ChunkClientPool.
+    ///
+    /// # Arguments
+    ///
+    /// * `shards` - Erasure-coded shards to distribute
+    /// * `placements` - Target node for each shard
+    /// * `stripe_id` - Stripe identifier for tracking
+    /// * `file_id` - File identifier
+    /// * `stripe_offset` - Offset of this stripe in the file
+    /// * `stripe_checksum` - Checksum of original stripe data
+    /// * `policy` - Storage policy (data/parity shards, compression)
+    /// * `transaction_id` - Transaction ID for 2PC coordination
+    ///
+    /// # Returns
+    ///
+    /// Vector of chunk metadata for successfully staged chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any chunk staging fails. On failure, caller should
+    /// discard all staged chunks.
+    async fn stage_chunks_distributed(
+        &self,
+        shards: &[Vec<u8>],
+        placements: &[super::ChunkPlacement],
+        stripe_id: StripeId,
+        file_id: FileId,
+        stripe_offset: u64,
+        stripe_end_offset: u64,
+        stripe_checksum: u32,
+        policy: &StoragePolicy,
+        transaction_id: &str,
+    ) -> Result<Vec<ChunkMetadata>, Error> {
+        use futures::future::try_join_all;
+
+        let chunk_client = self
+            .inner
+            .chunk_client
+            .as_ref()
+            .ok_or_else(|| Error::ConfigError("ChunkClientPool not configured".to_string()))?;
+
+        // Create staging futures for all chunks
+        let staging_futures: Vec<_> = shards
+            .iter()
+            .zip(placements.iter())
+            .map(|(shard, placement)| {
+                let chunk_id = ChunkId::generate();
+                let chunk_checksum = ChunkHeader::compute_checksum(shard);
+
+                let header = ChunkHeader::new(
+                    chunk_id,
+                    stripe_id,
+                    file_id,
+                    stripe_offset,
+                    stripe_end_offset,
+                    placement.chunk_index,
+                    policy.data_shards,
+                    policy.parity_shards,
+                    ErasureAlgorithm::ReedSolomon,
+                    policy.compression,
+                    stripe_checksum,
+                    chunk_checksum,
+                );
+
+                let chunk_data = ChunkData::new(header, shard.clone());
+
+                async move {
+                    if placement.is_local {
+                        // Stage locally
+                        self.stage_chunk(chunk_data).await?;
+                    } else {
+                        // Stage remotely via gRPC
+                        chunk_client
+                            .store_chunk_remote(
+                                placement.target_node_id,
+                                &chunk_data,
+                                true, // is_staging
+                                transaction_id,
+                            )
+                            .await?;
+                    }
+
+                    Ok(ChunkMetadata::new(
+                        chunk_id,
+                        placement.target_node_id,
+                        DiskId::new(0), // Disk selection handled by target node
+                        placement.chunk_index,
+                    ))
+                }
+            })
+            .collect();
+
+        // Execute all staging operations in parallel
+        try_join_all(staging_futures).await
+    }
+
+    /// Fetch chunks in parallel from local and remote nodes.
+    ///
+    /// This method retrieves chunks from their storage locations, handling both
+    /// local disk reads and remote gRPC fetches. Returns Some(data) for
+    /// successfully retrieved chunks, None for missing/failed chunks.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - File identifier
+    /// * `stripe_id` - Stripe identifier
+    /// * `chunk_metadata` - Location metadata for each chunk
+    ///
+    /// # Returns
+    ///
+    /// Vector of Option<ChunkData> - Some for successfully fetched chunks,
+    /// None for failures (will be reconstructed via erasure coding).
+    ///
+    /// # Errors
+    ///
+    /// This method does NOT return errors for individual chunk failures.
+    /// It returns None for failed chunks and lets the caller handle reconstruction.
+    /// Only returns Err for catastrophic failures.
+    async fn fetch_chunks_parallel(
+        &self,
+        file_id: FileId,
+        stripe_id: StripeId,
+        chunk_metadata: &[ChunkMetadata],
+    ) -> Result<Vec<Option<ChunkData>>, Error> {
+        use futures::future::join_all;
+
+        let chunk_client = self.inner.chunk_client.as_ref();
+        let my_node_id = self.inner.my_node_id;
+
+        // Create fetch futures for all chunks
+        let fetch_futures: Vec<_> = chunk_metadata
+            .iter()
+            .map(|meta| async move {
+                if meta.node_id == my_node_id {
+                    // Fetch locally from disk
+                    // Get disk path for this chunk
+                    let disks = self.inner.disks.read().await;
+                    let disk_info = match disks.get(&meta.disk_id) {
+                        Some(info) => info,
+                        None => {
+                            eprintln!(
+                                "[FileStore] Disk {:?} not found for chunk {:?}",
+                                meta.disk_id, meta.chunk_id
+                            );
+                            return None;
+                        }
+                    };
+                    let disk_path = disk_info.path.clone();
+                    drop(disks);
+
+                    match self
+                        .read_chunk_from_disk(&disk_path, file_id, stripe_id, meta.chunk_id)
+                        .await
+                    {
+                        Ok(chunk_data) => Some(chunk_data),
+                        Err(e) => {
+                            eprintln!(
+                                "[FileStore] Failed to read local chunk {:?}: {}",
+                                meta.chunk_id, e
+                            );
+                            None
+                        }
+                    }
+                } else if let Some(client_pool) = chunk_client {
+                    // Fetch remotely
+                    match client_pool
+                        .read_chunk_remote(meta.node_id, meta.chunk_id)
+                        .await
+                    {
+                        Ok(chunk_data) => Some(chunk_data),
+                        Err(e) => {
+                            eprintln!(
+                                "[FileStore] Failed to read remote chunk {:?} from node {:?}: {}",
+                                meta.chunk_id, meta.node_id, e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "[FileStore] Cannot fetch remote chunk {:?}: ChunkClientPool not configured",
+                        meta.chunk_id
+                    );
+                    None
+                }
+            })
+            .collect();
+
+        // Execute all fetches in parallel (join_all, not try_join_all - allow partial failures)
+        Ok(join_all(fetch_futures).await)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,6 +1128,50 @@ mod tests {
             .next()
             .copied()
             .unwrap();
+
+        // Configure distributed components for tests
+        use crate::file_store::chunk_client::MockChunkClient;
+        use crate::file_store::{PlacementConfig, PlacementEngine};
+        use crate::storage_raft_member::cluster_manager::heartbeat_tracker::HeartbeatTracker;
+        use crate::storage_raft_member::utils::current_time_ms;
+
+        let my_node_id = NodeId::new(1);
+
+        // Create heartbeat tracker and record local node
+        let tracker = std::sync::Arc::new(HeartbeatTracker::new(5000, 60000));
+        tracker.record_heartbeat(
+            "1".to_string(),
+            current_time_ms(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(1_000_000_000), // 1GB total
+            Some(900_000_000),   // 900MB available
+            Some(0),             // 0 chunks
+        );
+
+        // Create placement engine configured to always select local node
+        let config = PlacementConfig {
+            min_node_diversity: 1,
+            prefer_local: true,
+        };
+        let placement_engine =
+            std::sync::Arc::new(PlacementEngine::new(tracker, my_node_id, config));
+
+        // Create mock chunk client
+        let _mock_client = MockChunkClient::new();
+        // Note: MockChunkClient is stateless, so we just need a fresh instance
+        let chunk_client: std::sync::Arc<dyn ChunkClient> =
+            std::sync::Arc::new(MockChunkClient::new());
+
+        // Configure distributed operations
+        store.set_distributed_config(my_node_id, placement_engine, chunk_client);
 
         (store, temp_dir, actual_disk_id)
     }
