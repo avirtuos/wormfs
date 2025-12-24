@@ -146,13 +146,14 @@ pub trait MetadataStore: Send + Sync + Clone {
     ///
     /// This method ensures that the database has the necessary node and disk records
     /// for storing chunk metadata. It creates:
-    /// - A single node with ID 0 representing the local node
+    /// - A single node with the specified node_id representing the local node
     /// - Disk records for each configured disk path
     ///
     /// This method is idempotent and safe to call multiple times.
     ///
     /// # Arguments
     ///
+    /// * `node_id` - The node ID to use for this storage node
     /// * `disk_paths` - List of disk paths to register
     ///
     /// # Errors
@@ -160,6 +161,7 @@ pub trait MetadataStore: Send + Sync + Clone {
     /// Returns an error if node/disk initialization fails.
     async fn initialize_node_and_disks(
         &self,
+        node_id: u64,
         disk_paths: &[std::path::PathBuf],
     ) -> Result<(), Error>;
 

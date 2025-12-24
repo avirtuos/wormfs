@@ -312,6 +312,152 @@ impl MetadataStoreImpl {
         .await
         .map_err(|e| Error::QueryError(format!("Failed to insert test node/disk: {}", e)))
     }
+
+    /// Diagnose foreign key constraint failures by checking which FK references are missing.
+    ///
+    /// This method is called synchronously when allocate_chunks fails with a foreign key constraint error.
+    /// It runs diagnostic queries using the same database connection to identify which foreign key constraint failed.
+    fn diagnose_fk_constraint_failure_sync(
+        conn: &rusqlite::Connection,
+        stripe_id: StripeId,
+        chunks: &[ChunkRecord],
+    ) {
+        use tracing::{error, warn};
+
+        error!("=== FOREIGN KEY CONSTRAINT DIAGNOSTIC ===");
+        error!("Failed to allocate chunks for stripe_id={:?}", stripe_id);
+
+        // Check 1: Does the stripe exist in the stripes table?
+        let stripe_check: Result<(StripeId, FileId, i64, i64, i64), rusqlite::Error> = conn.query_row(
+            "SELECT stripe_id, file_id, stripe_index, offset, size FROM stripes WHERE stripe_id = ?1",
+            params![stripe_id],
+            |row| Ok((
+                row.get::<_, StripeId>(0)?,
+                row.get::<_, FileId>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            )),
+        );
+
+        match stripe_check {
+            Ok((sid, fid, idx, offset, size)) => {
+                error!(
+                    "✓ STRIPE EXISTS: stripe_id={:?}, file_id={:?}, stripe_index={}, offset={}, size={}",
+                    sid, fid, idx, offset, size
+                );
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                error!(
+                    "✗ STRIPE MISSING: stripe_id={:?} NOT FOUND in stripes table",
+                    stripe_id
+                );
+            }
+            Err(e) => {
+                error!("✗ STRIPE CHECK ERROR: {}", e);
+            }
+        }
+
+        // Check 2: For each chunk, check if node_id and disk_id exist
+        for (idx, chunk) in chunks.iter().enumerate() {
+            error!("--- Checking chunk {} ---", idx);
+            error!(
+                "  chunk_id={:?}, node_id={}, disk_id={}, chunk_index={}",
+                chunk.chunk_id,
+                chunk.node_id.as_u64(),
+                chunk.disk_id.as_u64(),
+                chunk.chunk_index
+            );
+
+            // Check if node exists
+            let node_id_val = chunk.node_id.as_u64() as i64;
+            let node_check: Result<(i64, String), rusqlite::Error> = conn.query_row(
+                "SELECT node_id, address FROM nodes WHERE node_id = ?1",
+                params![node_id_val],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            );
+
+            match node_check {
+                Ok((nid, addr)) => {
+                    error!("  ✓ NODE EXISTS: node_id={}, address={}", nid, addr);
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    error!(
+                        "  ✗ NODE MISSING: node_id={} NOT FOUND in nodes table",
+                        chunk.node_id.as_u64()
+                    );
+                }
+                Err(e) => {
+                    error!("  ✗ NODE CHECK ERROR: {}", e);
+                }
+            }
+
+            // Check if disk exists
+            let disk_id_val = chunk.disk_id.as_u64() as i64;
+            let disk_check: Result<(i64, i64, String), rusqlite::Error> = conn.query_row(
+                "SELECT disk_id, node_id, path FROM disks WHERE disk_id = ?1",
+                params![disk_id_val],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            );
+
+            match disk_check {
+                Ok((did, nid, path)) => {
+                    error!(
+                        "  ✓ DISK EXISTS: disk_id={}, node_id={}, path={}",
+                        did, nid, path
+                    );
+                    if nid != node_id_val {
+                        warn!(
+                            "  ⚠ DISK NODE MISMATCH: disk has node_id={}, but chunk expects node_id={}",
+                            nid, node_id_val
+                        );
+                    }
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    error!(
+                        "  ✗ DISK MISSING: disk_id={} NOT FOUND in disks table",
+                        chunk.disk_id.as_u64()
+                    );
+                }
+                Err(e) => {
+                    error!("  ✗ DISK CHECK ERROR: {}", e);
+                }
+            }
+        }
+
+        // Check 3: List all nodes and disks in database for reference
+        error!("=== ALL NODES IN DATABASE ===");
+        if let Ok(mut stmt) = conn.prepare("SELECT node_id, address FROM nodes") {
+            if let Ok(nodes) = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            }) {
+                for node_result in nodes {
+                    if let Ok((nid, addr)) = node_result {
+                        error!("  node_id={}, address={}", nid, addr);
+                    }
+                }
+            }
+        }
+
+        error!("=== ALL DISKS IN DATABASE ===");
+        if let Ok(mut stmt) = conn.prepare("SELECT disk_id, node_id, path FROM disks") {
+            if let Ok(disks) = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            }) {
+                for disk_result in disks {
+                    if let Ok((did, nid, path)) = disk_result {
+                        error!("  disk_id={}, node_id={}, path={}", did, nid, path);
+                    }
+                }
+            }
+        }
+
+        error!("=== END DIAGNOSTIC ===");
+    }
 }
 
 #[async_trait]
@@ -322,22 +468,24 @@ impl MetadataStore for MetadataStoreImpl {
 
     async fn initialize_node_and_disks(
         &self,
+        node_id: u64,
         disk_paths: &[std::path::PathBuf],
     ) -> Result<(), Error> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        let node_id_i64 = node_id as i64;
 
-        // Insert node with ID 0 for Phase 1 single-node operation
+        // Insert node with the specified node_id
         self.inner
             .conn
             .call(move |conn| {
                 // Use INSERT OR IGNORE to make it idempotent
                 conn.execute(
                     "INSERT OR IGNORE INTO nodes (node_id, address, status, last_seen, created_at)
-                     VALUES (0, 'localhost:7000', 0, ?1, ?2)",
-                    rusqlite::params![now, now],
+                     VALUES (?1, 'localhost:7000', 0, ?2, ?3)",
+                    rusqlite::params![node_id_i64, now, now],
                 )?;
                 Ok(())
             })
@@ -348,6 +496,7 @@ impl MetadataStore for MetadataStoreImpl {
         for (index, disk_path) in disk_paths.iter().enumerate() {
             let path_str = disk_path.to_string_lossy().to_string();
             let disk_id = index as i64;
+            let node_id_for_disk = node_id_i64; // Copy for move into closure
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -359,8 +508,8 @@ impl MetadataStore for MetadataStoreImpl {
                     // Use INSERT OR IGNORE to make it idempotent
                     conn.execute(
                         "INSERT OR IGNORE INTO disks (disk_id, node_id, path, total_space, free_space, status, created_at, updated_at)
-                         VALUES (?1, 0, ?2, 1000000000000, 500000000000, 0, ?3, ?4)",
-                        rusqlite::params![disk_id, path_str, now, now],
+                         VALUES (?1, ?2, ?3, 1000000000000, 500000000000, 0, ?4, ?5)",
+                        rusqlite::params![disk_id, node_id_for_disk, path_str, now, now],
                     )?;
                     Ok(())
                 })
@@ -1000,35 +1149,55 @@ impl MetadataStore for MetadataStoreImpl {
             .inner
             .conn
             .call(move |conn| {
-                let tx = conn.transaction()?;
+                let mut needs_diagnostics = false;
+                let result = (|| {
+                    let tx = conn.transaction()?;
 
-                for chunk in chunks {
-                    let status = match chunk.status {
-                        ChunkStatus::Healthy => 0,
-                        ChunkStatus::Corrupt => 1,
-                        ChunkStatus::Missing => 2,
-                        ChunkStatus::Rebuilding => 3,
-                    };
+                    for chunk in &chunks {
+                        let status = match chunk.status {
+                            ChunkStatus::Healthy => 0,
+                            ChunkStatus::Corrupt => 1,
+                            ChunkStatus::Missing => 2,
+                            ChunkStatus::Rebuilding => 3,
+                        };
 
-                    tx.execute(
-                        "INSERT INTO chunks (chunk_id, stripe_id, chunk_index, node_id, disk_id, checksum, status, created_at, last_verified)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        params![
-                            chunk.chunk_id,
-                            stripe_id,
-                            chunk.chunk_index as i64,
-                            chunk.node_id.as_u64() as i64,
-                            chunk.disk_id.as_u64() as i64,
-                            chunk.checksum as i64,
-                            status,
-                            system_time_to_unix(chunk.created_at),
-                            chunk.last_verified.map(system_time_to_unix),
-                        ],
-                    )?;
+                        if let Err(e) = tx.execute(
+                            "INSERT INTO chunks (chunk_id, stripe_id, chunk_index, node_id, disk_id, checksum, status, created_at, last_verified)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            params![
+                                chunk.chunk_id,
+                                stripe_id,
+                                chunk.chunk_index as i64,
+                                chunk.node_id.as_u64() as i64,
+                                chunk.disk_id.as_u64() as i64,
+                                chunk.checksum as i64,
+                                status,
+                                system_time_to_unix(chunk.created_at),
+                                chunk.last_verified.map(system_time_to_unix),
+                            ],
+                        ) {
+                            if e.to_string().contains("FOREIGN KEY") {
+                                needs_diagnostics = true;
+                            }
+                            return Err(e);
+                        }
+                    }
+
+                    if let Err(e) = tx.commit() {
+                        if e.to_string().contains("FOREIGN KEY") {
+                            needs_diagnostics = true;
+                        }
+                        return Err(e);
+                    }
+                    Ok(())
+                })();
+
+                // Run diagnostics if FK error occurred (transaction is now dropped)
+                if needs_diagnostics {
+                    Self::diagnose_fk_constraint_failure_sync(conn, stripe_id, &chunks);
                 }
 
-                tx.commit()?;
-                Ok(())
+                result.map_err(|e| e.into())
             })
             .await
             .map_err(|e| {

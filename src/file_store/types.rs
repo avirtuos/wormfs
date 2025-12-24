@@ -327,6 +327,22 @@ pub enum Error {
     #[error("Not implemented: {0}")]
     NotImplemented(String),
 
+    /// Node not found in cluster
+    #[error("Node {0:?} not found in cluster")]
+    NodeNotFound(NodeId),
+
+    /// Invalid node address
+    #[error("Invalid node address: {0}")]
+    InvalidNodeAddress(String),
+
+    /// Connection to remote node failed
+    #[error("Connection failed: {0}")]
+    ConnectionFailed(String),
+
+    /// Remote operation failed
+    #[error("Remote operation failed: {0}")]
+    RemoteOperationFailed(String),
+
     /// I/O error
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
