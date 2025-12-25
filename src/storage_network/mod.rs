@@ -463,6 +463,34 @@ impl StorageNetworkHandle {
         Ok(())
     }
 
+    /// Update storage capacity data for inclusion in heartbeats.
+    ///
+    /// This method allows FileStore to update storage capacity information
+    /// that will be included in heartbeat messages broadcast to the cluster.
+    /// This enables distributed chunk placement decisions based on available capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `total_bytes` - Total storage capacity in bytes
+    /// * `available_bytes` - Available storage capacity in bytes
+    /// * `chunk_count` - Number of chunks currently stored on this node
+    pub async fn update_storage_capacity_data(
+        &self,
+        total_bytes: Option<u64>,
+        available_bytes: Option<u64>,
+        chunk_count: Option<u64>,
+    ) -> Result<(), Error> {
+        self.event_tx
+            .send(NetworkCommand::UpdateStorageCapacityData {
+                total_bytes,
+                available_bytes,
+                chunk_count,
+            })
+            .map_err(|_| Error::EventLoopFailed("Event loop is not running".to_string()))?;
+
+        Ok(())
+    }
+
     /// Get the heartbeat tracker for monitoring cluster health and discovery.
     ///
     /// The heartbeat tracker provides access to heartbeat information from all nodes

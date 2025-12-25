@@ -125,6 +125,58 @@ impl StorageNodeImpl {
         // Create heartbeat tracker and record local node
         // Use longer stale threshold since we don't have a background heartbeat task yet
         let tracker = Arc::new(HeartbeatTracker::new(300_000, 300_000)); // 5 minutes stale, 5 minutes grace
+        tracing::info!(
+            "[NodeDiscovery] Created HeartbeatTracker for storage node {}",
+            config.node_id
+        );
+
+        // Setup callback to register discovered nodes in MetadataStore
+        // This ensures FK constraints pass when allocating chunks to remote nodes
+        let metadata_store_for_callback = metadata_store.clone();
+        let local_node_id_for_log = config.node_id.clone();
+        tracker.set_on_node_discovered(Arc::new(
+            move |node_id: String, address: Option<String>| {
+                tracing::info!(
+                    "[NodeDiscovery] Callback invoked! Storage node {} discovered node {} with address {:?}",
+                    local_node_id_for_log,
+                    node_id,
+                    address
+                );
+                if let Ok(node_id_num) = node_id.parse::<u64>() {
+                    let metadata = metadata_store_for_callback.clone();
+                    let addr = address.unwrap_or_default();
+                    // Spawn async task to register node
+                    tokio::spawn(async move {
+                        tracing::info!(
+                            "[NodeDiscovery] Spawning task to register node {} in MetadataStore",
+                            node_id_num
+                        );
+                        if let Err(e) = metadata.register_node(node_id_num, &addr).await {
+                            tracing::warn!(
+                                "Failed to register discovered node {}: {}",
+                                node_id_num,
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                "[NodeDiscovery] ✓ Registered discovered node {} in MetadataStore",
+                                node_id_num
+                            );
+                        }
+                    });
+                } else {
+                    tracing::warn!(
+                        "[NodeDiscovery] Failed to parse node_id '{}' as u64",
+                        node_id
+                    );
+                }
+            },
+        ));
+        tracing::info!(
+            "[NodeDiscovery] Node discovery callback registered for storage node {}",
+            config.node_id
+        );
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -133,17 +185,18 @@ impl StorageNodeImpl {
             config.node_id.clone(),
             now,
             1,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(now),           // Set startup_time to keep node in grace period
-            Some(1_000_000_000), // 1GB total capacity
-            Some(900_000_000),   // 900MB available
-            Some(0),             // 0 chunks initially
+            None,                // admin_url
+            None,                // storage_endpoint_url
+            None,                // raft_state
+            None,                // raft_term
+            None,                // last_log_index
+            None,                // last_log_term
+            None,                // current_leader
+            None,                // is_voter
+            Some(now),           // startup_time - keep node in grace period
+            Some(1_000_000_000), // total_bytes - 1GB total capacity
+            Some(900_000_000),   // available_bytes - 900MB available
+            Some(0),             // chunk_count - 0 chunks initially
         );
 
         // Create placement engine configured to always select local node
@@ -210,6 +263,7 @@ impl StorageNodeImpl {
             idle_connection_timeout: config.idle_connection_timeout,
             keep_alive_interval: config.keep_alive_interval,
             admin_url: None,
+            storage_endpoint_url: None,
         };
 
         let (network_inner, network_handle) = StorageNetworkFactory::create(network_config)

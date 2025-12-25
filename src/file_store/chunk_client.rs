@@ -156,19 +156,22 @@ impl ChunkClientPool {
             .get_heartbeat(&node_id_str)
             .ok_or_else(|| Error::NodeNotFound(node_id))?;
 
-        let admin_url = heartbeat.admin_url.ok_or_else(|| {
-            Error::InvalidNodeAddress(format!("Node {} has no admin_url", node_id.0))
+        let storage_endpoint_url = heartbeat.storage_endpoint_url.ok_or_else(|| {
+            Error::InvalidNodeAddress(format!("Node {} has no storage_endpoint_url", node_id.0))
         })?;
 
         debug!(
             "Creating gRPC client for node {} at {}",
-            node_id.0, admin_url
+            node_id.0, storage_endpoint_url
         );
 
         // Create new client
-        let endpoint = Endpoint::from_shared(admin_url.clone())
+        let endpoint = Endpoint::from_shared(format!("http://{}", storage_endpoint_url))
             .map_err(|e| {
-                Error::InvalidNodeAddress(format!("Invalid admin URL '{}': {}", admin_url, e))
+                Error::InvalidNodeAddress(format!(
+                    "Invalid storage endpoint URL '{}': {}",
+                    storage_endpoint_url, e
+                ))
             })?
             .connect_timeout(self.config.connect_timeout)
             .timeout(self.config.request_timeout);
@@ -176,7 +179,7 @@ impl ChunkClientPool {
         let channel = endpoint.connect().await.map_err(|e| {
             Error::ConnectionFailed(format!(
                 "Failed to connect to node {} at {}: {}",
-                node_id.0, admin_url, e
+                node_id.0, storage_endpoint_url, e
             ))
         })?;
 
@@ -190,7 +193,7 @@ impl ChunkClientPool {
 
         info!(
             "Created gRPC client for node {} at {}",
-            node_id.0, admin_url
+            node_id.0, storage_endpoint_url
         );
 
         Ok(client)

@@ -1506,6 +1506,35 @@ impl MetadataStore for MetadataStoreImpl {
         result
     }
 
+    async fn get_node_chunk_count(&self, node_id: NodeId) -> Result<u64, Error> {
+        let start = tokio::time::Instant::now();
+        let node_id_val = node_id.as_u64() as i64;
+
+        let result = self
+            .inner
+            .conn
+            .call(move |conn| {
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM chunks WHERE node_id = ?1 AND status = 0",
+                    params![node_id_val],
+                    |row| row.get(0),
+                )?;
+                Ok(count as u64)
+            })
+            .await
+            .map_err(|e| {
+                Error::QueryError(format!(
+                    "Failed to count chunks for node {}: {}",
+                    node_id_val, e
+                ))
+            });
+
+        // Publish metrics
+        self.publish_metrics("get_node_chunk_count", "read", start, result.is_err());
+
+        result
+    }
+
     async fn acquire_read_lock(
         &self,
         file_id: FileId,
@@ -2093,5 +2122,50 @@ impl MetadataStore for MetadataStoreImpl {
             })
             .await
             .map_err(|e| Error::RestoreFailed(format!("Snapshot restoration failed: {}", e)))
+    }
+
+    async fn register_node(&self, node_id: u64, address: &str) -> Result<(), Error> {
+        info!(
+            "[MetadataStore] register_node called for node_id={}, address='{}'",
+            node_id, address
+        );
+
+        let address = address.to_string();
+        let address_for_log = address.clone();
+
+        let rows_affected = self
+            .inner
+            .conn
+            .call(move |conn| {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+
+                // INSERT OR IGNORE makes this idempotent - won't error if node exists
+                let rows = conn.execute(
+                    "INSERT OR IGNORE INTO nodes (node_id, address, status, last_seen, created_at)
+                     VALUES (?1, ?2, 0, ?3, ?3)",
+                    params![node_id as i64, address, now],
+                )
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+                Ok(rows)
+            })
+            .await
+            .map_err(|e| Error::QueryError(e.to_string()))?;
+
+        if rows_affected > 0 {
+            info!(
+                "[MetadataStore] ✓ Registered NEW node {} with address '{}' (rows inserted: {})",
+                node_id, address_for_log, rows_affected
+            );
+        } else {
+            info!(
+                "[MetadataStore] Node {} already registered (address: '{}', no rows inserted)",
+                node_id, address_for_log
+            );
+        }
+        Ok(())
     }
 }

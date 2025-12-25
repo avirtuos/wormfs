@@ -681,6 +681,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     <div class="metric-value" style="font-size: 1rem;" x-text="networkStatus?.local_node?.node_id || 'Unknown'"></div>
                 </div>
                 <div class="metric-card">
+                    <div class="metric-label">Local Chunks</div>
+                    <div class="metric-value" x-text="formatNumber(networkStatus?.local_node?.chunk_count || 0)"></div>
+                </div>
+                <div class="metric-card">
                     <div class="metric-label">Total Peers</div>
                     <div class="metric-value" x-text="networkStatus?.statistics?.total_peers || 0"></div>
                 </div>
@@ -707,6 +711,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                                     <th>Last Heartbeat</th>
                                     <th>Sequence</th>
                                     <th>RTT</th>
+                                    <th>Chunks</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -742,6 +747,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                                         <td x-text="formatTimestamp(peer.last_heartbeat)"></td>
                                         <td x-text="peer.heartbeat_sequence || 'N/A'"></td>
                                         <td x-text="peer.rtt_ms ? peer.rtt_ms + ' ms' : 'N/A'"></td>
+                                        <td x-text="formatNumber(peer.chunk_count || 0)"></td>
                                     </tr>
                                 </template>
                             </tbody>
