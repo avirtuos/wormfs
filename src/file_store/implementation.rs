@@ -18,6 +18,9 @@ use tokio::time::Instant;
 // Import MetricService trait to use its methods
 use crate::metric_service::MetricService;
 
+// Import MetadataStore trait to use its methods
+use crate::metadata_store::MetadataStore;
+
 /// Magic bytes for chunk file format
 const CHUNK_MAGIC: &[u8; 4] = b"WORM";
 
@@ -233,6 +236,33 @@ impl FileStoreImpl {
     /// FileStore construction, avoiding circular dependencies during initialization.
     pub fn set_metrics(&self, metrics: Arc<crate::metric_service::MetricServiceImpl>) {
         *self.inner.metrics.write().unwrap() = Some(metrics);
+    }
+
+    /// Get storage statistics for this node
+    ///
+    /// Returns (total_bytes, available_bytes, chunk_count)
+    pub async fn get_storage_stats(
+        &self,
+        metadata_store: &Arc<crate::metadata_store::MetadataStoreImpl>,
+    ) -> Result<(u64, u64, u64), Error> {
+        let disks = self.inner.disks.read().await;
+        let my_node_id = self.inner.my_node_id;
+
+        let mut total_bytes = 0u64;
+        let mut available_bytes = 0u64;
+
+        for disk_info in disks.values() {
+            total_bytes += disk_info.total_space;
+            available_bytes += disk_info.free_space;
+        }
+
+        // Query metadata store for chunk count (much faster than scanning filesystem)
+        let chunk_count = metadata_store
+            .get_node_chunk_count(my_node_id)
+            .await
+            .unwrap_or(0);
+
+        Ok((total_bytes, available_bytes, chunk_count))
     }
 }
 

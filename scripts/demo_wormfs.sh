@@ -21,14 +21,23 @@ NC='\033[0m' # No Color
 # Configuration
 VERBOSE=0
 SKIP_TESTS=0
+DEMO_SUCCESS=0  # Track whether demo completed successfully
 MOUNT_POINT_1=""
 MOUNT_POINT_2=""
+MOUNT_POINT_3=""
 DATA_DIR_1=""
 DATA_DIR_2=""
+DATA_DIR_3=""
 WORMFS_PID_1=""
 WORMFS_PID_2=""
+WORMFS_PID_3=""
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORMFS_BINARY="${PROJECT_ROOT}/target/release/wormfs"
+
+# Use consistent directories across runs
+WORMFS_DEMO_DIR_1="/tmp/wormfs-demo-node1"
+WORMFS_DEMO_DIR_2="/tmp/wormfs-demo-node2"
+WORMFS_DEMO_DIR_3="/tmp/wormfs-demo-node3"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -103,7 +112,7 @@ fail() {
 # Trap errors and pause for inspection
 trap 'error_handler' ERR
 
-# Cleanup function - always cleanup on exit
+# Cleanup function - conditional log preservation
 cleanup() {
     echo ""
     echo -e "${YELLOW}Cleaning up...${NC}"
@@ -129,6 +138,16 @@ cleanup() {
         sleep 1
     fi
 
+    if [ -n "$MOUNT_POINT_3" ] && mountpoint -q "$MOUNT_POINT_3" 2>/dev/null; then
+        echo -e "${BLUE}Unmounting filesystem 3...${NC}"
+        if command -v fusermount &> /dev/null; then
+            fusermount -u "$MOUNT_POINT_3" 2>/dev/null || true
+        else
+            umount "$MOUNT_POINT_3" 2>/dev/null || true
+        fi
+        sleep 1
+    fi
+
     # Stop FUSE processes
     if [ -n "$WORMFS_PID_1" ] && kill -0 "$WORMFS_PID_1" 2>/dev/null; then
         echo -e "${BLUE}Stopping wormfs FUSE process 1 (PID: $WORMFS_PID_1)...${NC}"
@@ -144,7 +163,14 @@ cleanup() {
         kill -KILL "$WORMFS_PID_2" 2>/dev/null || true
     fi
 
-    # Remove temporary directories
+    if [ -n "$WORMFS_PID_3" ] && kill -0 "$WORMFS_PID_3" 2>/dev/null; then
+        echo -e "${BLUE}Stopping wormfs FUSE process 3 (PID: $WORMFS_PID_3)...${NC}"
+        kill -TERM "$WORMFS_PID_3" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$WORMFS_PID_3" 2>/dev/null || true
+    fi
+
+    # Remove temporary mount directories
     if [ -n "$MOUNT_POINT_1" ] && [ -d "$MOUNT_POINT_1" ]; then
         echo -e "${BLUE}Removing mount point 1...${NC}"
         rm -rf "$MOUNT_POINT_1"
@@ -155,14 +181,55 @@ cleanup() {
         rm -rf "$MOUNT_POINT_2"
     fi
 
-    if [ -n "$DATA_DIR_1" ] && [ -d "$DATA_DIR_1" ]; then
-        echo -e "${BLUE}Removing data directory 1...${NC}"
-        rm -rf "$DATA_DIR_1"
+    if [ -n "$MOUNT_POINT_3" ] && [ -d "$MOUNT_POINT_3" ]; then
+        echo -e "${BLUE}Removing mount point 3...${NC}"
+        rm -rf "$MOUNT_POINT_3"
     fi
 
-    if [ -n "$DATA_DIR_2" ] && [ -d "$DATA_DIR_2" ]; then
-        echo -e "${BLUE}Removing data directory 2...${NC}"
-        rm -rf "$DATA_DIR_2"
+    # Always clean chunk data and databases
+    echo -e "${BLUE}Cleaning up chunk data and databases...${NC}"
+    if [ -d "$WORMFS_DEMO_DIR_1/chunks" ]; then
+        rm -rf "$WORMFS_DEMO_DIR_1/chunks"
+    fi
+    if [ -f "$WORMFS_DEMO_DIR_1/metadata.db" ]; then
+        rm -f "$WORMFS_DEMO_DIR_1/metadata.db" "$WORMFS_DEMO_DIR_1/metadata.db-shm" "$WORMFS_DEMO_DIR_1/metadata.db-wal"
+    fi
+    if [ -d "$WORMFS_DEMO_DIR_2/chunks" ]; then
+        rm -rf "$WORMFS_DEMO_DIR_2/chunks"
+    fi
+    if [ -f "$WORMFS_DEMO_DIR_2/metadata.db" ]; then
+        rm -f "$WORMFS_DEMO_DIR_2/metadata.db" "$WORMFS_DEMO_DIR_2/metadata.db-shm" "$WORMFS_DEMO_DIR_2/metadata.db-wal"
+    fi
+    if [ -d "$WORMFS_DEMO_DIR_3/chunks" ]; then
+        rm -rf "$WORMFS_DEMO_DIR_3/chunks"
+    fi
+    if [ -f "$WORMFS_DEMO_DIR_3/metadata.db" ]; then
+        rm -f "$WORMFS_DEMO_DIR_3/metadata.db" "$WORMFS_DEMO_DIR_3/metadata.db-shm" "$WORMFS_DEMO_DIR_3/metadata.db-wal"
+    fi
+
+    # Conditionally clean log files
+    if [ "$DEMO_SUCCESS" -eq 1 ]; then
+        echo -e "${BLUE}Demo succeeded - cleaning up log files...${NC}"
+        if [ -f "$WORMFS_DEMO_DIR_1/wormfs.log" ]; then
+            rm -f "$WORMFS_DEMO_DIR_1/wormfs.log"
+        fi
+        if [ -f "$WORMFS_DEMO_DIR_2/wormfs.log" ]; then
+            rm -f "$WORMFS_DEMO_DIR_2/wormfs.log"
+        fi
+        if [ -f "$WORMFS_DEMO_DIR_3/wormfs.log" ]; then
+            rm -f "$WORMFS_DEMO_DIR_3/wormfs.log"
+        fi
+    else
+        echo -e "${YELLOW}Demo failed or interrupted - preserving log files for debugging:${NC}"
+        if [ -f "$WORMFS_DEMO_DIR_1/wormfs.log" ]; then
+            echo -e "${YELLOW}  Node 1: $WORMFS_DEMO_DIR_1/wormfs.log${NC}"
+        fi
+        if [ -f "$WORMFS_DEMO_DIR_2/wormfs.log" ]; then
+            echo -e "${YELLOW}  Node 2: $WORMFS_DEMO_DIR_2/wormfs.log${NC}"
+        fi
+        if [ -f "$WORMFS_DEMO_DIR_3/wormfs.log" ]; then
+            echo -e "${YELLOW}  Node 3: $WORMFS_DEMO_DIR_3/wormfs.log${NC}"
+        fi
     fi
 
     echo -e "${GREEN}✓ Cleanup complete${NC}"
@@ -220,17 +287,19 @@ verbose() {
 
 # Main demo
 main() {
-    print_header "WormFS Phase 1 Complete Demo with Networking"
-    echo "Demonstrating Phase 1, Steps 1-11 + StorageNetwork:"
+    print_header "WormFS Phase 1 Complete Demo with Distributed Storage"
+    echo "Demonstrating Phase 1, Steps 1-11 + Distributed Operations:"
     echo "  • Configuration Management (TOML + CLI overrides)"
     echo "  • Metadata Persistence (MetadataStore + SQLite)"
     echo "  • Erasure Coding (FileStore + Reed-Solomon)"
     echo "  • StripeCache (Write Buffering & I/O Amplification Reduction)"
     echo "  • FUSE Filesystem (FileSystemService)"
     echo "  • StorageNetwork (libp2p peer-to-peer networking)"
-    echo "  • Two Networked Mount Points (connected via libp2p)"
+    echo "  • Three Networked Mount Points (connected via libp2p)"
+    echo "  • Distributed Chunk Placement (chunks spread across nodes)"
     echo "  • File & Directory Operations"
     echo "  • Metrics Collection (I/O Amplification Tracking)"
+    echo "  • Chunk Distribution Validation"
     echo "  • Graceful Shutdown"
     echo ""
 
@@ -252,16 +321,41 @@ main() {
     cargo build --release --features fuser
     print_success "Build complete"
     
-    # Step 2: Create configuration
+    # Step 2: Configuration Setup
     print_section "Step 2: Configuration Setup"
 
-    # Create temporary directories for both nodes
-    DATA_DIR_1=$(mktemp -d -t wormfs-demo-data1.XXXXXX)
-    DATA_DIR_2=$(mktemp -d -t wormfs-demo-data2.XXXXXX)
+    # Clean up old data from previous runs if it exists
+    echo "Cleaning up old demo data if present..."
+    for demo_dir in "$WORMFS_DEMO_DIR_1" "$WORMFS_DEMO_DIR_2" "$WORMFS_DEMO_DIR_3"; do
+        if [ -d "$demo_dir" ]; then
+            echo -e "${BLUE}Cleaning old data from $demo_dir${NC}"
+            # Clean up old chunks and databases
+            rm -rf "$demo_dir/chunks" 2>/dev/null || true
+            rm -f "$demo_dir/metadata.db"* 2>/dev/null || true
+            rm -f "$demo_dir/tx_log.db"* 2>/dev/null || true
+            rm -rf "$demo_dir/snapshots" 2>/dev/null || true
+            rm -f "$demo_dir/peer_ids.json" 2>/dev/null || true
+            # Truncate log file if it exists
+            if [ -f "$demo_dir/wormfs.log" ]; then
+                > "$demo_dir/wormfs.log"
+            fi
+        else
+            # Create directory if it doesn't exist
+            mkdir -p "$demo_dir"
+        fi
+    done
+    print_success "Old demo data cleaned up"
+
+    # Use consistent directories for all three nodes
+    DATA_DIR_1="$WORMFS_DEMO_DIR_1"
+    DATA_DIR_2="$WORMFS_DEMO_DIR_2"
+    DATA_DIR_3="$WORMFS_DEMO_DIR_3"
     MOUNT_POINT_1=$(mktemp -d -t wormfs-demo-mount1.XXXXXX)
     MOUNT_POINT_2=$(mktemp -d -t wormfs-demo-mount2.XXXXXX)
+    MOUNT_POINT_3=$(mktemp -d -t wormfs-demo-mount3.XXXXXX)
     CONFIG_FILE_1=$(mktemp -t wormfs-demo-config1.XXXXXX.toml)
     CONFIG_FILE_2=$(mktemp -t wormfs-demo-config2.XXXXXX.toml)
+    CONFIG_FILE_3=$(mktemp -t wormfs-demo-config3.XXXXXX.toml)
 
     verbose "Node 1 Data directory: $DATA_DIR_1"
     verbose "Node 1 Mount point: $MOUNT_POINT_1"
@@ -269,6 +363,9 @@ main() {
     verbose "Node 2 Data directory: $DATA_DIR_2"
     verbose "Node 2 Mount point: $MOUNT_POINT_2"
     verbose "Node 2 Config file: $CONFIG_FILE_2"
+    verbose "Node 3 Data directory: $DATA_DIR_3"
+    verbose "Node 3 Mount point: $MOUNT_POINT_3"
+    verbose "Node 3 Config file: $CONFIG_FILE_3"
 
     # Create demo configuration for Node 1
     cat > "$CONFIG_FILE_1" <<EOF
@@ -352,6 +449,11 @@ enabled = true
 port = 9090
 bind_address = "127.0.0.1"
 
+[storage_endpoint]
+listen_address = "127.0.0.1:8081"
+enable_auth = false
+enable_tls = false
+
 [network]
 node_id = "1"
 listen_addresses = ["/ip4/0.0.0.0/tcp/7101"]
@@ -362,10 +464,14 @@ connection_timeout = 30
 idle_connection_timeout = 600
 keep_alive_interval = 30
 admin_url = "http://127.0.0.1:9090"
+storage_endpoint_url = "127.0.0.1:8081"
 
-# Peer configuration: connect to Node 2
+# Peer configuration: connect to Node 2 and Node 3
 [[network.peers]]
 multiaddr = "/ip4/127.0.0.1/tcp/7102"
+
+[[network.peers]]
+multiaddr = "/ip4/127.0.0.1/tcp/7103"
 EOF
 
     # Create demo configuration for Node 2
@@ -448,6 +554,11 @@ enabled = true
 port = 9091
 bind_address = "127.0.0.1"
 
+[storage_endpoint]
+listen_address = "127.0.0.1:8082"
+enable_auth = false
+enable_tls = false
+
 [network]
 node_id = "2"
 listen_addresses = ["/ip4/0.0.0.0/tcp/7102"]
@@ -458,19 +569,131 @@ connection_timeout = 30
 idle_connection_timeout = 600
 keep_alive_interval = 30
 admin_url = "http://127.0.0.1:9091"
+storage_endpoint_url = "127.0.0.1:8082"
 
-# Peer configuration: connect to Node 1
+# Peer configuration: connect to Node 1 and Node 3
 [[network.peers]]
 multiaddr = "/ip4/127.0.0.1/tcp/7101"
+
+[[network.peers]]
+multiaddr = "/ip4/127.0.0.1/tcp/7103"
 EOF
 
-    print_success "Created temporary configurations for both nodes"
+    # Create demo configuration for Node 3
+    cat > "$CONFIG_FILE_3" <<EOF
+# WormFS Demo Configuration - Node 3
+mount_point = "$MOUNT_POINT_3"
+
+# Raft configuration (Phase 2+)
+transaction_log_path = "$DATA_DIR_3/tx_log.db"
+snapshot_dir = "$DATA_DIR_3/snapshots"
+
+[metadata]
+database_path = "$DATA_DIR_3/metadata.db"
+read_pool_size = 8
+enable_wal = true
+cache_size_mb = 10
+enable_foreign_keys = true
+synchronous = "Normal"
+transaction_isolation = "Serializable"
+enable_prepared_statements = true
+read_pool_timeout_secs = 30
+stripe_cache_size_mb = 64
+stripe_cache_ttl_secs = 10
+stripe_cache_tti_secs = 5
+chunk_cache_size_mb = 64
+chunk_cache_ttl_secs = 10
+chunk_cache_tti_secs = 5
+
+[file_store]
+disk_paths = ["$DATA_DIR_3/chunks"]
+max_chunk_size = 1048576  # 1MB
+default_data_shards = 2
+default_parity_shards = 1
+max_concurrent_operations = 100
+verification_interval = 3600
+orphan_cleanup_age = 3600
+stripe_cache_size_mb = 256
+stripe_cache_ttl_secs = 3600
+stripe_cache_tti_secs = 600
+
+[filesystem]
+node_id = 3
+client_heartbeat_timeout = 86400
+enable_read_locks = true
+lock_timeout = 10
+lock_extend_interval = 5
+max_file_handles = 10000
+inode_cache_size = 10000
+inode_cache_ttl = 60
+read_buffer_size = 10048576
+write_buffer_size = 10048576
+write_through = false
+default_file_mode = "0644"
+default_dir_mode = "0755"
+max_file_size = 1099511627776
+enable_xattr = false
+uid = $(id -u)
+gid = $(id -g)
+
+# StripeCache: Write buffering to dramatically reduce I/O amplification
+enable_stripe_cache = true
+stripe_cache_max_memory_bytes = 268435456  # 256MB cache
+stripe_cache_dirty_timeout = 5  # Flush dirty stripes after 5 seconds
+
+[metrics]
+enabled = true
+aggregation_window_secs = 10
+max_cardinality = 10000
+channel_buffer_size = 10000
+enable_prometheus = false
+prometheus_port = 9093  # Not used when enable_prometheus=false
+enable_otel = false
+enable_time_series = true
+time_series_retention_secs = 3600  # 1 hour of historical data
+max_points_per_metric = 3600
+time_series_sample_interval_secs = 1
+
+[admin]
+enabled = true
+port = 9092
+bind_address = "127.0.0.1"
+
+[storage_endpoint]
+listen_address = "127.0.0.1:8083"
+enable_auth = false
+enable_tls = false
+
+[network]
+node_id = "3"
+listen_addresses = ["/ip4/0.0.0.0/tcp/7103"]
+peer_id_store_path = "$DATA_DIR_3/peer_ids.json"
+max_peers = 100
+max_connections_per_peer = 3
+connection_timeout = 30
+idle_connection_timeout = 600
+keep_alive_interval = 30
+admin_url = "http://127.0.0.1:9092"
+storage_endpoint_url = "127.0.0.1:8083"
+
+# Peer configuration: connect to Node 1 and Node 2
+[[network.peers]]
+multiaddr = "/ip4/127.0.0.1/tcp/7101"
+
+[[network.peers]]
+multiaddr = "/ip4/127.0.0.1/tcp/7102"
+EOF
+
+    print_success "Created temporary configurations for all three nodes"
     echo ""
     echo "Node 1 Configuration (${CONFIG_FILE_1}):"
     echo -e "${CYAN}  Node ID: 1, Port: 7101, Admin: 9090, Raft: enabled${NC}"
     echo ""
     echo "Node 2 Configuration (${CONFIG_FILE_2}):"
     echo -e "${CYAN}  Node ID: 2, Port: 7102, Admin: 9091, Raft: enabled${NC}"
+    echo ""
+    echo "Node 3 Configuration (${CONFIG_FILE_3}):"
+    echo -e "${CYAN}  Node ID: 3, Port: 7103, Admin: 9092, Raft: enabled${NC}"
 
     # Step 3: Mount Filesystems via FUSE
     print_section "Step 3: Mount Filesystems"
@@ -507,9 +730,25 @@ EOF
         print_success "Stale mount 2 cleaned up"
     fi
 
-    # Use known locations for logs
+    if mountpoint -q "$MOUNT_POINT_3" 2>/dev/null; then
+        print_info "Found stale mount at $MOUNT_POINT_3, cleaning up..."
+        if command -v fusermount &> /dev/null; then
+            fusermount -u "$MOUNT_POINT_3" 2>/dev/null || true
+        else
+            umount "$MOUNT_POINT_3" 2>/dev/null || true
+        fi
+        sleep 1
+        print_success "Stale mount 3 cleaned up"
+    fi
+
+    # Use consistent log file locations
     WORMFS_LOG_1="$DATA_DIR_1/wormfs.log"
     WORMFS_LOG_2="$DATA_DIR_2/wormfs.log"
+    WORMFS_LOG_3="$DATA_DIR_3/wormfs.log"
+    echo -e "${CYAN}Log files (consistent across runs):${NC}"
+    echo -e "  Node 1: $WORMFS_LOG_1"
+    echo -e "  Node 2: $WORMFS_LOG_2"
+    echo -e "  Node 3: $WORMFS_LOG_3"
 
     # Mount Node 1
     print_command "RUST_LOG=wormfs=debug $WORMFS_BINARY mount --config $CONFIG_FILE_1 --mount-point $MOUNT_POINT_1 --foreground --verbose"
@@ -587,11 +826,50 @@ EOF
         fail "Failed to mount Node 2 filesystem"
     fi
 
+    echo ""
+
+    # Mount Node 3
+    print_command "RUST_LOG=wormfs=debug $WORMFS_BINARY mount --config $CONFIG_FILE_3 --mount-point $MOUNT_POINT_3 --foreground --verbose"
+    echo ""
+    echo "Mounting Node 3 WormFS with config file..."
+    echo -e "${CYAN}Logs will be written to: $WORMFS_LOG_3${NC}"
+
+    # Start FUSE mount 3 in background
+    RUST_LOG=wormfs=debug "$WORMFS_BINARY" mount \
+        --config "$CONFIG_FILE_3" \
+        --mount-point "$MOUNT_POINT_3" \
+        --foreground \
+        --verbose > "$WORMFS_LOG_3" 2>&1 &
+    WORMFS_PID_3=$!
+    print_info "Node 3 FUSE PID: $WORMFS_PID_3"
+    print_info "Node 3 Logs: $WORMFS_LOG_3"
+
+    # Wait for mount 3
+    echo -n "Waiting for Node 3 mount to complete"
+    for i in {1..10}; do
+        if mountpoint -q "$MOUNT_POINT_3" 2>/dev/null; then
+            echo ""
+            print_success "Node 3 filesystem mounted successfully"
+            break
+        fi
+        echo -n "."
+        sleep 0.5
+    done
+
+    if ! mountpoint -q "$MOUNT_POINT_3" 2>/dev/null; then
+        echo ""
+        print_error "Failed to mount Node 3 filesystem"
+        echo ""
+        echo "Log output:"
+        cat "$WORMFS_LOG_3"
+        fail "Failed to mount Node 3 filesystem"
+    fi
+
     # Verify mounts
     echo ""
     print_command "mount | grep wormfs"
     mount | grep wormfs
-    print_success "Both filesystems appear in mount table"
+    print_success "All three filesystems appear in mount table"
 
     # Check if admin servers are responding
     echo ""
@@ -606,6 +884,12 @@ EOF
         print_success "Node 2 Admin server is responding on port 9091"
     else
         print_info "Node 2 Admin server health check failed - checking logs..."
+    fi
+
+    if curl -s --max-time 2 http://127.0.0.1:9092/api/health > /dev/null 2>&1; then
+        print_success "Node 3 Admin server is responding on port 9092"
+    else
+        print_info "Node 3 Admin server health check failed - checking logs..."
     fi
 
     # Display Admin UI links and network information
@@ -626,6 +910,12 @@ EOF
     echo -e "  ${CYAN}  • libp2p Port: 7102${NC}"
     echo -e "  ${CYAN}  • Mount Point: $MOUNT_POINT_2${NC}"
     echo ""
+    echo -e "  ${CYAN}Node 3 Admin UI:${NC}"
+    echo -e "  ${BOLD}${BLUE}http://127.0.0.1:9092/${NC}"
+    echo -e "  ${CYAN}  • Node ID: 3${NC}"
+    echo -e "  ${CYAN}  • libp2p Port: 7103${NC}"
+    echo -e "  ${CYAN}  • Mount Point: $MOUNT_POINT_3${NC}"
+    echo ""
     echo -e "  ${CYAN}Features:${NC}"
     echo -e "    • ${GREEN}📊 Real-time Metrics Monitoring${NC}"
     echo -e "    • ${GREEN}🌐 Network Peers Status${NC}"
@@ -638,6 +928,7 @@ EOF
     echo -e "${BOLD}${YELLOW}📋 Debug Logs:${NC}"
     echo -e "  ${CYAN}Node 1 logs:${NC} ${BOLD}$WORMFS_LOG_1${NC}"
     echo -e "  ${CYAN}Node 2 logs:${NC} ${BOLD}$WORMFS_LOG_2${NC}"
+    echo -e "  ${CYAN}Node 3 logs:${NC} ${BOLD}$WORMFS_LOG_3${NC}"
     echo ""
     echo "=========================================="
     echo ""
@@ -649,6 +940,7 @@ EOF
     echo "Checking libp2p network connectivity..."
     PEERS_1=$(curl -s --max-time 2 http://127.0.0.1:9090/api/network/peers 2>/dev/null | jq -r '.peers | length' 2>/dev/null || echo "0")
     PEERS_2=$(curl -s --max-time 2 http://127.0.0.1:9091/api/network/peers 2>/dev/null | jq -r '.peers | length' 2>/dev/null || echo "0")
+    PEERS_3=$(curl -s --max-time 2 http://127.0.0.1:9092/api/network/peers 2>/dev/null | jq -r '.peers | length' 2>/dev/null || echo "0")
 
     if [ "$PEERS_1" -gt 0 ]; then
         print_success "Node 1 has $PEERS_1 connected peer(s)"
@@ -661,6 +953,12 @@ EOF
     else
         print_info "Node 2 has no connected peers yet (they may still be connecting)"
     fi
+
+    if [ "$PEERS_3" -gt 0 ]; then
+        print_success "Node 3 has $PEERS_3 connected peer(s)"
+    else
+        print_info "Node 3 has no connected peers yet (they may still be connecting)"
+    fi
     echo ""
 
     if [ "$SKIP_TESTS" -eq 1 ]; then
@@ -670,6 +968,7 @@ EOF
         echo "Mount points:"
         echo "  Node 1: $MOUNT_POINT_1 (PID: $WORMFS_PID_1)"
         echo "  Node 2: $MOUNT_POINT_2 (PID: $WORMFS_PID_2)"
+        echo "  Node 3: $MOUNT_POINT_3 (PID: $WORMFS_PID_3)"
         echo ""
         echo -e "${CYAN}Press Enter to unmount and cleanup...${NC}"
         read -r
@@ -697,13 +996,11 @@ EOF
     stat "$MOUNT_POINT_1/hello.txt"
     print_success "File attributes retrieved"
 
-    # Write more data
-    print_command "echo 'Phase 1 Complete!' >> $MOUNT_POINT_1/hello.txt"
-    echo "Phase 1 Complete!" >> "$MOUNT_POINT_1/hello.txt"
-    print_success "Data appended"
-
+    # Note: Append operations not supported in write-once filesystem
+    # Test reading the file instead
     print_command "cat $MOUNT_POINT_1/hello.txt"
     cat "$MOUNT_POINT_1/hello.txt"
+    print_success "File content read successfully"
 
     # Step 5: Directory Operations (on Node 1)
     print_section "Step 5: Directory Operations (on Node 1)"
@@ -853,8 +1150,116 @@ EOF
     rm -f "$STAGING_FILE"
     verbose "Cleaned up staging file"
 
-    # Step 9: Filesystem Statistics
-    print_section "Step 9: Filesystem Statistics"
+    # Step 9: Distributed Chunk Validation
+    print_section "Step 9: Distributed Chunk Validation"
+
+    echo "Verifying that chunks are distributed across all three nodes..."
+    echo ""
+    echo "With Reed-Solomon 2+1 erasure coding, each stripe is split into 3 chunks"
+    echo "The PlacementEngine should distribute these chunks across different nodes"
+    echo ""
+
+    # Wait a moment for any pending chunk writes to complete
+    sleep 2
+
+    # Count chunks on each node
+    # Chunks are stored as *.dat files in the structure: bucket/file_id/stripe_<stripe_id>/<chunk_id>.dat
+    CHUNKS_NODE_1=0
+    CHUNKS_NODE_2=0
+    CHUNKS_NODE_3=0
+
+    if [ -d "$DATA_DIR_1/chunks" ]; then
+        CHUNKS_NODE_1=$(find "$DATA_DIR_1/chunks" -type f -name "*.dat" 2>/dev/null | wc -l)
+    fi
+
+    if [ -d "$DATA_DIR_2/chunks" ]; then
+        CHUNKS_NODE_2=$(find "$DATA_DIR_2/chunks" -type f -name "*.dat" 2>/dev/null | wc -l)
+    fi
+
+    if [ -d "$DATA_DIR_3/chunks" ]; then
+        CHUNKS_NODE_3=$(find "$DATA_DIR_3/chunks" -type f -name "*.dat" 2>/dev/null | wc -l)
+    fi
+
+    TOTAL_CHUNKS=$((CHUNKS_NODE_1 + CHUNKS_NODE_2 + CHUNKS_NODE_3))
+
+    echo -e "${BOLD}Chunk Distribution:${NC}"
+    echo ""
+    echo -e "  Node 1: ${CYAN}$CHUNKS_NODE_1${NC} chunks"
+    if [ "$CHUNKS_NODE_1" -gt 0 ]; then
+        print_command "find $DATA_DIR_1/chunks -type f -name '*.dat' | head -3"
+        find "$DATA_DIR_1/chunks" -type f -name "*.dat" 2>/dev/null | head -3 | while IFS= read -r chunk; do
+            RELATIVE_PATH="${chunk#$DATA_DIR_1/chunks/}"
+            echo -e "    ${CYAN}$RELATIVE_PATH${NC}"
+        done
+    fi
+    echo ""
+    echo -e "  Node 2: ${CYAN}$CHUNKS_NODE_2${NC} chunks"
+    if [ "$CHUNKS_NODE_2" -gt 0 ]; then
+        print_command "find $DATA_DIR_2/chunks -type f -name '*.dat' | head -3"
+        find "$DATA_DIR_2/chunks" -type f -name "*.dat" 2>/dev/null | head -3 | while IFS= read -r chunk; do
+            RELATIVE_PATH="${chunk#$DATA_DIR_2/chunks/}"
+            echo -e "    ${CYAN}$RELATIVE_PATH${NC}"
+        done
+    fi
+    echo ""
+    echo -e "  Node 3: ${CYAN}$CHUNKS_NODE_3${NC} chunks"
+    if [ "$CHUNKS_NODE_3" -gt 0 ]; then
+        print_command "find $DATA_DIR_3/chunks -type f -name '*.dat' | head -3"
+        find "$DATA_DIR_3/chunks" -type f -name "*.dat" 2>/dev/null | head -3 | while IFS= read -r chunk; do
+            RELATIVE_PATH="${chunk#$DATA_DIR_3/chunks/}"
+            echo -e "    ${CYAN}$RELATIVE_PATH${NC}"
+        done
+    fi
+    echo ""
+    echo -e "  ${BOLD}Total: ${CYAN}$TOTAL_CHUNKS${NC} chunks across all nodes${NC}"
+    echo ""
+
+    # Validate distribution
+    NODES_WITH_CHUNKS=0
+    [ "$CHUNKS_NODE_1" -gt 0 ] && NODES_WITH_CHUNKS=$((NODES_WITH_CHUNKS + 1))
+    [ "$CHUNKS_NODE_2" -gt 0 ] && NODES_WITH_CHUNKS=$((NODES_WITH_CHUNKS + 1))
+    [ "$CHUNKS_NODE_3" -gt 0 ] && NODES_WITH_CHUNKS=$((NODES_WITH_CHUNKS + 1))
+
+    if [ "$TOTAL_CHUNKS" -eq 0 ]; then
+        print_error "No chunks found on any node!"
+        echo "  This may indicate that:"
+        echo "  - Files were too small to create chunks"
+        echo "  - Chunks are stored with a different file pattern"
+        echo "  - Distributed operations are not yet enabled"
+    elif [ "$NODES_WITH_CHUNKS" -eq 1 ]; then
+        print_info "All chunks are on a single node"
+        echo "  This indicates chunks are not being distributed across nodes"
+        echo "  Distributed operations may not be fully enabled yet"
+    elif [ "$NODES_WITH_CHUNKS" -eq 2 ]; then
+        print_success "Chunks are distributed across 2 nodes!"
+        echo -e "${GREEN}${BOLD}✓ Distributed storage is working!${NC}"
+        echo "  PlacementEngine successfully spread chunks across multiple nodes"
+    else
+        print_success "Chunks are distributed across all 3 nodes!"
+        echo -e "${GREEN}${BOLD}✓ Full distributed storage is working!${NC}"
+        echo "  PlacementEngine successfully spread chunks across all available nodes"
+    fi
+
+    # Calculate distribution percentage
+    if [ "$TOTAL_CHUNKS" -gt 0 ]; then
+        echo ""
+        echo -e "${BOLD}Distribution Analysis:${NC}"
+        if [ "$CHUNKS_NODE_1" -gt 0 ]; then
+            PERCENT_1=$(echo "scale=1; $CHUNKS_NODE_1 * 100 / $TOTAL_CHUNKS" | bc)
+            echo "  Node 1: ${PERCENT_1}% of total chunks"
+        fi
+        if [ "$CHUNKS_NODE_2" -gt 0 ]; then
+            PERCENT_2=$(echo "scale=1; $CHUNKS_NODE_2 * 100 / $TOTAL_CHUNKS" | bc)
+            echo "  Node 2: ${PERCENT_2}% of total chunks"
+        fi
+        if [ "$CHUNKS_NODE_3" -gt 0 ]; then
+            PERCENT_3=$(echo "scale=1; $CHUNKS_NODE_3 * 100 / $TOTAL_CHUNKS" | bc)
+            echo "  Node 3: ${PERCENT_3}% of total chunks"
+        fi
+    fi
+
+    # Step 10: Filesystem Statistics
+    print_section "Step 10: Filesystem Statistics"
 
     echo "Node 1 Statistics:"
     print_command "df -h $MOUNT_POINT_1"
@@ -875,10 +1280,16 @@ EOF
     echo "Node 2 Statistics:"
     print_command "ls -la $MOUNT_POINT_2"
     ls -la "$MOUNT_POINT_2"
-    print_info "Node 2 is empty (no files written yet)"
+    print_info "Node 2 has no FUSE operations (files written to Node 1)"
 
-    # Step 10: Metrics Summary
-    print_section "Step 10: Metrics Summary"
+    echo ""
+    echo "Node 3 Statistics:"
+    print_command "ls -la $MOUNT_POINT_3"
+    ls -la "$MOUNT_POINT_3"
+    print_info "Node 3 has no FUSE operations (files written to Node 1)"
+
+    # Step 11: Metrics Summary
+    print_section "Step 11: Metrics Summary"
 
     echo "Fetching real-time metrics from WormFS Admin API endpoint..."
     echo ""
@@ -1000,7 +1411,7 @@ EOF
     # Demo Complete - Display summary and wait for user
     print_header "Demo Complete!"
     echo ""
-    echo -e "${GREEN}✓ All Phase 1 + StorageNetwork capabilities demonstrated successfully!${NC}"
+    echo -e "${GREEN}✓ All Phase 1 + Distributed Operations demonstrated successfully!${NC}"
     echo ""
     echo "=========================================="
     echo -e "${BOLD}${GREEN}🌐 Admin Web UIs${NC}"
@@ -1009,25 +1420,38 @@ EOF
     echo -e "  ${CYAN}Node 1 Admin UI:${NC}"
     echo -e "  ${BOLD}${BLUE}http://127.0.0.1:9090/${NC}"
     echo -e "  ${CYAN}  • Check Network tab for connected peers${NC}"
+    echo -e "  ${CYAN}  • View distributed chunk placement${NC}"
     echo ""
     echo -e "  ${CYAN}Node 2 Admin UI:${NC}"
     echo -e "  ${BOLD}${BLUE}http://127.0.0.1:9091/${NC}"
     echo -e "  ${CYAN}  • Check Network tab for connected peers${NC}"
+    echo -e "  ${CYAN}  • View chunks stored on this node${NC}"
+    echo ""
+    echo -e "  ${CYAN}Node 3 Admin UI:${NC}"
+    echo -e "  ${BOLD}${BLUE}http://127.0.0.1:9092/${NC}"
+    echo -e "  ${CYAN}  • Check Network tab for connected peers${NC}"
+    echo -e "  ${CYAN}  • View chunks stored on this node${NC}"
     echo ""
     echo "=========================================="
     echo ""
-    echo "Both WormFS nodes are still running. You can:"
-    echo "  • Explore both admin UIs to see network connectivity"
+    echo "All three WormFS nodes are still running. You can:"
+    echo "  • Explore all admin UIs to see network connectivity"
     echo "  • Manually test Node 1 filesystem at: $MOUNT_POINT_1"
     echo "  • Manually test Node 2 filesystem at: $MOUNT_POINT_2"
+    echo "  • Manually test Node 3 filesystem at: $MOUNT_POINT_3"
     echo "  • Check Node 1 metrics at: http://127.0.0.1:9090/api/metrics"
     echo "  • Check Node 2 metrics at: http://127.0.0.1:9091/api/metrics"
+    echo "  • Check Node 3 metrics at: http://127.0.0.1:9092/api/metrics"
     echo ""
-    echo -e "${CYAN}Note: In future phases, files written to Node 1 will be"
-    echo -e "      accessible from Node 2 via the distributed network!${NC}"
+    echo -e "${CYAN}Note: Chunks written to Node 1 are distributed across all nodes!"
+    echo -e "      In future phases, files written to any node will be"
+    echo -e "      accessible from all nodes via the distributed network!${NC}"
     echo ""
     echo -e "${YELLOW}${BOLD}Press Enter when ready to unmount and cleanup...${NC}"
     read -r
+
+    # Mark demo as successful
+    DEMO_SUCCESS=1
 }
 
 # Run main function

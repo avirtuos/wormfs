@@ -274,6 +274,10 @@ struct WormFsConfig {
     #[serde(default)]
     network: Option<wormfs::storage_network::Config>,
 
+    /// StorageEndpoint configuration (optional)
+    #[serde(default)]
+    storage_endpoint: Option<wormfs::storage_endpoint::types::EndpointConfig>,
+
     /// Path to transaction log for Raft (optional)
     #[serde(default)]
     transaction_log_path: Option<PathBuf>,
@@ -334,6 +338,7 @@ fn load_config_from_file(
         admin_config: config.admin,
         network_config: config.network,
         raft_config,
+        storage_endpoint_config: config.storage_endpoint,
         mount_point,
         mount_options: MountOptions::default(),
     })
@@ -442,10 +447,11 @@ fn create_default_config(
         filesystem_config,
         metadata_config,
         file_store_config,
-        metric_config: None,  // Metrics disabled by default
-        admin_config: None,   // Admin server disabled by default
-        network_config: None, // Network disabled by default
-        raft_config: None,    // Raft disabled by default
+        metric_config: None,           // Metrics disabled by default
+        admin_config: None,            // Admin server disabled by default
+        network_config: None,          // Network disabled by default
+        raft_config: None,             // Raft disabled by default
+        storage_endpoint_config: None, // StorageEndpoint disabled by default
         mount_point,
         mount_options: MountOptions::default(),
     })

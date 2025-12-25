@@ -1,9 +1,13 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::super::utils::current_time_ms;
+
+/// Callback type for new node discovery.
+/// Arguments: (node_id, storage_endpoint_url)
+pub type NodeDiscoveryCallback = Arc<dyn Fn(String, Option<String>) + Send + Sync>;
 
 /// Information about a node's heartbeat
 #[derive(Debug, Clone)]
@@ -12,6 +16,7 @@ pub struct NodeHeartbeat {
     pub last_seen: u64, // Timestamp in milliseconds
     pub sequence: u64,
     pub admin_url: Option<String>,
+    pub storage_endpoint_url: Option<String>,
 
     // Raft state information
     pub raft_state: Option<String>,
@@ -60,6 +65,8 @@ pub struct HeartbeatTracker {
     heartbeats: Arc<RwLock<HashMap<String, NodeHeartbeat>>>,
     stale_threshold_ms: u64,
     startup_grace_period_ms: u64,
+    /// Optional callback fired when a new node is discovered
+    on_node_discovered: Arc<RwLock<Option<NodeDiscoveryCallback>>>,
 }
 
 impl HeartbeatTracker {
@@ -69,7 +76,14 @@ impl HeartbeatTracker {
             heartbeats: Arc::new(RwLock::new(HashMap::new())),
             stale_threshold_ms,
             startup_grace_period_ms,
+            on_node_discovered: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set callback to be invoked when a new node is discovered
+    pub fn set_on_node_discovered(&self, callback: NodeDiscoveryCallback) {
+        *self.on_node_discovered.write() = Some(callback);
+        info!("[HeartbeatTracker] Node discovery callback registered");
     }
 
     /// Record a heartbeat from a node
@@ -79,6 +93,7 @@ impl HeartbeatTracker {
         timestamp_ms: u64,
         sequence: u64,
         admin_url: Option<String>,
+        storage_endpoint_url: Option<String>,
         raft_state: Option<String>,
         raft_term: Option<u64>,
         last_log_index: Option<u64>,
@@ -90,11 +105,47 @@ impl HeartbeatTracker {
         available_bytes: Option<u64>,
         chunk_count: Option<u64>,
     ) {
+        let mut heartbeats = self.heartbeats.write();
+        let is_new = !heartbeats.contains_key(&node_id);
+
+        if is_new {
+            info!(
+                "[HeartbeatTracker] Discovered new node via heartbeat: node_id={}, storage_endpoint_url={:?}, raft_state={:?}, term={:?}, log_index={:?}, is_voter={:?}",
+                node_id,
+                storage_endpoint_url,
+                raft_state,
+                raft_term,
+                last_log_index,
+                is_voter
+            );
+
+            // Fire callback if registered (before creating NodeHeartbeat which moves storage_endpoint_url)
+            let callback_opt = self.on_node_discovered.read();
+            if let Some(callback) = &*callback_opt {
+                info!(
+                    "[HeartbeatTracker] Firing node discovery callback for node {}",
+                    node_id
+                );
+                callback(node_id.clone(), storage_endpoint_url.clone());
+            } else {
+                warn!(
+                    "[HeartbeatTracker] No node discovery callback registered! Cannot register node {}",
+                    node_id
+                );
+            }
+        } else {
+            debug!(
+                "[HeartbeatTracker] Updated existing heartbeat for node {} (seq: {})",
+                node_id, sequence
+            );
+        }
+
         let heartbeat = NodeHeartbeat {
             node_id: node_id.clone(),
             last_seen: timestamp_ms,
             sequence,
             admin_url,
+            storage_endpoint_url,
             raft_state: raft_state.clone(),
             raft_term,
             last_log_index,
@@ -106,20 +157,6 @@ impl HeartbeatTracker {
             available_bytes,
             chunk_count,
         };
-
-        let mut heartbeats = self.heartbeats.write();
-        let is_new = !heartbeats.contains_key(&node_id);
-
-        if is_new {
-            info!(
-                node_id = %node_id,
-                raft_state = ?raft_state,
-                term = ?raft_term,
-                log_index = ?last_log_index,
-                is_voter = ?is_voter,
-                "Discovered new node via heartbeat"
-            );
-        }
 
         heartbeats.insert(node_id, heartbeat);
     }

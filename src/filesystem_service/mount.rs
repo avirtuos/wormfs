@@ -271,6 +271,9 @@ pub struct MountConfig {
     /// StorageRaftMember configuration (optional)
     pub raft_config: Option<crate::storage_raft_member::Config>,
 
+    /// StorageEndpoint configuration (optional)
+    pub storage_endpoint_config: Option<crate::storage_endpoint::types::EndpointConfig>,
+
     /// Mount point path
     pub mount_point: std::path::PathBuf,
 
@@ -386,6 +389,52 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
     // Create heartbeat tracker and record local node
     // Use longer stale threshold since we don't have a background heartbeat task in mount mode
     let tracker = Arc::new(HeartbeatTracker::new(300_000, 300_000)); // 5 minutes stale, 5 minutes grace
+    tracing::info!(
+        "[NodeDiscovery] Created HeartbeatTracker for node {}",
+        config.filesystem_config.node_id
+    );
+
+    // Setup callback to register discovered nodes in MetadataStore
+    // This ensures FK constraints pass when allocating chunks to remote nodes
+    let metadata_store_for_callback = metadata_store.clone();
+    let local_node_id = config.filesystem_config.node_id;
+    tracker.set_on_node_discovered(Arc::new(move |node_id: String, address: Option<String>| {
+        tracing::info!(
+            "[NodeDiscovery] Callback invoked! Node {} discovered node {} with address {:?}",
+            local_node_id,
+            node_id,
+            address
+        );
+        if let Ok(node_id_num) = node_id.parse::<u64>() {
+            let metadata = metadata_store_for_callback.clone();
+            let addr = address.unwrap_or_default();
+            // Spawn async task to register node
+            tokio::spawn(async move {
+                tracing::info!(
+                    "[NodeDiscovery] Spawning task to register node {} in MetadataStore",
+                    node_id_num
+                );
+                if let Err(e) = metadata.register_node(node_id_num, &addr).await {
+                    tracing::warn!("Failed to register discovered node {}: {}", node_id_num, e);
+                } else {
+                    tracing::info!(
+                        "[NodeDiscovery] ✓ Registered discovered node {} in MetadataStore",
+                        node_id_num
+                    );
+                }
+            });
+        } else {
+            tracing::warn!(
+                "[NodeDiscovery] Failed to parse node_id '{}' as u64",
+                node_id
+            );
+        }
+    }));
+    tracing::info!(
+        "[NodeDiscovery] Node discovery callback registered for node {}",
+        config.filesystem_config.node_id
+    );
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -394,23 +443,26 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         config.filesystem_config.node_id.to_string(),
         now,
         1,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(now),           // Set startup_time to keep node in grace period
-        Some(1_000_000_000), // 1GB total capacity
-        Some(900_000_000),   // 900MB available
-        Some(0),             // 0 chunks initially
+        None,                // admin_url
+        None,                // storage_endpoint_url
+        None,                // raft_state
+        None,                // raft_term
+        None,                // last_log_index
+        None,                // last_log_term
+        None,                // current_leader
+        None,                // is_voter
+        Some(now),           // startup_time - keep node in grace period
+        Some(1_000_000_000), // total_bytes - 1GB total capacity
+        Some(900_000_000),   // available_bytes - 900MB available
+        Some(0),             // chunk_count - 0 chunks initially
     );
 
-    // Create placement engine configured to always select local node
+    // Create placement engine configured for distributed chunk placement
+    // With 2+1 erasure coding, we want chunks spread across different nodes
+    // StorageEndpoint gRPC servers must be running for this to work
     let placement_config = PlacementConfig {
-        min_node_diversity: 1,
-        prefer_local: true,
+        min_node_diversity: usize::MAX, // Maximum diversity - spread chunks across as many nodes as possible
+        prefer_local: false,            // Don't prefer local node - distribute evenly
     };
     let placement_engine = Arc::new(PlacementEngine::new(
         tracker.clone(),
@@ -421,7 +473,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
     // Create chunk client pool for distributed operations
     let chunk_client_config = ChunkClientConfig::default();
     let chunk_client: Arc<dyn crate::file_store::ChunkClient> =
-        Arc::new(ChunkClientPool::new(tracker, chunk_client_config));
+        Arc::new(ChunkClientPool::new(tracker.clone(), chunk_client_config));
 
     // Configure distributed operations
     file_store.set_distributed_config(my_node_id, placement_engine, chunk_client);
@@ -447,13 +499,16 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
 
     // Initialize StorageNetwork if configured
     let network_handle = if let Some(network_config) = config.network_config.clone() {
-        tracing::info!("Initializing StorageNetwork...");
+        tracing::info!("Initializing StorageNetwork with shared HeartbeatTracker...");
 
         use crate::storage_network::StorageNetworkFactory;
 
-        let (network_inner, handle) = StorageNetworkFactory::create(network_config)
-            .await
-            .map_err(|e| Error::Internal(format!("Failed to create StorageNetwork: {}", e)))?;
+        // Use the same tracker that was created earlier for PlacementEngine
+        // This ensures both components see the same cluster state
+        let (network_inner, handle) =
+            StorageNetworkFactory::create_with_tracker(network_config, tracker.clone())
+                .await
+                .map_err(|e| Error::Internal(format!("Failed to create StorageNetwork: {}", e)))?;
 
         // Spawn the network event loop in a dedicated thread with LocalSet
         // This is necessary because libp2p's Swarm is !Send
@@ -483,6 +538,69 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         } else {
             tracing::info!("Peer dialing initiated");
         }
+
+        // Start StorageEndpoint gRPC server if configured (for distributed chunk operations)
+        if let Some(endpoint_config) = &config.storage_endpoint_config {
+            use crate::storage_endpoint::proto::wormfs::chunk::chunk_service_server::ChunkServiceServer;
+            use crate::storage_endpoint::services::chunk::ChunkServiceImpl;
+            use tonic::transport::Server;
+
+            let chunk_service = ChunkServiceImpl::new(file_store.clone());
+            let listen_addr = endpoint_config.listen_address;
+
+            tracing::info!("Starting StorageEndpoint gRPC server on {}", listen_addr);
+
+            tokio::spawn(async move {
+                if let Err(e) = Server::builder()
+                    .add_service(ChunkServiceServer::new(chunk_service))
+                    .serve(listen_addr)
+                    .await
+                {
+                    tracing::error!("StorageEndpoint server error: {}", e);
+                }
+            });
+
+            tracing::info!("StorageEndpoint gRPC server started");
+        }
+
+        // Spawn background task to periodically update storage capacity in heartbeats
+        let network_for_capacity = handle.clone();
+        let file_store_for_capacity = file_store.clone();
+        let metadata_store_for_capacity = Arc::new(metadata_store.clone());
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30)); // Update every 30 seconds
+            loop {
+                interval.tick().await;
+
+                // Query storage stats from FileStore
+                match file_store_for_capacity
+                    .get_storage_stats(&metadata_store_for_capacity)
+                    .await
+                {
+                    Ok((total_bytes, available_bytes, chunk_count)) => {
+                        // Update network with current capacity
+                        if let Err(e) = network_for_capacity
+                            .update_storage_capacity_data(
+                                Some(total_bytes),
+                                Some(available_bytes),
+                                Some(chunk_count),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Failed to update storage capacity in heartbeat: {}", e);
+                        } else {
+                            tracing::debug!(
+                                "Updated storage capacity: total={} bytes, available={} bytes, chunks={}",
+                                total_bytes, available_bytes, chunk_count
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to query storage stats: {}", e);
+                    }
+                }
+            }
+        });
 
         Some(Arc::new(handle))
     } else {

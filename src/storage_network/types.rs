@@ -97,6 +97,10 @@ pub struct Config {
     /// Admin UI URL (optional, used in heartbeat messages)
     #[serde(default)]
     pub admin_url: Option<String>,
+
+    /// StorageEndpoint gRPC URL for chunk operations (optional, used in heartbeat messages)
+    #[serde(default)]
+    pub storage_endpoint_url: Option<String>,
 }
 
 fn default_max_peers() -> usize {
@@ -309,6 +313,16 @@ pub enum NetworkCommand {
         /// Node startup time (milliseconds since Unix epoch)
         startup_time: Option<u64>,
     },
+
+    /// Update storage capacity data for inclusion in heartbeats
+    UpdateStorageCapacityData {
+        /// Total storage capacity in bytes
+        total_bytes: Option<u64>,
+        /// Available storage capacity in bytes
+        available_bytes: Option<u64>,
+        /// Number of chunks currently stored
+        chunk_count: Option<u64>,
+    },
 }
 
 impl std::fmt::Debug for NetworkCommand {
@@ -382,6 +396,16 @@ impl std::fmt::Debug for NetworkCommand {
                 .field("raft_state", raft_state)
                 .field("raft_term", raft_term)
                 .field("last_log_index", last_log_index)
+                .finish(),
+            Self::UpdateStorageCapacityData {
+                total_bytes,
+                available_bytes,
+                chunk_count,
+            } => f
+                .debug_struct("UpdateStorageCapacityData")
+                .field("total_bytes", total_bytes)
+                .field("available_bytes", available_bytes)
+                .field("chunk_count", chunk_count)
                 .finish(),
         }
     }
@@ -561,6 +585,10 @@ pub struct HeartbeatMessage {
     #[serde(default)]
     pub admin_url: Option<String>,
 
+    /// StorageEndpoint gRPC URL for chunk operations (optional)
+    #[serde(default)]
+    pub storage_endpoint_url: Option<String>,
+
     // ==== Raft-Specific Fields for Cluster Discovery ====
     /// Current Raft state: "Leader", "Follower", "Candidate", "Learner", "Shutdown"
     #[serde(default)]
@@ -590,6 +618,19 @@ pub struct HeartbeatMessage {
     /// Used to detect node restarts
     #[serde(default)]
     pub startup_time: Option<u64>,
+
+    // ==== Storage Capacity Fields for Chunk Placement ====
+    /// Total storage capacity in bytes
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
+
+    /// Available storage capacity in bytes
+    #[serde(default)]
+    pub available_bytes: Option<u64>,
+
+    /// Number of chunks currently stored
+    #[serde(default)]
+    pub chunk_count: Option<u64>,
 }
 
 impl HeartbeatMessage {
@@ -605,6 +646,7 @@ impl HeartbeatMessage {
             timestamp_ms,
             sequence,
             admin_url: None,
+            storage_endpoint_url: None,
             raft_state: None,
             raft_term: None,
             last_log_index: None,
@@ -612,6 +654,9 @@ impl HeartbeatMessage {
             current_leader: None,
             is_voter: None,
             startup_time: None,
+            total_bytes: None,
+            available_bytes: None,
+            chunk_count: None,
         }
     }
 
@@ -627,6 +672,7 @@ impl HeartbeatMessage {
             timestamp_ms,
             sequence,
             admin_url,
+            storage_endpoint_url: None,
             raft_state: None,
             raft_term: None,
             last_log_index: None,
@@ -634,6 +680,9 @@ impl HeartbeatMessage {
             current_leader: None,
             is_voter: None,
             startup_time: None,
+            total_bytes: None,
+            available_bytes: None,
+            chunk_count: None,
         }
     }
 
@@ -643,6 +692,7 @@ impl HeartbeatMessage {
         node_id: String,
         sequence: u64,
         admin_url: Option<String>,
+        storage_endpoint_url: Option<String>,
         raft_state: Option<String>,
         raft_term: Option<u64>,
         last_log_index: Option<u64>,
@@ -650,6 +700,9 @@ impl HeartbeatMessage {
         current_leader: Option<u64>,
         is_voter: Option<bool>,
         startup_time: Option<u64>,
+        total_bytes: Option<u64>,
+        available_bytes: Option<u64>,
+        chunk_count: Option<u64>,
     ) -> Self {
         let timestamp_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -661,6 +714,7 @@ impl HeartbeatMessage {
             timestamp_ms,
             sequence,
             admin_url,
+            storage_endpoint_url,
             raft_state,
             raft_term,
             last_log_index,
@@ -668,6 +722,9 @@ impl HeartbeatMessage {
             current_leader,
             is_voter,
             startup_time,
+            total_bytes,
+            available_bytes,
+            chunk_count,
         }
     }
 
