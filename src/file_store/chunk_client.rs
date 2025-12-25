@@ -11,7 +11,7 @@ use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, error, info, warn};
 
-use super::types::{ChunkData, ChunkId, Error, NodeId};
+use super::types::{ChunkData, ChunkHeader, ChunkId, DiskId, Error, FileId, NodeId, StripeId};
 use crate::storage_endpoint::proto::wormfs::chunk::{
     chunk_service_client::ChunkServiceClient, Chunk, DeleteChunkRequest, ReadChunkRequest,
     StoreChunkRequest,
@@ -75,6 +75,9 @@ pub trait ChunkClient: Send + Sync {
         &self,
         source: NodeId,
         chunk_id: ChunkId,
+        file_id: FileId,
+        stripe_id: StripeId,
+        disk_id: DiskId,
     ) -> Result<ChunkData, Error>;
 }
 
@@ -366,11 +369,17 @@ impl ChunkClient for ChunkClientPool {
         &self,
         source: NodeId,
         chunk_id: ChunkId,
+        file_id: FileId,
+        stripe_id: StripeId,
+        disk_id: DiskId,
     ) -> Result<ChunkData, Error> {
         let mut client = self.get_client(source).await?;
 
         let request = ReadChunkRequest {
             chunk_id: chunk_id.0.as_bytes().to_vec(),
+            file_id: file_id.0.as_bytes().to_vec(),
+            stripe_id: stripe_id.0.as_bytes().to_vec(),
+            disk_id: disk_id.0,
         };
 
         let response = client.read_chunk(request).await.map_err(|e| {
@@ -382,12 +391,15 @@ impl ChunkClient for ChunkClientPool {
 
         let inner = response.into_inner();
 
-        // TODO: Parse the chunk data properly
-        // For now, this is a placeholder that returns minimal chunk data
-        // The full implementation would need to parse the chunk header from the response
-        Err(Error::NotImplemented(
-            "read_chunk_remote needs full ChunkData parsing implementation".to_string(),
-        ))
+        // Deserialize header from response
+        let header: ChunkHeader = bincode::deserialize(&inner.header_data).map_err(|e| {
+            Error::ChunkCorrupt(chunk_id, format!("Failed to deserialize header: {}", e))
+        })?;
+
+        Ok(ChunkData {
+            header,
+            data: inner.chunk_data,
+        })
     }
 }
 

@@ -80,7 +80,8 @@ pub mod types;
 use async_trait::async_trait;
 pub use chunk_client::{ChunkClient, ChunkClientConfig, ChunkClientPool};
 pub use implementation::FileStoreImpl;
-use std::path::PathBuf;
+pub use placement::{ChunkPlacement, PlacementConfig, PlacementEngine};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 pub use stripe_builder::StripeBuilder;
 pub use types::{
@@ -302,10 +303,44 @@ pub trait FileStore: Send + Sync {
     ///
     /// The chunk data including header.
     ///
+    /// Get the filesystem path for a disk by its ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `disk_id` - The disk identifier
+    ///
+    /// # Returns
+    ///
+    /// The filesystem path to the disk
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if disk not found.
+    async fn get_disk_path(&self, disk_id: DiskId) -> Result<PathBuf, Error>;
+
+    /// Read a chunk from disk given full path components.
+    ///
+    /// # Arguments
+    ///
+    /// * `disk_path` - Filesystem path to the disk
+    /// * `file_id` - File identifier
+    /// * `stripe_id` - Stripe identifier
+    /// * `chunk_id` - Chunk identifier
+    ///
+    /// # Returns
+    ///
+    /// The chunk data including header
+    ///
     /// # Errors
     ///
     /// Returns an error if chunk not found or read fails.
-    async fn read_chunk_local(&self, chunk_id: ChunkId) -> Result<ChunkData, Error>;
+    async fn read_chunk_from_disk(
+        &self,
+        disk_path: &Path,
+        file_id: FileId,
+        stripe_id: StripeId,
+        chunk_id: ChunkId,
+    ) -> Result<ChunkData, Error>;
 
     /// Verify chunk integrity (checksum validation).
     ///

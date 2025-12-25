@@ -51,10 +51,14 @@ message Chunk {
 
 message ReadChunkRequest {
   bytes chunk_id = 1;
+  bytes file_id = 2;       // File identifier for path construction
+  bytes stripe_id = 3;     // Stripe identifier for path construction
+  uint64 disk_id = 4;      // Disk ID to resolve disk path on remote node
 }
 
 message ReadChunkResponse {
   bytes chunk_data = 1;
+  bytes header_data = 2;   // Serialized ChunkHeader for full ChunkData reconstruction
 }
 
 message CheckChunkRequest {

@@ -1538,7 +1538,17 @@ mod tests {
             unimplemented!()
         }
 
-        async fn read_chunk_local(&self, _chunk_id: ChunkId) -> Result<ChunkData, FileStoreError> {
+        async fn get_disk_path(&self, _disk_id: DiskId) -> Result<PathBuf, FileStoreError> {
+            unimplemented!()
+        }
+
+        async fn read_chunk_from_disk(
+            &self,
+            _disk_path: &Path,
+            _file_id: FileId,
+            _stripe_id: StripeId,
+            _chunk_id: ChunkId,
+        ) -> Result<ChunkData, FileStoreError> {
             unimplemented!()
         }
 
