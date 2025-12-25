@@ -1038,6 +1038,30 @@ impl super::StorageNetworkInner {
                     // Record heartbeat sent metric
                     self.record_metric_counter("storage_network.heartbeat.sent", 1)
                         .await;
+
+                    // Also record our own heartbeat locally since gossipsub doesn't echo back
+                    debug!(
+                        "Recording local node heartbeat in tracker: node_id={}, chunks={}",
+                        heartbeat.node_id,
+                        capacity_data.chunk_count.unwrap_or(0)
+                    );
+                    self.state.heartbeat_tracker.record_heartbeat(
+                        heartbeat.node_id.clone(),
+                        heartbeat.timestamp_ms,
+                        heartbeat.sequence,
+                        heartbeat.admin_url.clone(),
+                        heartbeat.storage_endpoint_url.clone(),
+                        heartbeat.raft_state.clone(),
+                        heartbeat.raft_term,
+                        heartbeat.last_log_index,
+                        heartbeat.last_log_term,
+                        heartbeat.current_leader,
+                        heartbeat.is_voter,
+                        heartbeat.startup_time,
+                        heartbeat.total_bytes,
+                        heartbeat.available_bytes,
+                        heartbeat.chunk_count,
+                    );
                 }
             }
             Err(e) => {
