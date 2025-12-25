@@ -172,61 +172,6 @@ impl FileStoreImpl {
         Ok(())
     }
 
-    /// Read chunk data from disk
-    async fn read_chunk_from_disk(
-        &self,
-        disk_path: &Path,
-        file_id: FileId,
-        stripe_id: StripeId,
-        chunk_id: ChunkId,
-    ) -> Result<ChunkData, Error> {
-        let chunk_path = self.chunk_path(disk_path, file_id, stripe_id, chunk_id);
-
-        // Read file
-        let buffer = tokio::fs::read(&chunk_path).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Error::ChunkNotFound(chunk_id)
-            } else {
-                Error::Io(e)
-            }
-        })?;
-
-        if buffer.len() < 4 {
-            return Err(Error::ChunkCorrupt(
-                chunk_id,
-                "File too small to contain header".to_string(),
-            ));
-        }
-
-        // Read header length
-        let header_len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-
-        if buffer.len() < 4 + header_len {
-            return Err(Error::ChunkCorrupt(
-                chunk_id,
-                "File too small to contain complete header".to_string(),
-            ));
-        }
-
-        // Deserialize header
-        let header: ChunkHeader =
-            bincode::deserialize(&buffer[4..4 + header_len]).map_err(|e| {
-                Error::ChunkCorrupt(chunk_id, format!("Failed to deserialize header: {}", e))
-            })?;
-
-        // Verify magic bytes
-        if !header.verify_magic() {
-            return Err(Error::ChunkCorrupt(
-                header.chunk_id,
-                "Invalid magic bytes".to_string(),
-            ));
-        }
-
-        // Read chunk data
-        let data = buffer[4 + header_len..].to_vec();
-
-        Ok(ChunkData { header, data })
-    }
 }
 
 impl FileStoreImpl {
@@ -724,6 +669,9 @@ impl FileStore for FileStoreImpl {
         // Stage chunk locally to disk. The chunk is written but not yet in metadata.
         // Activation occurs when metadata is committed via Raft.
 
+        let start = std::time::Instant::now();
+        let data_size = chunk_data.data.len() as u64;
+
         let file_id = chunk_data.header.file_id;
         let stripe_id = chunk_data.header.stripe_id;
         let chunk_id = chunk_data.header.chunk_id;
@@ -741,6 +689,29 @@ impl FileStore for FileStoreImpl {
         // Write chunk to disk
         self.write_chunk_to_disk(&disk_path, file_id, stripe_id, chunk_id, &chunk_data)
             .await?;
+
+        // Publish metrics if available
+        if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+            let elapsed = start.elapsed().as_secs_f64();
+
+            let _ = metrics.publish_counter(
+                "filestore.chunk_write.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            let _ = metrics.publish_counter(
+                "filestore.chunk_write.bytes",
+                data_size,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            let _ = metrics.publish_histogram(
+                "filestore.chunk_write.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+        }
 
         Ok(chunk_id)
     }
@@ -765,6 +736,9 @@ impl FileStore for FileStoreImpl {
         chunk_data: ChunkData,
     ) -> Result<(), Error> {
         // Extract location information from chunk header
+        let start = std::time::Instant::now();
+        let data_size = chunk_data.data.len() as u64;
+
         let file_id = chunk_data.header.file_id;
         let stripe_id = chunk_data.header.stripe_id;
         let chunk_id = chunk_data.header.chunk_id;
@@ -781,47 +755,128 @@ impl FileStore for FileStoreImpl {
 
         // Write chunk to disk
         self.write_chunk_to_disk(&disk_path, file_id, stripe_id, chunk_id, &chunk_data)
-            .await
-    }
+            .await?;
 
-    async fn read_chunk_local(&self, _chunk_id: ChunkId) -> Result<ChunkData, Error> {
-        // Phase 1: We need to know file_id, stripe_id, and chunk_index
-        // For now, this is a simplified implementation that won't work in practice
-        // Phase 2+ will use MetadataStore to map chunk_id -> location
+        // Publish metrics if available
+        if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+            let elapsed = start.elapsed().as_secs_f64();
 
-        // For Phase 1, return NotImplemented
-        Err(Error::NotImplemented(
-            "read_chunk_local requires MetadataStore integration (Phase 2+)".to_string(),
-        ))
-    }
+            let _ = metrics.publish_counter(
+                "filestore.chunk_write.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
 
-    async fn verify_chunk(&self, chunk_id: ChunkId) -> Result<VerificationResult, Error> {
-        // Try to read the chunk
-        match self.read_chunk_local(chunk_id).await {
-            Ok(chunk_data) => {
-                // Verify checksum
-                let computed_checksum = ChunkHeader::compute_checksum(&chunk_data.data);
-                let checksum_valid = computed_checksum == chunk_data.header.chunk_checksum;
+            let _ = metrics.publish_counter(
+                "filestore.chunk_write.bytes",
+                data_size,
+                crate::metric_service::UnitType::Bytes,
+            );
 
-                Ok(VerificationResult {
-                    checksum_valid,
-                    readable: true,
-                    error: if checksum_valid {
-                        None
-                    } else {
-                        Some(format!(
-                            "Checksum mismatch: expected {}, got {}",
-                            chunk_data.header.chunk_checksum, computed_checksum
-                        ))
-                    },
-                })
-            }
-            Err(e) => Ok(VerificationResult {
-                checksum_valid: false,
-                readable: false,
-                error: Some(format!("Failed to read chunk: {}", e)),
-            }),
+            let _ = metrics.publish_histogram(
+                "filestore.chunk_write.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
         }
+
+        Ok(())
+    }
+
+    async fn get_disk_path(&self, disk_id: DiskId) -> Result<PathBuf, Error> {
+        let disks = self.inner.disks.read().await;
+        match disks.get(&disk_id) {
+            Some(info) => Ok(info.path.clone()),
+            None => Err(Error::ConfigError(format!("Disk {} not found", disk_id.0))),
+        }
+    }
+
+    async fn read_chunk_from_disk(
+        &self,
+        disk_path: &Path,
+        file_id: FileId,
+        stripe_id: StripeId,
+        chunk_id: ChunkId,
+    ) -> Result<ChunkData, Error> {
+        let start = std::time::Instant::now();
+
+        let chunk_path = self.chunk_path(disk_path, file_id, stripe_id, chunk_id);
+
+        // Read file
+        let buffer = tokio::fs::read(&chunk_path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::ChunkNotFound(chunk_id)
+            } else {
+                Error::Io(e)
+            }
+        })?;
+
+        if buffer.len() < 4 {
+            return Err(Error::ChunkCorrupt(
+                chunk_id,
+                "File too small to contain header".to_string(),
+            ));
+        }
+
+        // Read header length
+        let header_len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+
+        if buffer.len() < 4 + header_len {
+            return Err(Error::ChunkCorrupt(
+                chunk_id,
+                "File too small to contain complete header".to_string(),
+            ));
+        }
+
+        // Deserialize header
+        let header: ChunkHeader =
+            bincode::deserialize(&buffer[4..4 + header_len]).map_err(|e| {
+                Error::ChunkCorrupt(chunk_id, format!("Failed to deserialize header: {}", e))
+            })?;
+
+        // Verify magic bytes
+        if !header.verify_magic() {
+            return Err(Error::ChunkCorrupt(
+                header.chunk_id,
+                "Invalid magic bytes".to_string(),
+            ));
+        }
+
+        // Read chunk data
+        let data = buffer[4 + header_len..].to_vec();
+        let data_size = data.len() as u64;
+
+        // Publish metrics if available
+        if let Some(ref metrics) = *self.inner.metrics.read().unwrap() {
+            let elapsed = start.elapsed().as_secs_f64();
+
+            let _ = metrics.publish_counter(
+                "filestore.chunk_read.total",
+                1,
+                crate::metric_service::UnitType::Operations,
+            );
+
+            let _ = metrics.publish_counter(
+                "filestore.chunk_read.bytes",
+                data_size,
+                crate::metric_service::UnitType::Bytes,
+            );
+
+            let _ = metrics.publish_histogram(
+                "filestore.chunk_read.latency",
+                elapsed,
+                crate::metric_service::UnitType::Seconds,
+            );
+        }
+
+        Ok(ChunkData { header, data })
+    }
+
+    async fn verify_chunk(&self, _chunk_id: ChunkId) -> Result<VerificationResult, Error> {
+        // Phase 2+: Will need MetadataStore to map chunk_id -> location
+        Err(Error::NotImplemented(
+            "verify_chunk requires MetadataStore integration (Phase 2+)".to_string(),
+        ))
     }
 
     async fn rebuild_stripe(
@@ -1090,7 +1145,7 @@ impl FileStoreImpl {
                 } else if let Some(client_pool) = chunk_client {
                     // Fetch remotely
                     match client_pool
-                        .read_chunk_remote(meta.node_id, meta.chunk_id)
+                        .read_chunk_remote(meta.node_id, meta.chunk_id, file_id, stripe_id, meta.disk_id)
                         .await
                     {
                         Ok(chunk_data) => Some(chunk_data),

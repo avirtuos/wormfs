@@ -12,7 +12,7 @@ use super::conversions::{
     filestore_error_to_status, proto_to_compression_algorithm, proto_to_erasure_algorithm,
 };
 use super::GRPC_STREAM_CHANNEL_BUFFER_SIZE;
-use crate::file_store::{ChunkData, ChunkHeader, FileStore};
+use crate::file_store::{ChunkData, ChunkHeader, DiskId, FileId, FileStore, StripeId};
 use crate::storage_endpoint::proto::wormfs::chunk::chunk_service_server::ChunkService;
 use crate::storage_endpoint::proto::wormfs::chunk::*;
 
@@ -43,16 +43,33 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         let req = request.into_inner();
         debug!("ReadChunk request");
 
+        // Parse IDs from request
         let chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
+        let file_id = bytes_to_file_id(&req.file_id)?;
+        let stripe_id = bytes_to_stripe_id(&req.stripe_id)?;
+        let disk_id = DiskId(req.disk_id);
 
+        // Resolve disk_id to disk_path
+        let disk_path = self
+            .file_store
+            .get_disk_path(disk_id)
+            .await
+            .map_err(|e| Status::not_found(format!("Disk {} not found: {}", disk_id.0, e)))?;
+
+        // Read chunk using the path components
         let chunk_data = self
             .file_store
-            .read_chunk_local(chunk_id)
+            .read_chunk_from_disk(&disk_path, file_id, stripe_id, chunk_id)
             .await
             .map_err(filestore_error_to_status)?;
 
+        // Serialize header for response
+        let header_data = bincode::serialize(&chunk_data.header)
+            .map_err(|e| Status::internal(format!("Failed to serialize header: {}", e)))?;
+
         Ok(Response::new(ReadChunkResponse {
             chunk_data: chunk_data.data,
+            header_data,
         }))
     }
 
@@ -63,19 +80,13 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         let req = request.into_inner();
         debug!("CheckChunk request");
 
-        let chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
+        let _chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
 
-        // Try to read chunk to check if it exists
-        match self.file_store.read_chunk_local(chunk_id).await {
-            Ok(chunk_data) => Ok(Response::new(CheckChunkResponse {
-                exists: true,
-                size: chunk_data.data.len() as u64,
-            })),
-            Err(_) => Ok(Response::new(CheckChunkResponse {
-                exists: false,
-                size: 0,
-            })),
-        }
+        // TODO: check_chunk needs file_id/stripe_id/disk_id like read_chunk does
+        // For now, return not implemented
+        Err(Status::unimplemented(
+            "check_chunk requires file_id/stripe_id/disk_id parameters",
+        ))
     }
 
     async fn verify_chunk(
@@ -190,47 +201,13 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         let req = request.into_inner();
         debug!("RetrieveChunk request");
 
-        let chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
-        let file_store = self.file_store.clone();
+        let _chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
 
-        let (tx, rx) = tokio::sync::mpsc::channel(GRPC_STREAM_CHANNEL_BUFFER_SIZE);
-
-        // Spawn task to stream chunk data
-        tokio::spawn(async move {
-            match file_store.read_chunk_local(chunk_id).await {
-                Ok(chunk_data) => {
-                    // Stream chunk data in 64KB chunks
-                    const CHUNK_SIZE: usize = 64 * 1024;
-                    let mut offset = 0;
-                    let total_size = chunk_data.data.len();
-
-                    while offset < total_size {
-                        let end = (offset + CHUNK_SIZE).min(total_size);
-                        let chunk = chunk_data.data[offset..end].to_vec();
-                        let is_last = end >= total_size;
-
-                        let response = RetrieveChunkResponse {
-                            data: chunk,
-                            offset: offset as u64,
-                            last_chunk: is_last,
-                        };
-
-                        if tx.send(Ok(response)).await.is_err() {
-                            break;
-                        }
-
-                        offset = end;
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(filestore_error_to_status(e))).await;
-                }
-            }
-        });
-
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
-            rx,
-        )))
+        // TODO: retrieve_chunk needs file_id/stripe_id/disk_id like read_chunk does
+        // For now, return not implemented
+        Err(Status::unimplemented(
+            "retrieve_chunk requires file_id/stripe_id/disk_id parameters",
+        ))
     }
 
     async fn batch_store(

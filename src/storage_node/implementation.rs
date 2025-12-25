@@ -216,7 +216,11 @@ impl StorageNodeImpl {
             Arc::new(ChunkClientPool::new(tracker, chunk_client_config));
 
         // Configure distributed operations
-        file_store.set_distributed_config(my_node_id, placement_engine, chunk_client);
+        file_store.set_distributed_config(
+            my_node_id,
+            placement_engine,
+            chunk_client,
+        );
 
         let file_store = Arc::new(file_store);
 
@@ -304,6 +308,45 @@ impl StorageNodeImpl {
         });
 
         info!("StorageNetwork event loop thread started successfully");
+
+        // Spawn background task to periodically update storage capacity in heartbeats
+        let network_for_capacity = network_handle.clone();
+        let file_store_for_capacity = file_store.clone();
+        let metadata_store_for_capacity = Arc::new(metadata_store.clone());
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30)); // Update every 30 seconds
+            loop {
+                interval.tick().await;
+
+                // Query storage stats from FileStore
+                match file_store_for_capacity
+                    .get_storage_stats(&metadata_store_for_capacity)
+                    .await
+                {
+                    Ok((total_bytes, available_bytes, chunk_count)) => {
+                        // Update network with current capacity
+                        if let Err(e) = network_for_capacity
+                            .update_storage_capacity_data(
+                                Some(total_bytes),
+                                Some(available_bytes),
+                                Some(chunk_count),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Failed to update storage capacity in heartbeat: {}", e);
+                        } else {
+                            tracing::debug!(
+                                "Updated storage capacity: total={} bytes, available={} bytes, chunks={}",
+                                total_bytes, available_bytes, chunk_count
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to query storage stats: {}", e);
+                    }
+                }
+            }
+        });
 
         // Step 5: Initialize StorageRaftMember (Phase 2+) - only if configured
         // Raft requires numeric node IDs, so only initialize if all conditions are met:
