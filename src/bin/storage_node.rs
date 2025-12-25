@@ -137,6 +137,7 @@ async fn main() {
         admin_config: None,
         network_config: None, // StorageNode handles networking separately
         raft_config: None,    // StorageNode handles Raft separately
+        storage_endpoint_config: None, // StorageNode handles StorageEndpoint separately
         mount_point: std::path::PathBuf::from("/tmp/wormfs-not-mounted"),
         mount_options: wormfs::filesystem_service::mount::MountOptions::default(),
     });

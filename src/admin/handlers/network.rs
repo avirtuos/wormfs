@@ -89,8 +89,8 @@ fn peer_to_json(peer: &PeerInfo, include_connected_since: bool) -> serde_json::V
 /// # Returns
 ///
 /// JSON response with network status information:
-/// - `local_node`: Information about this node
-/// - `peers`: List of connected peers with heartbeat status
+/// - `local_node`: Information about this node (including chunk count)
+/// - `peers`: List of connected peers with heartbeat status (including chunk counts)
 /// - `statistics`: Network-level statistics
 pub async fn network_status_handler(
     State(network): State<Arc<StorageNetworkHandle>>,
@@ -98,15 +98,57 @@ pub async fn network_status_handler(
     // Get connected peers from the network
     let peers = network.get_connected_peers().await;
 
-    // Convert peer info to JSON (include connected_since for network status)
-    let peer_list: Vec<_> = peers.iter().map(|peer| peer_to_json(peer, true)).collect();
+    // Get HeartbeatTracker to access chunk counts
+    let tracker = network.heartbeat_tracker();
+
+    // Get local node heartbeat for chunk count
+    let local_chunk_count = tracker
+        .get_heartbeat(&network.config.node_id)
+        .and_then(|hb| hb.chunk_count)
+        .unwrap_or(0);
+
+    let local_total_bytes = tracker
+        .get_heartbeat(&network.config.node_id)
+        .and_then(|hb| hb.total_bytes)
+        .unwrap_or(0);
+
+    let local_available_bytes = tracker
+        .get_heartbeat(&network.config.node_id)
+        .and_then(|hb| hb.available_bytes)
+        .unwrap_or(0);
+
+    // Convert peer info to JSON with chunk counts from heartbeats
+    let peer_list: Vec<_> = peers
+        .iter()
+        .map(|peer| {
+            let mut peer_json = peer_to_json(peer, true);
+
+            // Get chunk count from heartbeat tracker
+            if let Some(node_id) = &peer.node_id {
+                if let Some(heartbeat) = tracker.get_heartbeat(node_id) {
+                    peer_json["chunk_count"] = json!(heartbeat.chunk_count.unwrap_or(0));
+                    peer_json["total_bytes"] = json!(heartbeat.total_bytes.unwrap_or(0));
+                    peer_json["available_bytes"] = json!(heartbeat.available_bytes.unwrap_or(0));
+                } else {
+                    peer_json["chunk_count"] = json!(0);
+                    peer_json["total_bytes"] = json!(0);
+                    peer_json["available_bytes"] = json!(0);
+                }
+            }
+
+            peer_json
+        })
+        .collect();
 
     let status = json!({
         "local_node": {
             "node_id": network.config.node_id,
             "listen_addresses": network.config.listen_addresses,
             "peer_id": "local",
-            "uptime_seconds": 0  // TODO: Track actual uptime
+            "uptime_seconds": 0,  // TODO: Track actual uptime
+            "chunk_count": local_chunk_count,
+            "total_bytes": local_total_bytes,
+            "available_bytes": local_available_bytes
         },
         "peers": peer_list,
         "statistics": {

@@ -276,6 +276,9 @@ pub trait MetadataStore: Send + Sync + Clone {
         verified_at: SystemTime,
     ) -> Result<(), Error>;
 
+    /// Get chunk count for a specific node.
+    async fn get_node_chunk_count(&self, node_id: NodeId) -> Result<u64, Error>;
+
     // ===== Lock Operations =====
 
     /// Acquire a read lock on a file.
@@ -414,4 +417,19 @@ pub trait MetadataStore: Send + Sync + Clone {
 
     /// Restore from a snapshot.
     async fn restore_from_snapshot(&self, snapshot_path: &Path) -> Result<(), Error>;
+
+    /// Register a node in the cluster (idempotent).
+    ///
+    /// This method is called when a new node is discovered via HeartbeatTracker.
+    /// It must be idempotent - if the node already exists, do nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The unique node ID
+    /// * `address` - The node's network address
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database operation fails.
+    async fn register_node(&self, node_id: u64, address: &str) -> Result<(), Error>;
 }

@@ -205,6 +205,174 @@ impl super::StorageNetworkFactory {
             heartbeat_sequence: RwLock::new(0),
             raft_handler: RwLock::new(None),
             raft_heartbeat_data: RwLock::new(RaftHeartbeatData::default()),
+            storage_capacity_data: RwLock::new(StorageCapacityData::default()),
+            heartbeat_tracker: heartbeat_tracker.clone(),
+        };
+
+        // Create cloneable handle (no reference to inner state)
+        let handle = super::StorageNetworkHandle {
+            event_tx,
+            config: config_arc,
+            heartbeat_tracker,
+        };
+
+        // Return both inner (for event loop) and handle (for operations)
+        Ok((super::StorageNetworkInner { state }, handle))
+    }
+
+    /// Create a new StorageNetwork instance with a shared HeartbeatTracker.
+    ///
+    /// This method allows sharing a HeartbeatTracker between multiple components
+    /// (e.g., StorageNetwork and PlacementEngine) to ensure consistent cluster awareness.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Network configuration
+    /// * `heartbeat_tracker` - Shared HeartbeatTracker for cluster awareness
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(StorageNetworkInner, StorageNetworkHandle)` where:
+    /// - `StorageNetworkInner` must have `run()` called to start the event loop
+    /// - `StorageNetworkHandle` is a cloneable handle for network operations
+    pub async fn create_with_tracker(
+        config: Config,
+        heartbeat_tracker: Arc<HeartbeatTracker>,
+    ) -> Result<(super::StorageNetworkInner, super::StorageNetworkHandle), Error> {
+        // Generate a new random keypair
+        let local_key = identity::Keypair::generate_ed25519();
+        Self::create_with_tracker_and_keypair(config, heartbeat_tracker, local_key).await
+    }
+
+    /// Create a new StorageNetwork instance with a shared HeartbeatTracker and specific keypair.
+    ///
+    /// This method combines the benefits of sharing a HeartbeatTracker with providing
+    /// a specific keypair for stable peer IDs (useful for testing).
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Network configuration
+    /// * `heartbeat_tracker` - Shared HeartbeatTracker for cluster awareness
+    /// * `keypair` - The libp2p keypair to use for this node's identity
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(StorageNetworkInner, StorageNetworkHandle)` where:
+    /// - `StorageNetworkInner` must have `run()` called to start the event loop
+    /// - `StorageNetworkHandle` is a cloneable handle for network operations
+    pub async fn create_with_tracker_and_keypair(
+        config: Config,
+        heartbeat_tracker: Arc<HeartbeatTracker>,
+        local_key: identity::Keypair,
+    ) -> Result<(super::StorageNetworkInner, super::StorageNetworkHandle), Error> {
+        info!("Initializing StorageNetwork with libp2p and shared HeartbeatTracker");
+
+        // Use the provided keypair for this node's identity
+        let local_peer_id = Libp2pPeerId::from(local_key.public());
+        info!("Local peer ID: {}", local_peer_id);
+
+        // Store config for use in closure
+        let keep_alive_interval = config.keep_alive_interval;
+
+        // Build the swarm using the new builder API
+        let swarm = SwarmBuilder::with_existing_identity(local_key.clone())
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default().nodelay(true),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .map_err(|e| Error::ConfigError(format!("Failed to configure TCP transport: {}", e)))?
+            .with_behaviour(|key| {
+                // Configure gossipsub behavior
+                let behaviour_config = BehaviourConfig::default();
+                let gossipsub_config = behaviour_config.gossipsub;
+
+                // Create gossipsub
+                let gossipsub = gossipsub::Behaviour::new(
+                    gossipsub::MessageAuthenticity::Signed(key.clone()),
+                    gossipsub_config,
+                )
+                .map_err(|e| format!("Failed to create gossipsub behaviour: {}", e))?;
+
+                // Configure request-response protocol
+                let req_resp_config = request_response::Config::default()
+                    .with_request_timeout(behaviour_config.request_timeout);
+
+                let request_response = request_response::Behaviour::<WormFsCodec>::with_codec(
+                    WormFsCodec::default(),
+                    iter::once((
+                        StreamProtocol::new("/wormfs/rpc/1.0.0"),
+                        request_response::ProtocolSupport::Full,
+                    )),
+                    req_resp_config,
+                );
+
+                // Configure identify protocol
+                let identify_config =
+                    identify::Config::new("/wormfs/1.0.0".to_string(), key.public())
+                        .with_agent_version(format!("wormfs/{}", env!("CARGO_PKG_VERSION")));
+
+                let identify = identify::Behaviour::new(identify_config);
+
+                // Configure ping for keep-alive
+                let ping_config = ping::Config::new()
+                    .with_interval(keep_alive_interval)
+                    .with_timeout(Duration::from_secs(20));
+
+                let ping = ping::Behaviour::new(ping_config);
+
+                // Combine all behaviors
+                Ok(WormFsBehaviour {
+                    gossipsub,
+                    request_response,
+                    identify,
+                    ping,
+                })
+            })
+            .map_err(|e| Error::ConfigError(format!("Failed to build behaviour: {}", e)))?
+            .build();
+
+        // Create command channel for network operations
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+
+        // Create peer state tracking
+        let peers = RwLock::new(HashMap::new());
+
+        // Create topic subscriptions tracking
+        let topics = RwLock::new(HashMap::new());
+
+        // Wrap swarm in RwLock for interior mutability
+        let swarm_lock = RwLock::new(swarm);
+
+        // Create peer ID store for learned peer IDs (AutoId mode)
+        let peer_id_store = Arc::new(
+            super::peer_id_store::PeerIdStore::new(&config.peer_id_store_path).map_err(|e| {
+                Error::ConfigError(format!("Failed to create peer ID store: {}", e))
+            })?,
+        );
+
+        // Wrap config in Arc for sharing with handle
+        let config_arc = Arc::new(config.clone());
+
+        // Use the provided heartbeat tracker (shared with PlacementEngine)
+        // instead of creating a new one
+
+        // Create inner state (owned by StorageNetworkInner, not Arc)
+        let state = InnerState {
+            swarm: swarm_lock,
+            peers,
+            topics,
+            node_id: config.node_id.clone(),
+            config,
+            event_rx: RwLock::new(event_rx),
+            pending_requests: RwLock::new(HashMap::new()),
+            metrics: RwLock::new(None),
+            peer_id_store,
+            heartbeat_sequence: RwLock::new(0),
+            raft_handler: RwLock::new(None),
+            raft_heartbeat_data: RwLock::new(RaftHeartbeatData::default()),
+            storage_capacity_data: RwLock::new(StorageCapacityData::default()),
             heartbeat_tracker: heartbeat_tracker.clone(),
         };
 
@@ -238,6 +406,16 @@ pub(crate) struct RaftHeartbeatData {
     pub current_leader: Option<u64>,
     pub is_voter: Option<bool>,
     pub startup_time: Option<u64>,
+}
+
+/// Storage capacity information for heartbeat broadcasting.
+/// This allows the network layer to include storage capacity in heartbeats
+/// for distributed chunk placement decisions.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StorageCapacityData {
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub chunk_count: Option<u64>,
 }
 
 /// Internal state shared between event loop and network handle.
@@ -283,6 +461,10 @@ pub struct InnerState {
     /// Raft heartbeat data for inclusion in gossipsub heartbeats
     /// Updated by the Raft layer, read by the heartbeat broadcaster
     pub(crate) raft_heartbeat_data: RwLock<RaftHeartbeatData>,
+
+    /// Storage capacity data for inclusion in gossipsub heartbeats
+    /// Updated by the FileStore layer, read by the heartbeat broadcaster
+    pub(crate) storage_capacity_data: RwLock<StorageCapacityData>,
 
     /// Tracker for recording and querying heartbeats from all nodes in the cluster
     /// Wrapped in Arc to allow sharing with the network handle
@@ -760,17 +942,22 @@ impl super::StorageNetworkInner {
     async fn handle_heartbeat_message(&self, source: &PeerId, data: &[u8]) {
         match HeartbeatMessage::from_bytes(data) {
             Ok(heartbeat) => {
-                debug!(
-                    "Received heartbeat from node '{}' via peer {:?} (seq: {}, term: {:?}, log_idx: {:?})",
-                    heartbeat.node_id, source, heartbeat.sequence, heartbeat.raft_term, heartbeat.last_log_index
+                info!(
+                    "[StorageNetwork] Received heartbeat from node '{}' via peer {:?} (seq: {}, storage_endpoint_url: {:?}, term: {:?}, log_idx: {:?})",
+                    heartbeat.node_id, source, heartbeat.sequence, heartbeat.storage_endpoint_url, heartbeat.raft_term, heartbeat.last_log_index
                 );
 
                 // Record in heartbeat tracker for cluster-wide awareness
+                info!(
+                    "[StorageNetwork] Recording heartbeat for node {} in HeartbeatTracker",
+                    heartbeat.node_id
+                );
                 self.state.heartbeat_tracker.record_heartbeat(
                     heartbeat.node_id.clone(),
                     heartbeat.timestamp_ms,
                     heartbeat.sequence,
                     heartbeat.admin_url.clone(),
+                    heartbeat.storage_endpoint_url.clone(),
                     heartbeat.raft_state.clone(),
                     heartbeat.raft_term,
                     heartbeat.last_log_index,
@@ -778,6 +965,9 @@ impl super::StorageNetworkInner {
                     heartbeat.current_leader,
                     heartbeat.is_voter,
                     heartbeat.startup_time,
+                    heartbeat.total_bytes,
+                    heartbeat.available_bytes,
+                    heartbeat.chunk_count,
                 );
 
                 // Update peer's last_heartbeat time and metadata
@@ -812,11 +1002,15 @@ impl super::StorageNetworkInner {
         // Get current Raft heartbeat data
         let raft_data = self.state.raft_heartbeat_data.read().await.clone();
 
-        // Create heartbeat message with Raft state
+        // Get current storage capacity data
+        let capacity_data = self.state.storage_capacity_data.read().await.clone();
+
+        // Create heartbeat message with Raft state and storage capacity
         let heartbeat = HeartbeatMessage::with_raft_state(
             self.state.node_id.clone(),
             sequence,
             self.state.config.admin_url.clone(),
+            self.state.config.storage_endpoint_url.clone(),
             raft_data.raft_state,
             raft_data.raft_term,
             raft_data.last_log_index,
@@ -824,6 +1018,9 @@ impl super::StorageNetworkInner {
             raft_data.current_leader,
             raft_data.is_voter,
             raft_data.startup_time,
+            capacity_data.total_bytes,
+            capacity_data.available_bytes,
+            capacity_data.chunk_count,
         );
 
         match heartbeat.to_bytes() {
@@ -1187,6 +1384,21 @@ impl super::StorageNetworkInner {
                 debug!(
                     "Updated Raft heartbeat data: state={:?}, term={:?}, last_log={:?}",
                     data.raft_state, data.raft_term, data.last_log_index
+                );
+                true
+            }
+            NetworkCommand::UpdateStorageCapacityData {
+                total_bytes,
+                available_bytes,
+                chunk_count,
+            } => {
+                let mut data = self.state.storage_capacity_data.write().await;
+                data.total_bytes = total_bytes;
+                data.available_bytes = available_bytes;
+                data.chunk_count = chunk_count;
+                debug!(
+                    "Updated storage capacity data: total={:?} bytes, available={:?} bytes, chunks={}",
+                    total_bytes, available_bytes, chunk_count.unwrap_or(0)
                 );
                 true
             }
