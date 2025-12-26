@@ -432,4 +432,94 @@ pub trait MetadataStore: Send + Sync + Clone {
     ///
     /// Returns an error if database operation fails.
     async fn register_node(&self, node_id: u64, address: &str) -> Result<(), Error>;
+
+    // ============================================================================
+    // Proposal History (for AdminUI Quorum tab troubleshooting)
+    // ============================================================================
+
+    /// Record a Raft proposal that was applied through the state machine.
+    ///
+    /// This method is idempotent - duplicate calls with the same log_index are ignored
+    /// due to the UNIQUE constraint on the log_index column.
+    ///
+    /// Called by the state machine's apply() method on all nodes (leaders and followers).
+    ///
+    /// # Arguments
+    ///
+    /// * `log_index` - Raft log index (unique per proposal)
+    /// * `log_term` - Raft term when committed
+    /// * `leader_node_id` - Node that was leader when proposed
+    /// * `operation_type` - Type of operation (e.g., "AtomicTransaction")
+    /// * `tx_id` - Transaction ID if applicable (hex string)
+    /// * `operation_count` - Number of sub-operations in the proposal
+    /// * `success` - Whether the operation succeeded
+    /// * `error_message` - Error message if failed
+    /// * `operation_details` - Full JSON operation details
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database operation fails (but NOT for duplicate log_index).
+    async fn record_applied_proposal(
+        &self,
+        log_index: u64,
+        log_term: u64,
+        leader_node_id: u64,
+        operation_type: &str,
+        tx_id: Option<&str>,
+        operation_count: usize,
+        success: bool,
+        error_message: Option<&str>,
+        operation_details: &str,
+    ) -> Result<(), Error>;
+
+    /// Get recent proposal history for AdminUI display.
+    ///
+    /// Returns proposals in reverse chronological order (newest first).
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - Maximum number of proposals to return
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database query fails.
+    async fn get_proposal_history(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<types::ProposalHistoryRecord>, Error>;
+
+    /// Get full details for a single proposal by log_index.
+    ///
+    /// Used for the click-through detail view in AdminUI.
+    ///
+    /// # Arguments
+    ///
+    /// * `log_index` - The Raft log index of the proposal
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database query fails.
+    /// Returns Ok(None) if no proposal found for the given log_index.
+    async fn get_proposal_details(
+        &self,
+        log_index: u64,
+    ) -> Result<Option<types::ProposalHistoryRecord>, Error>;
+
+    /// Cleanup old proposals beyond retention limit.
+    ///
+    /// Deletes proposals, keeping only the N most recent (by applied_at timestamp).
+    /// Should be called periodically to prevent unbounded growth.
+    ///
+    /// # Arguments
+    ///
+    /// * `keep_count` - Number of most recent proposals to retain
+    ///
+    /// # Returns
+    ///
+    /// The number of proposals deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database operation fails.
+    async fn cleanup_old_proposals(&self, keep_count: usize) -> Result<u64, Error>;
 }

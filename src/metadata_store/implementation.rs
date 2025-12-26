@@ -2,8 +2,8 @@
 
 use super::{
     cache::{CacheConfig, MetadataCache},
-    ChunkId, ChunkRecord, ChunkStatus, ClientId, Config, DiskId, Error, FileId, FileMetadata,
-    FileRecord, LockRecord, LockType, MetadataStore, NodeId, StripeId, StripeRecord,
+    types, ChunkId, ChunkRecord, ChunkStatus, ClientId, Config, DiskId, Error, FileId,
+    FileMetadata, FileRecord, LockRecord, LockType, MetadataStore, NodeId, StripeId, StripeRecord,
 };
 use async_trait::async_trait;
 use rusqlite::{params, OptionalExtension};
@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rusqlite::Connection;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 // Import MetricService for instrumentation
 use crate::metric_service::MetricService;
@@ -255,6 +255,7 @@ impl MetadataStoreImpl {
             include_str!("migrations/003_inode_management.sql").to_string(),
             include_str!("migrations/004_uuid_migration.sql").to_string(),
             include_str!("migrations/005_root_directory.sql").to_string(),
+            include_str!("migrations/006_proposal_history.sql").to_string(),
         ];
 
         self.inner
@@ -2167,5 +2168,193 @@ impl MetadataStore for MetadataStoreImpl {
             );
         }
         Ok(())
+    }
+
+    async fn record_applied_proposal(
+        &self,
+        log_index: u64,
+        log_term: u64,
+        leader_node_id: u64,
+        operation_type: &str,
+        tx_id: Option<&str>,
+        operation_count: usize,
+        success: bool,
+        error_message: Option<&str>,
+        operation_details: &str,
+    ) -> Result<(), Error> {
+        let operation_type = operation_type.to_string();
+        let tx_id = tx_id.map(|s| s.to_string());
+        let error_message = error_message.map(|s| s.to_string());
+        let operation_details = operation_details.to_string();
+
+        let applied_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.inner
+            .conn
+            .call(move |conn| {
+                // Use INSERT OR IGNORE for idempotency (log_index is UNIQUE)
+                conn.execute(
+                    "INSERT OR IGNORE INTO proposal_history (
+                        log_index, log_term, leader_node_id, applied_at,
+                        operation_type, tx_id, operation_count, success,
+                        error_message, operation_details
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        log_index as i64,
+                        log_term as i64,
+                        leader_node_id as i64,
+                        applied_at,
+                        operation_type,
+                        tx_id,
+                        operation_count as i64,
+                        if success { 1 } else { 0 },
+                        error_message,
+                        operation_details,
+                    ],
+                )
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+                Ok(())
+            })
+            .await
+            .map_err(|e| Error::QueryError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn get_proposal_history(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<types::ProposalHistoryRecord>, Error> {
+        self.inner
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, log_index, log_term, leader_node_id, applied_at,
+                                operation_type, tx_id, operation_count, success,
+                                error_message, operation_details
+                         FROM proposal_history
+                         ORDER BY applied_at DESC
+                         LIMIT ?1",
+                    )
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+                let proposals = stmt
+                    .query_map(params![limit as i64], |row| {
+                        let applied_at_secs: i64 = row.get(4)?;
+                        let applied_at = std::time::UNIX_EPOCH
+                            + std::time::Duration::from_secs(applied_at_secs as u64);
+
+                        Ok(types::ProposalHistoryRecord {
+                            id: row.get::<_, i64>(0)? as u64,
+                            log_index: row.get::<_, i64>(1)? as u64,
+                            log_term: row.get::<_, i64>(2)? as u64,
+                            leader_node_id: row.get::<_, i64>(3)? as u64,
+                            applied_at,
+                            operation_type: row.get(5)?,
+                            tx_id: row.get(6)?,
+                            operation_count: row.get::<_, i64>(7)? as usize,
+                            success: row.get::<_, i64>(8)? == 1,
+                            error_message: row.get(9)?,
+                            operation_details: row.get(10)?,
+                        })
+                    })
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+                Ok(proposals)
+            })
+            .await
+            .map_err(|e| Error::QueryError(e.to_string()))
+    }
+
+    async fn get_proposal_details(
+        &self,
+        log_index: u64,
+    ) -> Result<Option<types::ProposalHistoryRecord>, Error> {
+        self.inner
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, log_index, log_term, leader_node_id, applied_at,
+                                operation_type, tx_id, operation_count, success,
+                                error_message, operation_details
+                         FROM proposal_history
+                         WHERE log_index = ?1",
+                    )
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+                let mut rows = stmt
+                    .query_map(params![log_index as i64], |row| {
+                        let applied_at_secs: i64 = row.get(4)?;
+                        let applied_at = std::time::UNIX_EPOCH
+                            + std::time::Duration::from_secs(applied_at_secs as u64);
+
+                        Ok(types::ProposalHistoryRecord {
+                            id: row.get::<_, i64>(0)? as u64,
+                            log_index: row.get::<_, i64>(1)? as u64,
+                            log_term: row.get::<_, i64>(2)? as u64,
+                            leader_node_id: row.get::<_, i64>(3)? as u64,
+                            applied_at,
+                            operation_type: row.get(5)?,
+                            tx_id: row.get(6)?,
+                            operation_count: row.get::<_, i64>(7)? as usize,
+                            success: row.get::<_, i64>(8)? == 1,
+                            error_message: row.get(9)?,
+                            operation_details: row.get(10)?,
+                        })
+                    })
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+                match rows.next() {
+                    Some(result) => {
+                        Ok(Some(result.map_err(|e| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+                        })?))
+                    }
+                    None => Ok(None),
+                }
+            })
+            .await
+            .map_err(|e| Error::QueryError(e.to_string()))
+    }
+
+    async fn cleanup_old_proposals(&self, keep_count: usize) -> Result<u64, Error> {
+        let rows_deleted = self
+            .inner
+            .conn
+            .call(move |conn| {
+                // Delete all but the N most recent proposals (by applied_at)
+                let rows = conn
+                    .execute(
+                        "DELETE FROM proposal_history
+                         WHERE id NOT IN (
+                             SELECT id FROM proposal_history
+                             ORDER BY applied_at DESC
+                             LIMIT ?1
+                         )",
+                        params![keep_count as i64],
+                    )
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+                Ok(rows as u64)
+            })
+            .await
+            .map_err(|e| Error::QueryError(e.to_string()))?;
+
+        if rows_deleted > 0 {
+            debug!(
+                "[MetadataStore] Cleaned up {} old proposals (keeping {})",
+                rows_deleted, keep_count
+            );
+        }
+
+        Ok(rows_deleted)
     }
 }

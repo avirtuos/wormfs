@@ -396,3 +396,33 @@ pub enum DiskStatus {
     Degraded,
     Failed,
 }
+
+/// Proposal history record for AdminUI display.
+///
+/// Tracks Raft proposals applied through the state machine on this node.
+/// Stored in the `proposal_history` table for persistence and troubleshooting.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProposalHistoryRecord {
+    /// Database row ID
+    pub id: u64,
+    /// Raft log index (unique per proposal)
+    pub log_index: u64,
+    /// Raft term when committed
+    pub log_term: u64,
+    /// Node that was leader when proposed
+    pub leader_node_id: u64,
+    /// When this proposal was applied locally (Unix timestamp)
+    pub applied_at: std::time::SystemTime,
+    /// Operation type for display (e.g., "AtomicTransaction")
+    pub operation_type: String,
+    /// Transaction ID if applicable (hex string)
+    pub tx_id: Option<String>,
+    /// Number of sub-operations in the proposal
+    pub operation_count: usize,
+    /// Whether operation succeeded
+    pub success: bool,
+    /// Error message if failed
+    pub error_message: Option<String>,
+    /// Full JSON operation details (for click-through view)
+    pub operation_details: String,
+}

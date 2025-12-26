@@ -65,7 +65,7 @@ pub(crate) struct Subscription {
 /// Inner state for the Raft state machine.
 pub(crate) struct StateMachineInner {
     /// The metadata store where operations are applied
-    metadata_store: MetadataStoreImpl,
+    pub(crate) metadata_store: MetadataStoreImpl,
 
     /// Last applied log index for idempotency
     last_applied_index: u64,
@@ -1429,7 +1429,69 @@ impl RaftStateMachine<WormFsTypeConfig> for WormFsStateMachine {
             };
 
             // Apply the operation and generate appropriate response
-            match self.apply_operation(log_index, &operation).await {
+            let apply_result = self.apply_operation(log_index, &operation).await;
+
+            // Record proposal in history (for AdminUI tracking on all nodes)
+            {
+                let inner = self.inner.read().await;
+
+                // Serialize operation to JSON for details view
+                let operation_details = serde_json::to_string(&operation).unwrap_or_default();
+
+                // Extract operation metadata
+                let (operation_type, tx_id_str, operation_count) = match &operation {
+                    WormFsOperation::AtomicTransaction {
+                        tx_id, operations, ..
+                    } => (
+                        "AtomicTransaction",
+                        Some(tx_id.to_hex_short()),
+                        operations.len(),
+                    ),
+                    WormFsOperation::TransactionPrepare {
+                        tx_id,
+                        metadata_ops,
+                        command_ops,
+                        ..
+                    } => {
+                        let count = metadata_ops.as_ref().map(|v| v.len()).unwrap_or(0)
+                            + command_ops.as_ref().map(|v| v.len()).unwrap_or(0);
+                        ("TransactionPrepare", Some(tx_id.to_hex_short()), count)
+                    }
+                    WormFsOperation::TransactionCommit { tx_id } => {
+                        ("TransactionCommit", Some(tx_id.to_hex_short()), 1)
+                    }
+                    WormFsOperation::TransactionAbort { tx_id, .. } => {
+                        ("TransactionAbort", Some(tx_id.to_hex_short()), 1)
+                    }
+                };
+
+                // Record the proposal (fire-and-forget, don't block on errors)
+                let success = apply_result.is_ok();
+                let error_message = apply_result.as_ref().err().map(|e| e.as_str());
+
+                let _ = inner
+                    .metadata_store
+                    .record_applied_proposal(
+                        log_index,
+                        log_term,
+                        leader_id.0,
+                        operation_type,
+                        tx_id_str.as_deref(),
+                        operation_count,
+                        success,
+                        error_message,
+                        &operation_details,
+                    )
+                    .await;
+
+                // Cleanup old proposals periodically (every 100th entry)
+                if log_index % 100 == 0 {
+                    let _ = inner.metadata_store.cleanup_old_proposals(50).await;
+                }
+            }
+
+            // Generate response based on apply result
+            match apply_result {
                 Ok(()) => {
                     let mut inner = self.inner.write().await;
                     inner.last_applied_term = log_term;
