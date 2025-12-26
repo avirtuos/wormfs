@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace};
 
-use crate::metadata_store::MetadataStoreImpl;
+use crate::metadata_store::{MetadataStore, MetadataStoreImpl};
 use crate::transaction_log_store::{TransactionLogConfig, TransactionLogStoreImpl};
 
 use super::cluster_manager::{ClusterEvent, ClusterManager, ClusterManagerConfig};
@@ -126,6 +126,56 @@ impl StorageRaftMemberImpl {
     pub async fn get_proposal_history(&self) -> Vec<super::types::ProposalRecord> {
         let history = self.inner.proposal_history.read().await;
         history.iter().cloned().collect()
+    }
+
+    /// Get persisted proposal history from MetadataStore (for admin UI).
+    ///
+    /// This retrieves proposals that have been applied to the state machine
+    /// on this node, including proposals received as a follower. Proposals
+    /// are persisted to SQLite and survive restarts.
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - Maximum number of proposals to retrieve (newest first)
+    ///
+    /// # Returns
+    ///
+    /// Vector of proposal history records, or empty vector on error.
+    pub async fn get_persisted_proposal_history(
+        &self,
+        limit: usize,
+    ) -> Vec<crate::metadata_store::types::ProposalHistoryRecord> {
+        let inner = self.inner.state_machine_inner.read().await;
+        inner
+            .metadata_store
+            .get_proposal_history(limit)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Get detailed information for a specific proposal by log index.
+    ///
+    /// This retrieves the full operation details for a proposal, including
+    /// the JSON-serialized operation data for display in the UI.
+    ///
+    /// # Arguments
+    ///
+    /// * `log_index` - The Raft log index of the proposal to retrieve
+    ///
+    /// # Returns
+    ///
+    /// Some(record) if found, None otherwise (or on error).
+    pub async fn get_persisted_proposal_details(
+        &self,
+        log_index: u64,
+    ) -> Option<crate::metadata_store::types::ProposalHistoryRecord> {
+        let inner = self.inner.state_machine_inner.read().await;
+        inner
+            .metadata_store
+            .get_proposal_details(log_index)
+            .await
+            .ok()
+            .flatten()
     }
 }
 

@@ -455,6 +455,134 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         .table-container {
             overflow-x: auto;
         }
+
+        /* Clickable proposal rows */
+        .metrics-table tbody tr {
+            cursor: pointer;
+            transition: background-color 0.15s;
+        }
+
+        .metrics-table tbody tr:hover {
+            background: #f3f4f6 !important;
+        }
+
+        /* Modal styles */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            padding: 1rem;
+        }
+
+        .modal-content {
+            background: var(--card-bg);
+            border-radius: 0.5rem;
+            box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
+            max-width: 800px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+            padding: 2rem;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid var(--border);
+        }
+
+        .modal-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            transition: background-color 0.15s;
+        }
+
+        .modal-close:hover {
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .modal-body {
+            margin-bottom: 1.5rem;
+        }
+
+        .detail-row {
+            display: flex;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .detail-row:last-child {
+            border-bottom: none;
+        }
+
+        .detail-label {
+            font-weight: 600;
+            color: var(--text-secondary);
+            width: 150px;
+            flex-shrink: 0;
+        }
+
+        .detail-value {
+            color: var(--text);
+            flex: 1;
+            word-break: break-word;
+        }
+
+        .json-details {
+            background: #f9fafb;
+            border: 1px solid var(--border);
+            border-radius: 0.375rem;
+            padding: 1rem;
+            margin-top: 1rem;
+            font-family: 'Courier New', monospace;
+            font-size: 0.875rem;
+            overflow-x: auto;
+            white-space: pre;
+        }
+
+        .modal-footer {
+            display: flex;
+            justify-content: flex-end;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+        }
+
+        .modal-button {
+            padding: 0.5rem 1.5rem;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.15s;
+        }
+
+        .modal-button:hover {
+            background: var(--primary-dark);
+        }
     </style>
 </head>
 <body x-data="adminApp()">
@@ -893,29 +1021,38 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                             <table class="metrics-table">
                                 <thead>
                                     <tr>
-                                        <th>Timestamp</th>
+                                        <th>Log Index</th>
+                                        <th>Term</th>
+                                        <th>Leader</th>
+                                        <th>Applied At</th>
                                         <th>Operation</th>
-                                        <th>Transaction ID</th>
-                                        <th>Ops Count</th>
+                                        <th>Tx ID</th>
+                                        <th>Ops</th>
                                         <th>Result</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <template x-for="proposal in proposalHistory.slice().reverse()" :key="proposal.timestamp">
-                                        <tr>
-                                            <td x-text="new Date(proposal.timestamp).toLocaleTimeString()"></td>
+                                    <template x-for="proposal in proposalHistory.slice().reverse()" :key="proposal.log_index">
+                                        <tr @click="showProposalDetails(proposal.log_index)" title="Click for details">
+                                            <td x-text="proposal.log_index"></td>
+                                            <td x-text="proposal.log_term"></td>
+                                            <td>
+                                                <span style="font-family: 'Courier New', monospace;">Node </span>
+                                                <span x-text="proposal.leader_node_id" style="font-family: 'Courier New', monospace;"></span>
+                                            </td>
+                                            <td x-text="new Date(proposal.applied_at).toLocaleTimeString()"></td>
                                             <td x-text="proposal.operation_type"></td>
                                             <td>
                                                 <span x-show="proposal.tx_id" x-text="proposal.tx_id" style="font-family: 'Courier New', monospace; font-size: 0.875rem;"></span>
-                                                <span x-show="!proposal.tx_id" style="color: var(--text-secondary);">N/A</span>
+                                                <span x-show="!proposal.tx_id" style="color: var(--text-secondary);">-</span>
                                             </td>
                                             <td x-text="proposal.operation_count"></td>
                                             <td>
-                                                <template x-if="proposal.result === 'Success' || (typeof proposal.result === 'object' && !proposal.result.Error)">
-                                                    <span class="status-badge" style="background: var(--success);">Success</span>
+                                                <template x-if="proposal.success">
+                                                    <span class="status-badge" style="background: var(--success); padding: 0.25rem 0.5rem; font-size: 0.75rem;">OK</span>
                                                 </template>
-                                                <template x-if="typeof proposal.result === 'object' && proposal.result.Error">
-                                                    <span class="status-badge" style="background: var(--error);" :title="proposal.result.Error">Error</span>
+                                                <template x-if="!proposal.success">
+                                                    <span class="status-badge" style="background: var(--error); padding: 0.25rem 0.5rem; font-size: 0.75rem;" :title="proposal.error_message">Error</span>
                                                 </template>
                                             </td>
                                         </tr>
@@ -934,6 +1071,74 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     <p>🗳️ Raft cluster not configured</p>
                 </div>
             </template>
+        </div>
+    </div>
+
+    <!-- Proposal Details Modal -->
+    <div x-show="showingProposal"
+         class="modal-overlay"
+         @click.self="showingProposal = false"
+         x-cloak
+         style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">Proposal Details</h2>
+                <button class="modal-close" @click="showingProposal = false">&times;</button>
+            </div>
+            <div class="modal-body" x-show="selectedProposal">
+                <div class="detail-row">
+                    <div class="detail-label">Log Index:</div>
+                    <div class="detail-value" x-text="selectedProposal?.log_index"></div>
+                </div>
+                <div class="detail-row">
+                    <div class="detail-label">Log Term:</div>
+                    <div class="detail-value" x-text="selectedProposal?.log_term"></div>
+                </div>
+                <div class="detail-row">
+                    <div class="detail-label">Leader Node ID:</div>
+                    <div class="detail-value">
+                        <span style="font-family: 'Courier New', monospace;">Node </span>
+                        <span x-text="selectedProposal?.leader_node_id" style="font-family: 'Courier New', monospace;"></span>
+                    </div>
+                </div>
+                <div class="detail-row">
+                    <div class="detail-label">Applied At:</div>
+                    <div class="detail-value" x-text="selectedProposal && new Date(selectedProposal.applied_at).toLocaleString()"></div>
+                </div>
+                <div class="detail-row">
+                    <div class="detail-label">Operation Type:</div>
+                    <div class="detail-value" x-text="selectedProposal?.operation_type"></div>
+                </div>
+                <div class="detail-row" x-show="selectedProposal?.tx_id">
+                    <div class="detail-label">Transaction ID:</div>
+                    <div class="detail-value" style="font-family: 'Courier New', monospace;" x-text="selectedProposal?.tx_id"></div>
+                </div>
+                <div class="detail-row">
+                    <div class="detail-label">Operation Count:</div>
+                    <div class="detail-value" x-text="selectedProposal?.operation_count"></div>
+                </div>
+                <div class="detail-row">
+                    <div class="detail-label">Status:</div>
+                    <div class="detail-value">
+                        <template x-if="selectedProposal?.success">
+                            <span class="status-badge" style="background: var(--success); padding: 0.25rem 0.5rem; font-size: 0.875rem;">Success</span>
+                        </template>
+                        <template x-if="!selectedProposal?.success">
+                            <span class="status-badge" style="background: var(--error); padding: 0.25rem 0.5rem; font-size: 0.875rem;">Error</span>
+                        </template>
+                    </div>
+                </div>
+                <div class="detail-row" x-show="selectedProposal?.error_message">
+                    <div class="detail-label">Error Message:</div>
+                    <div class="detail-value" style="color: var(--error); font-family: 'Courier New', monospace;" x-text="selectedProposal?.error_message"></div>
+                </div>
+
+                <h3 style="margin-top: 1.5rem; margin-bottom: 0.5rem; font-weight: 600; color: var(--text);">Operation Details (JSON):</h3>
+                <div class="json-details" x-text="formatOperationDetails(selectedProposal?.operation_details)"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-button" @click="showingProposal = false">Close</button>
+            </div>
         </div>
     </div>
 
@@ -967,6 +1172,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 rateUpdateInterval: null,
                 graphInitialized: false,
                 componentRefreshInterval: null,
+
+                // Proposal details modal
+                showingProposal: false,
+                selectedProposal: null,
 
                 init() {
                     this.connectWebSocket();
@@ -1147,6 +1356,30 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     setInterval(() => {
                         this.fetchProposals();
                     }, 3000);  // 3 seconds
+                },
+
+                async showProposalDetails(logIndex) {
+                    try {
+                        const response = await fetch(`/api/raft/proposals/${logIndex}`);
+                        if (response.ok) {
+                            this.selectedProposal = await response.json();
+                            this.showingProposal = true;
+                        } else {
+                            console.error('Failed to fetch proposal details:', response.statusText);
+                        }
+                    } catch (e) {
+                        console.error('Error fetching proposal details:', e);
+                    }
+                },
+
+                formatOperationDetails(details) {
+                    if (!details) return '';
+                    try {
+                        const parsed = JSON.parse(details);
+                        return JSON.stringify(parsed, null, 2);
+                    } catch (e) {
+                        return details;  // Return as-is if not valid JSON
+                    }
                 },
 
                 startComponentRefresh() {
