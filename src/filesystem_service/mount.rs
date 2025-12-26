@@ -476,11 +476,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         Arc::new(ChunkClientPool::new(tracker.clone(), chunk_client_config));
 
     // Configure distributed operations
-    file_store.set_distributed_config(
-        my_node_id,
-        placement_engine,
-        chunk_client,
-    );
+    file_store.set_distributed_config(my_node_id, placement_engine, chunk_client);
 
     let file_store = Arc::new(file_store);
 
@@ -782,6 +778,7 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
             metadata_store,
             file_store,
             metrics,
+            raft_member.clone(), // Pass Raft member for real consensus
         )
         .await?,
     );

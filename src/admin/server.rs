@@ -7,7 +7,7 @@ use super::{
     handlers::{
         component_metrics_handler, components_handler, config_handler, health_handler,
         logs_handler, metrics_handler, network_status_handler, peers_handler, raft_metrics_handler,
-        raft_status_handler, status_handler,
+        raft_proposals_handler, raft_status_handler, status_handler,
     },
     types::{Config, Error},
     ui::templates::INDEX_HTML,
@@ -154,6 +154,7 @@ impl AdminServer {
             Router::new()
                 .route("/api/raft/metrics", get(raft_metrics_handler))
                 .route("/api/raft/status", get(raft_status_handler))
+                .route("/api/raft/proposals", get(raft_proposals_handler))
                 .with_state(raft)
         } else {
             Router::new()

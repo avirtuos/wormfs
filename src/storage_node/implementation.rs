@@ -216,11 +216,7 @@ impl StorageNodeImpl {
             Arc::new(ChunkClientPool::new(tracker, chunk_client_config));
 
         // Configure distributed operations
-        file_store.set_distributed_config(
-            my_node_id,
-            placement_engine,
-            chunk_client,
-        );
+        file_store.set_distributed_config(my_node_id, placement_engine, chunk_client);
 
         let file_store = Arc::new(file_store);
 
@@ -239,6 +235,7 @@ impl StorageNodeImpl {
             filesystem_config,
             metadata_store.clone(),
             file_store.clone(),
+            None, // No RaftClient for storage node (uses stub)
         );
 
         info!("FileSystemService initialized successfully");

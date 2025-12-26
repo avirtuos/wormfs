@@ -688,7 +688,7 @@ impl WormFsStateMachine {
                 policy: _,
                 offset,
                 size,
-                chunks: _,
+                chunks,
             } => {
                 // Create a stripe record
                 let stripe = crate::metadata_store::StripeRecord {
@@ -708,7 +708,39 @@ impl WormFsStateMachine {
                     .allocate_stripes(*file_id, vec![stripe])
                     .await
                     .map_err(|e| format!("Failed to create stripe: {:?}", e))?;
-                info!("Created stripe {:?} for file {:?}", stripe_id, file_id);
+
+                // Create chunk records using placement information
+                if !chunks.is_empty() {
+                    let chunk_records: Vec<crate::metadata_store::ChunkRecord> = chunks
+                        .iter()
+                        .map(|cp| crate::metadata_store::ChunkRecord {
+                            chunk_id: cp.chunk_id,
+                            stripe_id: *stripe_id,
+                            chunk_index: cp.chunk_index as u8,
+                            // Convert Raft NodeId to FileStore NodeId
+                            node_id: crate::file_store::types::NodeId(cp.node_id.as_u64()),
+                            disk_id: cp.disk_id,
+                            checksum: 0,
+                            status: crate::metadata_store::ChunkStatus::Healthy,
+                            created_at: std::time::SystemTime::now(),
+                            last_verified: None,
+                        })
+                        .collect();
+
+                    metadata_store
+                        .allocate_chunks(*stripe_id, chunk_records)
+                        .await
+                        .map_err(|e| format!("Failed to allocate chunks: {:?}", e))?;
+
+                    info!(
+                        "Created stripe {:?} for file {:?} with {} chunks",
+                        stripe_id,
+                        file_id,
+                        chunks.len()
+                    );
+                } else {
+                    info!("Created stripe {:?} for file {:?}", stripe_id, file_id);
+                }
             }
 
             MetadataOperation::DeleteStripe { stripe_id, file_id } => {

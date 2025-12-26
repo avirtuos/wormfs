@@ -107,6 +107,68 @@ pub trait RaftClient: Send + Sync {
     ///
     /// All operations succeed or fail together (single Raft log entry).
     async fn propose_stripe_batch(&self, operations: Vec<StripeOperation>) -> Result<(), Error>;
+
+    /// Propose a generic Raft command (file operations, etc.).
+    ///
+    /// This method handles file metadata operations that need Raft consensus.
+    async fn propose_raft_command(
+        &self,
+        command: crate::filesystem_service::raft_commands::RaftCommand,
+    ) -> Result<crate::filesystem_service::raft_commands::RaftCommandResult, Error>;
+
+    /// Acquire a distributed lock on a file.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - FileId of the file to lock
+    /// * `inode` - Inode of the file (for stub compatibility)
+    /// * `lock_type` - Type of lock (Read or Write)
+    /// * `client_id` - Unique client identifier
+    /// * `node_id` - Node ID where the lock is being acquired
+    /// * `expires_at` - Lock expiration time
+    ///
+    /// # Returns
+    ///
+    /// The lock ID if successful
+    async fn acquire_lock(
+        &self,
+        file_id: crate::file_store::FileId,
+        inode: u64,
+        lock_type: crate::filesystem_service::raft_commands::LockType,
+        client_id: u64,
+        node_id: u64,
+        expires_at: std::time::SystemTime,
+    ) -> Result<u64, Error>;
+
+    /// Release a distributed lock on a file.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - FileId of the locked file
+    /// * `inode` - Inode of the locked file (for stub compatibility)
+    /// * `client_id` - Client that holds the lock
+    async fn release_lock(
+        &self,
+        file_id: crate::file_store::FileId,
+        inode: u64,
+        client_id: u64,
+    ) -> Result<(), Error>;
+
+    /// Extend the expiration time of a distributed lock.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - FileId of the locked file
+    /// * `inode` - Inode of the locked file (for stub compatibility)
+    /// * `client_id` - Client that holds the lock
+    /// * `new_expiry` - New expiration time
+    async fn extend_lock(
+        &self,
+        file_id: crate::file_store::FileId,
+        inode: u64,
+        client_id: u64,
+        new_expiry: std::time::SystemTime,
+    ) -> Result<(), Error>;
 }
 
 /// Operations on stripe metadata that can be batched.

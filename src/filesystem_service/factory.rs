@@ -7,8 +7,12 @@
 use super::implementation::FileSystemServiceImpl;
 use super::{Config, Error};
 use crate::file_store::FileStoreImpl;
+use crate::filesystem_service::buffered_file_handle::RaftClient;
+use crate::filesystem_service::raft_client_adapter::RaftClientAdapter;
+use crate::filesystem_service::raft_commands::{RaftClientImpl, StorageRaftMemberStub};
 use crate::metadata_store::MetadataStoreImpl;
 use crate::metric_service::{MetricService, MetricServiceImpl};
+use crate::storage_raft_member::StorageRaftMemberImpl;
 use std::sync::Arc;
 
 /// Concrete factory for creating FileSystemServiceImpl instances.
@@ -40,6 +44,7 @@ impl FileSystemServiceImplFactory {
     /// * `metadata_store` - MetadataStore instance for metadata operations
     /// * `file_store` - FileStore instance for chunk I/O operations
     /// * `metrics` - Optional MetricService for telemetry collection
+    /// * `raft_member` - Optional StorageRaftMemberImpl for real Raft consensus (Phase 2+)
     ///
     /// # Returns
     ///
@@ -62,6 +67,7 @@ impl FileSystemServiceImplFactory {
     ///     metadata_store,
     ///     file_store,
     ///     Some(metrics),
+    ///     None, // No raft_member (uses stub)
     /// )?;
     /// ```
     pub async fn create(
@@ -69,11 +75,26 @@ impl FileSystemServiceImplFactory {
         metadata_store: MetadataStoreImpl,
         file_store: Arc<FileStoreImpl>,
         metrics: Option<Arc<MetricServiceImpl>>,
+        raft_member: Option<Arc<StorageRaftMemberImpl>>,
     ) -> Result<FileSystemServiceImpl, Error> {
+        // Create RaftClient based on whether we have a real Raft member
+        let stub = Arc::new(StorageRaftMemberStub::new(metadata_store.clone()));
+        let raft_client: Arc<dyn RaftClient + Send + Sync> = if let Some(rm) = raft_member {
+            // Phase 2+: Use real Raft consensus for stripes/locks, stub for file ops
+            Arc::new(RaftClientAdapter::new(rm, stub))
+        } else {
+            // Phase 1: Use stub only (no actual consensus, immediate success)
+            Arc::new(RaftClientImpl::new(stub))
+        };
+
         // Create the service instance
         // Note: new() is pub(crate) so only callable from within filesystem_service module
-        // The Raft stub is created internally with metadata_store
-        let mut service = FileSystemServiceImpl::new(config, metadata_store, file_store.clone());
+        let mut service = FileSystemServiceImpl::new(
+            config,
+            metadata_store,
+            file_store.clone(),
+            Some(raft_client),
+        );
 
         // Inject metrics if provided
         if let Some(metrics_arc) = metrics {

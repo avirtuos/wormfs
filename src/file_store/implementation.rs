@@ -171,7 +171,6 @@ impl FileStoreImpl {
 
         Ok(())
     }
-
 }
 
 impl FileStoreImpl {

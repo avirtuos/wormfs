@@ -885,6 +885,48 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                             <p>🗳️ Single-node cluster (no other members)</p>
                         </div>
                     </div>
+
+                    <!-- Recent Proposals Section -->
+                    <div class="metrics-section">
+                        <h2 class="section-title">Recent Proposals</h2>
+                        <div class="table-container" x-show="proposalHistory && proposalHistory.length > 0">
+                            <table class="metrics-table">
+                                <thead>
+                                    <tr>
+                                        <th>Timestamp</th>
+                                        <th>Operation</th>
+                                        <th>Transaction ID</th>
+                                        <th>Ops Count</th>
+                                        <th>Result</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="proposal in proposalHistory.slice().reverse()" :key="proposal.timestamp">
+                                        <tr>
+                                            <td x-text="new Date(proposal.timestamp).toLocaleTimeString()"></td>
+                                            <td x-text="proposal.operation_type"></td>
+                                            <td>
+                                                <span x-show="proposal.tx_id" x-text="proposal.tx_id" style="font-family: 'Courier New', monospace; font-size: 0.875rem;"></span>
+                                                <span x-show="!proposal.tx_id" style="color: var(--text-secondary);">N/A</span>
+                                            </td>
+                                            <td x-text="proposal.operation_count"></td>
+                                            <td>
+                                                <template x-if="proposal.result === 'Success' || (typeof proposal.result === 'object' && !proposal.result.Error)">
+                                                    <span class="status-badge" style="background: var(--success);">Success</span>
+                                                </template>
+                                                <template x-if="typeof proposal.result === 'object' && proposal.result.Error">
+                                                    <span class="status-badge" style="background: var(--error);" :title="proposal.result.Error">Error</span>
+                                                </template>
+                                            </td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="placeholder" x-show="!proposalHistory || proposalHistory.length === 0">
+                            <p>📋 No proposals yet</p>
+                        </div>
+                    </div>
                 </div>
             </template>
             <template x-if="!raftMetrics">
@@ -909,6 +951,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                 config: {},  // System configuration
                 networkStatus: null,  // Network status
                 raftMetrics: null,  // Raft cluster status
+                proposalHistory: [],  // Last 5 Raft proposals
                 wsConnected: false,
                 ws: null,
                 components: {},  // Component-based metric discovery
@@ -932,11 +975,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     this.fetchConfig();  // Fetch configuration
                     this.fetchNetworkStatus();  // Fetch network status
                     this.fetchRaftMetrics();  // Fetch Raft cluster status
+                    this.fetchProposals();  // Fetch Raft proposal history
                     this.initGraph();  // Initialize Plotly graph
                     this.startByteRateTracking();  // Start byte rate updates every second
                     this.startComponentRefresh();  // Discover new metrics every 30 seconds
                     this.startNetworkStatusRefresh();  // Refresh network status every 5 seconds
                     this.startRaftMetricsRefresh();  // Refresh Raft metrics every 3 seconds
+                    this.startProposalsRefresh();  // Refresh proposal history every 3 seconds
                 },
 
                 connectWebSocket() {
@@ -1077,6 +1122,30 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
                     // Refresh Raft metrics every 3 seconds
                     setInterval(() => {
                         this.fetchRaftMetrics();
+                    }, 3000);  // 3 seconds
+                },
+
+                async fetchProposals() {
+                    try {
+                        const response = await fetch('/api/raft/proposals');
+                        if (response.ok) {
+                            const data = await response.json();
+                            this.proposalHistory = data || [];
+                        } else if (response.status === 404) {
+                            // Raft endpoint not available (not configured)
+                            this.proposalHistory = [];
+                        }
+                    } catch (e) {
+                        // Silently handle - Raft may not be configured
+                        console.log('Raft proposals not available:', e.message);
+                        this.proposalHistory = [];
+                    }
+                },
+
+                startProposalsRefresh() {
+                    // Refresh proposal history every 3 seconds
+                    setInterval(() => {
+                        this.fetchProposals();
                     }, 3000);  // 3 seconds
                 },
 
