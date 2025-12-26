@@ -297,6 +297,7 @@ mod tests {
             last_seen: 0,
             sequence: 0,
             admin_url: None,
+            storage_endpoint_url: None,
             raft_state: None,
             raft_term: None,
             last_log_index: None,

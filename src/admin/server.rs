@@ -222,6 +222,7 @@ mod tests {
             admin_config: Some(admin_config.clone()),
             network_config: None,
             raft_config: None,
+            storage_endpoint_config: None,
             mount_point: std::path::PathBuf::from("/tmp/test"),
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });
@@ -257,6 +258,7 @@ mod tests {
             admin_config: Some(admin_config.clone()),
             network_config: None,
             raft_config: None,
+            storage_endpoint_config: None,
             mount_point: std::path::PathBuf::from("/tmp/test"),
             mount_options: crate::filesystem_service::mount::MountOptions::default(),
         });
