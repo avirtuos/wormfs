@@ -77,6 +77,9 @@ pub struct Inner {
 
     /// Timestamp when this node started up (milliseconds since Unix epoch)
     pub startup_time: u64,
+
+    /// History of recent proposals (last 5 proposals) for admin UI
+    proposal_history: Arc<RwLock<std::collections::VecDeque<super::types::ProposalRecord>>>,
 }
 
 /// State of an in-flight transaction during two-phase commit.
@@ -109,6 +112,21 @@ struct TransactionState {
 pub struct StorageRaftMemberImpl {
     /// Inner state wrapped in Arc for interior mutability
     inner: Arc<Inner>,
+}
+
+impl StorageRaftMemberImpl {
+    /// Get this node's ID.
+    pub fn node_id(&self) -> NodeId {
+        self.inner.node_id
+    }
+
+    /// Get the last N proposals submitted through Raft (for admin UI).
+    ///
+    /// Returns proposals in chronological order (oldest first).
+    pub async fn get_proposal_history(&self) -> Vec<super::types::ProposalRecord> {
+        let history = self.inner.proposal_history.read().await;
+        history.iter().cloned().collect()
+    }
 }
 
 impl Clone for StorageRaftMemberImpl {
@@ -163,6 +181,7 @@ impl StorageRaftMemberImpl {
                 heartbeat_sent,
                 heartbeat_acked,
                 startup_time,
+                proposal_history: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             }),
         }
     }
@@ -807,40 +826,101 @@ impl StorageRaftMember for StorageRaftMemberImpl {
             self.inner.node_id
         );
 
+        // Extract operation details for tracking before moving into client_write
+        let (operation_type, tx_id, operation_count) = match &operation {
+            WormFsOperation::AtomicTransaction {
+                tx_id, operations, ..
+            } => (
+                "AtomicTransaction".to_string(),
+                Some(tx_id.to_hex_short()),
+                operations.len(),
+            ),
+            WormFsOperation::TransactionPrepare {
+                tx_id,
+                metadata_ops,
+                command_ops,
+                ..
+            } => {
+                let count = metadata_ops.as_ref().map(|v| v.len()).unwrap_or(0)
+                    + command_ops.as_ref().map(|v| v.len()).unwrap_or(0);
+                (
+                    "TransactionPrepare".to_string(),
+                    Some(tx_id.to_hex_short()),
+                    count,
+                )
+            }
+            WormFsOperation::TransactionCommit { tx_id } => (
+                "TransactionCommit".to_string(),
+                Some(tx_id.to_hex_short()),
+                1,
+            ),
+            WormFsOperation::TransactionAbort { tx_id, .. } => (
+                "TransactionAbort".to_string(),
+                Some(tx_id.to_hex_short()),
+                1,
+            ),
+        };
+
+        let timestamp = std::time::SystemTime::now();
+
         // Submit the operation to Raft for replication and consensus
-        let response = self.inner.raft.client_write(operation).await.map_err(|e| {
-            debug!(
-                "[propose_operation] Node {:?}: client_write() returned error: {:?}",
-                self.inner.node_id, e
-            );
-            // Convert OpenRaft errors to our Error type
-            match e {
-                openraft::error::RaftError::APIError(api_err) => {
-                    use openraft::error::ClientWriteError;
-                    match api_err {
-                        ClientWriteError::ForwardToLeader(forward) => Error::NotLeader {
-                            leader: forward.leader_id,
-                        },
-                        ClientWriteError::ChangeMembershipError(err) => {
-                            Error::MembershipChangeFailed(format!("{:?}", err))
-                        }
+        let result = self.inner.raft.client_write(operation).await;
+
+        // Track the proposal result
+        let proposal_result = match &result {
+            Ok(response) => {
+                debug!(
+                    "[propose_operation] Node {:?}: client_write() returned successfully! log_id={:?}",
+                    self.inner.node_id, response.log_id
+                );
+                info!(
+                    "Operation committed at log_id: {:?} for node {:?}",
+                    response.log_id, self.inner.node_id
+                );
+                super::types::ProposalResult::Success
+            }
+            Err(e) => {
+                debug!(
+                    "[propose_operation] Node {:?}: client_write() returned error: {:?}",
+                    self.inner.node_id, e
+                );
+                super::types::ProposalResult::Error(format!("{:?}", e))
+            }
+        };
+
+        // Record the proposal in history
+        {
+            let mut history = self.inner.proposal_history.write().await;
+            history.push_back(super::types::ProposalRecord {
+                timestamp,
+                operation_type,
+                tx_id,
+                operation_count,
+                result: proposal_result,
+            });
+            // Keep only last 5 proposals
+            while history.len() > 5 {
+                history.pop_front();
+            }
+        }
+
+        // Convert OpenRaft errors to our Error type
+        let response = result.map_err(|e| match e {
+            openraft::error::RaftError::APIError(api_err) => {
+                use openraft::error::ClientWriteError;
+                match api_err {
+                    ClientWriteError::ForwardToLeader(forward) => Error::NotLeader {
+                        leader: forward.leader_id,
+                    },
+                    ClientWriteError::ChangeMembershipError(err) => {
+                        Error::MembershipChangeFailed(format!("{:?}", err))
                     }
                 }
-                openraft::error::RaftError::Fatal(fatal) => {
-                    Error::RaftError(format!("Fatal Raft error: {:?}", fatal))
-                }
+            }
+            openraft::error::RaftError::Fatal(fatal) => {
+                Error::RaftError(format!("Fatal Raft error: {:?}", fatal))
             }
         })?;
-
-        debug!(
-            "[propose_operation] Node {:?}: client_write() returned successfully! log_id={:?}",
-            self.inner.node_id, response.log_id
-        );
-
-        info!(
-            "Operation committed at log_id: {:?} for node {:?}",
-            response.log_id, self.inner.node_id
-        );
 
         // The operation has been committed through Raft consensus and applied to the state machine
         // For now, we just return success. In the future, we could return more detailed information
