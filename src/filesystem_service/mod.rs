@@ -99,6 +99,7 @@ pub mod implementation;
 pub mod inode;
 pub mod mount;
 pub mod permissions;
+pub mod raft_client_adapter;
 pub mod raft_commands;
 pub mod raft_integration;
 pub mod types;

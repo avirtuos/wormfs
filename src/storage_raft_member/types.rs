@@ -495,6 +495,18 @@ pub enum WormFsOperation {
     },
 }
 
+/// Chunk placement information including location metadata.
+///
+/// This struct contains full chunk placement details needed to replicate
+/// chunk metadata across the cluster via Raft consensus.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChunkPlacement {
+    pub chunk_id: ChunkId,
+    pub node_id: NodeId,
+    pub disk_id: DiskId,
+    pub chunk_index: u32,
+}
+
 /// Metadata operations that can be proposed through Raft.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum MetadataOperation {
@@ -523,7 +535,7 @@ pub enum MetadataOperation {
         policy: StoragePolicy,
         offset: u64,
         size: u64,
-        chunks: Vec<ChunkId>,
+        chunks: Vec<ChunkPlacement>,
     },
     /// Delete a stripe
     DeleteStripe {
@@ -712,20 +724,33 @@ pub struct FileMetadata {
     pub modified: SystemTime,
     /// File permissions (Unix-style)
     pub mode: u32,
+    /// File owner user ID
+    pub uid: u32,
+    /// File owner group ID
+    pub gid: u32,
+    /// File type: 0=Regular, 1=Directory, 2=Symlink
+    pub file_type: u8,
+    /// Symlink target (only for symlinks)
+    pub target: Option<String>,
 }
 
 impl From<FileMetadata> for crate::metadata_store::FileMetadata {
     fn from(fm: FileMetadata) -> Self {
+        let file_type = match fm.file_type {
+            1 => crate::metadata_store::FileType::Directory,
+            2 => crate::metadata_store::FileType::Symlink,
+            _ => crate::metadata_store::FileType::RegularFile,
+        };
         crate::metadata_store::FileMetadata {
-            file_type: crate::metadata_store::FileType::RegularFile,
+            file_type,
             size: fm.size,
             permissions: fm.mode,
-            uid: 0, // Default values
-            gid: 0,
+            uid: fm.uid,
+            gid: fm.gid,
             created_at: fm.created,
             modified_at: fm.modified,
             accessed_at: fm.modified,
-            target: None,
+            target: fm.target,
         }
     }
 }
@@ -739,4 +764,35 @@ pub struct StoragePolicy {
     pub parity_chunks: u32,
     /// Replication factor
     pub replication_factor: u32,
+}
+
+// ============================================================================
+// Proposal History Types (for Admin UI)
+// ============================================================================
+
+/// Result of a Raft proposal operation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum ProposalResult {
+    /// Proposal succeeded and was committed to the cluster
+    Success,
+    /// Proposal failed with an error message
+    Error(String),
+}
+
+/// Record of a Raft proposal for admin UI history display.
+///
+/// Tracks proposals made through Raft consensus for monitoring and debugging.
+/// Used by the admin UI Quorum tab to show recent proposal activity.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProposalRecord {
+    /// Timestamp when the proposal was made
+    pub timestamp: SystemTime,
+    /// Human-readable operation type (e.g., "AtomicTransaction", "FileCreate")
+    pub operation_type: String,
+    /// Transaction ID if applicable
+    pub tx_id: Option<String>,
+    /// Number of operations in the proposal (for batch operations)
+    pub operation_count: usize,
+    /// Result: success or error message
+    pub result: ProposalResult,
 }

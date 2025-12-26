@@ -12,4 +12,4 @@ pub use health::status_handler;
 pub use logs::{logs_handler, LogBuffer, LogEntry};
 pub use metrics::{component_metrics_handler, components_handler, health_handler, metrics_handler};
 pub use network::{network_status_handler, peers_handler};
-pub use raft::{raft_metrics_handler, raft_status_handler};
+pub use raft::{raft_metrics_handler, raft_proposals_handler, raft_status_handler};

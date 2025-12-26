@@ -147,6 +147,53 @@ pub async fn raft_status_handler(
     (StatusCode::OK, Json(response))
 }
 
+/// Handler for `/api/raft/proposals` endpoint.
+///
+/// Returns the last 5 proposals submitted through Raft consensus.
+/// Used by the admin UI Quorum tab to display recent proposal activity.
+///
+/// # Returns
+///
+/// JSON response with proposal history:
+/// - Array of proposal records containing:
+///   - `timestamp`: When the proposal was submitted
+///   - `operation_type`: Type of operation (e.g., "AtomicTransaction")
+///   - `tx_id`: Transaction ID (if applicable)
+///   - `operation_count`: Number of operations in the proposal
+///   - `result`: Success or error message
+pub async fn raft_proposals_handler(
+    State(raft_member): State<Arc<StorageRaftMemberImpl>>,
+) -> impl IntoResponse {
+    // Get proposal history from Raft member
+    let proposals = raft_member.get_proposal_history().await;
+
+    // Convert SystemTime to RFC3339 strings for JSON serialization
+    let proposals_json: Vec<serde_json::Value> = proposals
+        .iter()
+        .map(|p| {
+            let timestamp_str = p
+                .timestamp
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|d| {
+                    chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+                })
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            json!({
+                "timestamp": timestamp_str,
+                "operation_type": p.operation_type,
+                "tx_id": p.tx_id,
+                "operation_count": p.operation_count,
+                "result": p.result,
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(proposals_json))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

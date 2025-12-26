@@ -304,15 +304,33 @@ impl Operation {
                 offset,
                 size,
                 chunks,
-            } => MetadataOperation::CreateStripe {
-                file_id,
-                stripe_id,
-                stripe_index,
-                policy,
-                offset,
-                size,
-                chunks,
-            },
+            } => {
+                // Convert Vec<ChunkId> to Vec<ChunkPlacement>
+                // Note: transaction_manager doesn't have placement info, so use placeholders
+                let chunk_placements: Vec<crate::storage_raft_member::types::ChunkPlacement> =
+                    chunks
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, chunk_id)| {
+                            crate::storage_raft_member::types::ChunkPlacement {
+                                chunk_id: *chunk_id,
+                                node_id: crate::storage_raft_member::types::NodeId(0), // Placeholder
+                                disk_id: crate::file_store::types::DiskId(0), // Placeholder
+                                chunk_index: idx as u32,
+                            }
+                        })
+                        .collect();
+
+                MetadataOperation::CreateStripe {
+                    file_id,
+                    stripe_id,
+                    stripe_index,
+                    policy,
+                    offset,
+                    size,
+                    chunks: chunk_placements,
+                }
+            }
             Operation::DeleteStripe { stripe_id, file_id } => {
                 MetadataOperation::DeleteStripe { stripe_id, file_id }
             }

@@ -194,6 +194,14 @@ impl StorageRaftMemberStub {
         Self { metadata_store }
     }
 
+    /// Get a reference to the metadata store for direct access.
+    ///
+    /// This is used by RaftClientAdapter to look up files when converting
+    /// RaftCommands to MetadataOperations.
+    pub fn metadata_store(&self) -> &MetadataStoreImpl {
+        &self.metadata_store
+    }
+
     /// Propose a metadata operation (stub - persists to metadata store)
     pub async fn propose_operation(
         &self,
@@ -1039,6 +1047,84 @@ impl crate::filesystem_service::buffered_file_handle::RaftClient for RaftClientI
         self.stub
             .propose_stripe_batch(operations)
             .await
+            .map_err(|e| crate::filesystem_service::types::Error::Internal(format!("{}", e)))
+    }
+
+    async fn propose_raft_command(
+        &self,
+        command: RaftCommand,
+    ) -> Result<RaftCommandResult, crate::filesystem_service::types::Error> {
+        self.stub
+            .propose_operation(command)
+            .await
+            .map_err(|e| crate::filesystem_service::types::Error::Internal(format!("{}", e)))
+    }
+
+    async fn acquire_lock(
+        &self,
+        _file_id: crate::file_store::FileId,
+        inode: u64,
+        lock_type: LockType,
+        client_id: u64,
+        node_id: u64,
+        expires_at: std::time::SystemTime,
+    ) -> Result<u64, crate::filesystem_service::types::Error> {
+        // Stub uses inode, not file_id
+        let command = RaftCommand::AcquireLock {
+            inode,
+            lock_type,
+            client_id,
+            node_id,
+            expires_at,
+        };
+
+        match self.stub.propose_operation(command).await {
+            Ok(RaftCommandResult::LockAcquired { lock_id }) => Ok(lock_id),
+            Ok(other) => Err(crate::filesystem_service::types::Error::Internal(format!(
+                "Unexpected result from acquire_lock: {:?}",
+                other
+            ))),
+            Err(e) => Err(crate::filesystem_service::types::Error::Internal(format!(
+                "{}",
+                e
+            ))),
+        }
+    }
+
+    async fn release_lock(
+        &self,
+        _file_id: crate::file_store::FileId,
+        inode: u64,
+        client_id: u64,
+    ) -> Result<(), crate::filesystem_service::types::Error> {
+        // Stub uses inode, not file_id
+        let command = RaftCommand::ReleaseLock { inode, client_id };
+
+        self.stub
+            .propose_operation(command)
+            .await
+            .map(|_| ())
+            .map_err(|e| crate::filesystem_service::types::Error::Internal(format!("{}", e)))
+    }
+
+    async fn extend_lock(
+        &self,
+        _file_id: crate::file_store::FileId,
+        inode: u64,
+        client_id: u64,
+        new_expiry: std::time::SystemTime,
+    ) -> Result<(), crate::filesystem_service::types::Error> {
+        // Stub uses inode, not file_id
+        let command = RaftCommand::ExtendLock {
+            inode,
+            client_id,
+            new_expiry,
+        };
+
+        self.stub
+            .propose_operation(command)
+            .await
+            .map(|_| ())
             .map_err(|e| crate::filesystem_service::types::Error::Internal(format!("{}", e)))
     }
 }

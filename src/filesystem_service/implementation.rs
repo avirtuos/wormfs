@@ -438,8 +438,8 @@ pub struct FileSystemServiceImpl {
     /// FileStore for chunk data (Phase 1: minimal use)
     file_store: Arc<FileStoreImpl>,
 
-    /// Raft stub for metadata writes (Phase 1)
-    raft_stub: Arc<StorageRaftMemberStub>,
+    /// RaftClient for metadata writes (Phase 1: stub, Phase 2+: real Raft)
+    raft_client: Arc<dyn crate::filesystem_service::buffered_file_handle::RaftClient + Send + Sync>,
 
     /// Inode management (allocation and caching)
     inode_manager: Arc<InodeManager>,
@@ -928,9 +928,8 @@ impl FileSystemServiceImpl {
         let max_stripe_size =
             (storage_policy.chunk_size * storage_policy.data_shards as u64) as usize;
 
-        // Create Raft client wrapper
-        let raft_client: Arc<dyn crate::filesystem_service::buffered_file_handle::RaftClient> =
-            Arc::new(RaftClientImpl::new(Arc::clone(&self.raft_stub)));
+        // Use the existing Raft client
+        let raft_client = Arc::clone(&self.raft_client);
 
         // Configure buffered handle - use config from filesystem config but override max_stripe_size
         let config = BufferedFileHandleConfig {
@@ -974,17 +973,27 @@ impl FileSystemServiceImpl {
         config: Config,
         metadata_store: MetadataStoreImpl,
         file_store: Arc<FileStoreImpl>,
+        raft_client: Option<
+            Arc<dyn crate::filesystem_service::buffered_file_handle::RaftClient + Send + Sync>,
+        >,
     ) -> Self {
         let inode_manager = Arc::new(InodeManager::new(
             config.inode_cache_size,
             config.inode_cache_ttl,
         ));
 
-        let raft_stub = Arc::new(StorageRaftMemberStub::new(metadata_store.clone()));
+        // Use provided RaftClient or fallback to stub for backward compatibility
+        let raft_client = raft_client.unwrap_or_else(|| {
+            let stub = Arc::new(StorageRaftMemberStub::new(metadata_store.clone()));
+            Arc::new(crate::filesystem_service::raft_commands::RaftClientImpl::new(stub))
+                as Arc<
+                    dyn crate::filesystem_service::buffered_file_handle::RaftClient + Send + Sync,
+                >
+        });
 
         Self {
             config,
-            raft_stub,
+            raft_client,
             metadata_store,
             file_store,
             inode_manager,
@@ -1293,15 +1302,24 @@ impl FileSystemServiceImpl {
 
         // Now extend locks without holding any locks
         for (inode, client_id, lock_id) in locks_to_extend {
-            use crate::filesystem_service::raft_commands::RaftCommand;
-
-            let command = RaftCommand::ExtendLock {
-                inode,
-                client_id: client_id.as_u64(),
-                new_expiry,
+            // Look up file_id from inode
+            let file_id = match self.metadata_store.get_file_by_inode(inode).await {
+                Ok(file_record) => file_record.file_id,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to get file_id for inode {} during lock extension: {}",
+                        inode,
+                        e
+                    );
+                    continue;
+                }
             };
 
-            match self.raft_stub.propose_operation(command).await {
+            match self
+                .raft_client
+                .extend_lock(file_id, inode, client_id.as_u64(), new_expiry)
+                .await
+            {
                 Ok(_) => {
                     tracing::trace!(
                         "Extended lock {} for inode {}, client {}",
@@ -1556,17 +1574,22 @@ impl FileSystemService for FileSystemServiceImpl {
         };
 
         let result = self
-            .raft_stub
-            .propose_operation(command)
+            .raft_client
+            .propose_raft_command(command)
             .await
-            .map_err(|e| Error::RaftError(format!("{}", e)))?;
+            .map_err(|e| {
+                // Note: Reserved inode will be cleaned up by TTL (1 hour)
+                // Can't release here due to async/lifetime constraints
+                Error::RaftError(format!("{}", e))
+            })?;
 
-        // Step 5: Extract file_id from result (inode already reserved)
-        let file_id = match result {
+        // Step 5: Extract inode and file_id from Raft result
+        // File is already created on all nodes by Raft state machine
+        let (raft_inode, file_id) = match result {
             crate::filesystem_service::raft_commands::RaftCommandResult::FileCreated {
+                inode: raft_inode,
                 file_id,
-                ..
-            } => file_id,
+            } => (raft_inode, file_id),
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
                 // Release the reserved inode on error
                 let _ = self.metadata_store.release_inode(inode).await;
@@ -1582,50 +1605,37 @@ impl FileSystemService for FileSystemServiceImpl {
             }
         };
 
-        // Step 6: [TEMP Phase 1] Write directly to MetadataStore
-        // In Phase 2+, this will be handled by the Raft state machine
-        let now = SystemTime::now();
-        let metadata = FileMetadata {
-            file_type: crate::metadata_store::FileType::RegularFile,
-            size: 0,
-            permissions: mode,
-            uid,
-            gid,
-            created_at: now,
-            modified_at: now,
-            accessed_at: now,
-            target: None, // Regular files don't have targets
-        };
+        // Release the locally reserved inode since Raft generated a different one
+        let _ = self.metadata_store.release_inode(inode).await;
 
-        // Create the file in metadata store - release inode on error
-        if let Err(e) = self
+        // Step 6: File is already created by Raft state machine on all nodes
+        // Fetch the file metadata to populate caches and return FileAttr
+        let file_record = self
             .metadata_store
-            .create_file(file_id, &path, inode, metadata.clone())
+            .get_file_by_inode(raft_inode)
             .await
-        {
-            let _ = self.metadata_store.release_inode(inode).await;
-            self.api_metrics
-                .record_call("create", _start.elapsed().as_secs_f64());
-            return Err(self.convert_metadata_error(e));
-        }
+            .map_err(|e| self.convert_metadata_error(e))?;
 
-        // Step 7: Confirm inode reservation - release inode on error
-        // Note: Inode reservations have a 1-hour TTL and will be cleaned up by a
-        // background maintenance task (TODO: implement in Phase 2). Explicit release
-        // here ensures immediate cleanup on database errors.
-        if let Err(e) = self.metadata_store.confirm_inode(inode).await {
-            let _ = self.metadata_store.release_inode(inode).await;
-            self.api_metrics
-                .record_call("create", _start.elapsed().as_secs_f64());
-            return Err(self.convert_metadata_error(e));
-        }
+        // Step 7: Cache the inode
+        let metadata = crate::metadata_store::FileMetadata {
+            file_type: file_record.file_type,
+            size: file_record.size,
+            permissions: file_record.permissions,
+            uid: file_record.uid,
+            gid: file_record.gid,
+            created_at: file_record.created_at,
+            modified_at: file_record.modified_at,
+            accessed_at: file_record.accessed_at,
+            target: file_record.target.clone(),
+        };
+        self.inode_manager
+            .cache()
+            .insert(raft_inode, file_id, metadata);
 
-        // Step 8: Cache the inode
-        self.inode_manager.cache().insert(inode, file_id, metadata);
-
-        // Step 9: Return FileAttr
+        // Step 8: Return FileAttr
+        let now = SystemTime::now();
         let attr = FileAttr {
-            ino: inode,
+            ino: raft_inode,
             size: 0,
             blocks: 0,
             atime: now,
@@ -1643,9 +1653,9 @@ impl FileSystemService for FileSystemServiceImpl {
         };
 
         tracing::info!(
-            "Created file: path={:?}, inode={}, file_id={:?}",
+            "Created file via Raft: path={:?}, inode={}, file_id={:?}",
             path,
-            inode,
+            raft_inode,
             file_id
         );
         self.api_metrics
@@ -1712,36 +1722,30 @@ impl FileSystemService for FileSystemServiceImpl {
         // This ensures write exclusivity across the entire cluster, not just locally.
         // The lock is enforced via Raft consensus and stored in MetadataStore.
         let lock_id = if is_write_mode {
-            use crate::filesystem_service::raft_commands::{LockType, RaftCommand};
+            use crate::filesystem_service::raft_commands::LockType;
 
             // Lock expires in 5 minutes (will be extended by keepalives in Phase 2)
             let expires_at = SystemTime::now() + std::time::Duration::from_secs(300);
 
-            let command = RaftCommand::AcquireLock {
-                inode,
-                lock_type: LockType::Write,
-                client_id: _client_id.as_u64(),
-                node_id: self.config.node_id,
-                expires_at,
-            };
-
-            match self.raft_stub.propose_operation(command).await {
-                Ok(crate::filesystem_service::raft_commands::RaftCommandResult::LockAcquired {
-                    lock_id,
-                }) => {
+            match self
+                .raft_client
+                .acquire_lock(
+                    record.file_id,
+                    inode,
+                    LockType::Write,
+                    _client_id.as_u64(),
+                    self.config.node_id,
+                    expires_at,
+                )
+                .await
+            {
+                Ok(lock_id) => {
                     tracing::debug!(
                         "Acquired write lock on inode {}, lock_id={}",
                         inode,
                         lock_id
                     );
                     Some(lock_id)
-                }
-                Ok(_) => {
-                    self.api_metrics
-                        .record_call("open", _start.elapsed().as_secs_f64());
-                    return Err(Error::RaftError(
-                        "Unexpected Raft result for lock acquisition".into(),
-                    ));
                 }
                 Err(e) => {
                     // Lock acquisition failed - likely already locked
@@ -1819,8 +1823,8 @@ impl FileSystemService for FileSystemServiceImpl {
             };
 
             let _result = self
-                .raft_stub
-                .propose_operation(command)
+                .raft_client
+                .propose_raft_command(command)
                 .await
                 .map_err(|e| Error::RaftError(format!("{}", e)))?;
 
@@ -2166,8 +2170,8 @@ impl FileSystemService for FileSystemServiceImpl {
         };
 
         let result = self
-            .raft_stub
-            .propose_operation(command)
+            .raft_client
+            .propose_raft_command(command)
             .await
             .map_err(|e| {
                 let error_msg = format!("{}", e);
@@ -2257,8 +2261,8 @@ impl FileSystemService for FileSystemServiceImpl {
         };
 
         let result = self
-            .raft_stub
-            .propose_operation(command)
+            .raft_client
+            .propose_raft_command(command)
             .await
             .map_err(|e| Error::RaftError(format!("Failed to create symlink: {}", e)))?;
 
@@ -2487,13 +2491,15 @@ impl FileSystemService for FileSystemServiceImpl {
                         open_file.client_id.as_u64()
                     );
 
-                    let command =
-                        crate::filesystem_service::raft_commands::RaftCommand::ReleaseLock {
-                            inode: open_file.inode,
-                            client_id: open_file.client_id.as_u64(),
-                        };
-
-                    match self.raft_stub.propose_operation(command).await {
+                    match self
+                        .raft_client
+                        .release_lock(
+                            open_file.file_id,
+                            open_file.inode,
+                            open_file.client_id.as_u64(),
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             tracing::debug!(
                                 "Successfully released lock on inode {}",
@@ -2593,8 +2599,8 @@ impl FileSystemService for FileSystemServiceImpl {
         };
 
         let result = self
-            .raft_stub
-            .propose_operation(command)
+            .raft_client
+            .propose_raft_command(command)
             .await
             .map_err(|e| {
                 // Release reserved inode on error
@@ -2602,12 +2608,13 @@ impl FileSystemService for FileSystemServiceImpl {
                 Error::RaftError(format!("Failed to create directory: {}", e))
             })?;
 
-        // Step 6: Extract file_id from result (inode already reserved)
-        let file_id = match result {
+        // Step 6: Extract inode and file_id from Raft result
+        // Directory is already created on all nodes by Raft state machine
+        let (raft_inode, file_id) = match result {
             crate::filesystem_service::raft_commands::RaftCommandResult::FileCreated {
+                inode: raft_inode,
                 file_id,
-                ..
-            } => file_id,
+            } => (raft_inode, file_id),
             crate::filesystem_service::raft_commands::RaftCommandResult::Error { message } => {
                 let _ = self.metadata_store.release_inode(inode).await;
                 self.api_metrics
@@ -2624,44 +2631,21 @@ impl FileSystemService for FileSystemServiceImpl {
             }
         };
 
-        // Step 7: [TEMP Phase 1] Write directly to MetadataStore
-        // In Phase 2+, this will be handled by the Raft state machine
-        let now = SystemTime::now();
-        let metadata = FileMetadata {
-            file_type: crate::metadata_store::FileType::Directory,
-            size: 0, // Directories have size 0
-            permissions: mode,
-            uid,
-            gid,
-            created_at: now,
-            modified_at: now,
-            accessed_at: now,
-            target: None, // Directories don't have targets
-        };
+        // Release the locally reserved inode since Raft generated a different one
+        let _ = self.metadata_store.release_inode(inode).await;
 
-        // Create the directory in metadata store - release inode on error
-        if let Err(e) = self
+        // Step 7: Directory is already created by Raft state machine on all nodes
+        // Fetch the directory metadata to populate caches
+        let file_record = self
             .metadata_store
-            .create_file(file_id, &path, inode, metadata.clone())
+            .get_file_by_inode(raft_inode)
             .await
-        {
-            let _ = self.metadata_store.release_inode(inode).await;
-            self.api_metrics
-                .record_call("mkdir", _start.elapsed().as_secs_f64());
-            return Err(self.convert_metadata_error(e));
-        }
+            .map_err(|e| self.convert_metadata_error(e))?;
 
-        // Step 8: Confirm inode reservation - release inode on error
-        if let Err(e) = self.metadata_store.confirm_inode(inode).await {
-            let _ = self.metadata_store.release_inode(inode).await;
-            self.api_metrics
-                .record_call("mkdir", _start.elapsed().as_secs_f64());
-            return Err(self.convert_metadata_error(e));
-        }
-
-        // Step 9: Create FileAttr for the response
+        // Step 8: Create FileAttr for the response
+        let now = SystemTime::now();
         let attr = FileAttr {
-            ino: inode,
+            ino: raft_inode,
             size: 0,
             blocks: 0,
             atime: now,
@@ -2678,13 +2662,26 @@ impl FileSystemService for FileSystemServiceImpl {
             flags: 0,
         };
 
-        // Step 10: Cache the new directory
-        self.inode_manager.cache().insert(inode, file_id, metadata);
+        // Step 9: Cache the new directory
+        let metadata = crate::metadata_store::FileMetadata {
+            file_type: file_record.file_type,
+            size: file_record.size,
+            permissions: file_record.permissions,
+            uid: file_record.uid,
+            gid: file_record.gid,
+            created_at: file_record.created_at,
+            modified_at: file_record.modified_at,
+            accessed_at: file_record.accessed_at,
+            target: file_record.target.clone(),
+        };
+        self.inode_manager
+            .cache()
+            .insert(raft_inode, file_id, metadata);
 
         tracing::info!(
-            "Created directory: path={:?}, inode={}, file_id={:?}",
+            "Created directory via Raft: path={:?}, inode={}, file_id={:?}",
             path,
-            inode,
+            raft_inode,
             file_id
         );
 
@@ -2770,8 +2767,8 @@ impl FileSystemService for FileSystemServiceImpl {
         };
 
         let result = self
-            .raft_stub
-            .propose_operation(command)
+            .raft_client
+            .propose_raft_command(command)
             .await
             .map_err(|e| {
                 let error_msg = format!("{}", e);
@@ -3171,8 +3168,8 @@ impl FileSystemService for FileSystemServiceImpl {
         };
 
         let _result = self
-            .raft_stub
-            .propose_operation(command)
+            .raft_client
+            .propose_raft_command(command)
             .await
             .map_err(|e| Error::RaftError(format!("{}", e)))?;
 
