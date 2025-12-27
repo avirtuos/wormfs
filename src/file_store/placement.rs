@@ -329,6 +329,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             None,
             None,
@@ -345,6 +346,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             None,
             None,
@@ -382,6 +384,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             None,
             None,
@@ -398,6 +401,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             None,
             None,

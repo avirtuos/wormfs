@@ -669,9 +669,6 @@ mod tests {
     use crate::storage_raft_member::types::{ClusterManagerPreset, Config as RaftConfig};
     use crate::transaction_log_store::{TransactionLogConfig, TransactionLogStoreImpl};
     use openraft::Raft;
-    use std::net::SocketAddr;
-    use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::sync::RwLock;

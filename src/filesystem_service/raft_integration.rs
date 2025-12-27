@@ -376,7 +376,7 @@ impl RaftIntegratedFileSystemService {
 /// Example of how a write operation flows through Raft
 pub async fn example_write_flow(service: &RaftIntegratedFileSystemService) -> Result<(), Error> {
     // Step 1: Create a file (metadata operation - goes through Raft)
-    let file_attr = service
+    let _file_attr = service
         .create_file_via_raft(
             1,          // parent inode (root)
             "test.txt", // filename
@@ -406,7 +406,7 @@ pub async fn example_write_flow(service: &RaftIntegratedFileSystemService) -> Re
     // Step 3: Write chunk data (data operation - direct to FileStore)
     // This happens outside of Raft - chunks are staged but not in metadata yet
     let stripe_id = stripe_ids[0];
-    let data = vec![0u8; 1024];
+    let _data = vec![0u8; 1024];
 
     // FileStore writes chunks to disk in "staged" state
     // (Implementation would go here)
@@ -437,8 +437,6 @@ pub async fn example_write_flow(service: &RaftIntegratedFileSystemService) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[tokio::test]
     async fn test_create_file_via_raft() {
         // This would require mock implementations of MetadataStore and FileStore

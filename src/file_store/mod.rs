@@ -302,7 +302,8 @@ pub trait FileStore: Send + Sync {
     /// # Returns
     ///
     /// The chunk data including header.
-    ///
+    async fn read_chunk_local(&self, chunk_id: ChunkId) -> Result<ChunkData, Error>;
+
     /// Get the filesystem path for a disk by its ID.
     ///
     /// # Arguments

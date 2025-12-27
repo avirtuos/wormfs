@@ -26,7 +26,7 @@ use crate::snapshot_store::{CompressionAlgorithm, SnapshotStore, SnapshotStoreIm
 
 use super::raft_config::{WormFsResponse, WormFsSnapshotData, WormFsTypeConfig};
 use super::types::{
-    FileId, MetadataChangeEvent, MetadataChangeType, MetadataOperation, NodeId, TxId,
+    MetadataChangeEvent, MetadataChangeType, MetadataOperation, NodeId, TxId,
     WormFsOperation,
 };
 use super::utils::current_time_secs;
@@ -1250,7 +1250,7 @@ impl WormFsStateMachine {
                     disk_id: *new_disk,
                 },
             }),
-            MetadataOperation::ReleaseLock { file_id, .. } => {
+            MetadataOperation::ReleaseLock { file_id: _, .. } => {
                 // Note: We don't have the inode in ReleaseLock operation,
                 // so we can't emit a full LockReleased event.
                 // In practice, lock release events may not be critical for most subscribers.
@@ -1947,8 +1947,8 @@ impl RaftSnapshotBuilder<WormFsTypeConfig> for WormFsStateMachine {
             last_included_index,
             last_included_term,
             last_log_id,
-            snapshot_store,
-            snapshot_directory,
+            _snapshot_store,
+            _snapshot_directory,
         ) = {
             let inner = self.inner.read().await;
 
@@ -2298,6 +2298,10 @@ mod tests {
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
                 mode: 0o644,
+                uid: 1000,
+                gid: 1000,
+                file_type: 0, // Regular file
+                target: None,
             },
             policy: StoragePolicy {
                 data_chunks: 2,

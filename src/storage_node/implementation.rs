@@ -712,7 +712,6 @@ pub struct ClusterInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     /// Helper to create a test config with temporary directories

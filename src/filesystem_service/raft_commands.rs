@@ -212,10 +212,20 @@ impl StorageRaftMemberStub {
 
         // Handle each command type
         let result = match command {
-            RaftCommand::CreateFile { .. } => RaftCommandResult::FileCreated {
-                inode: generate_inode(),
-                file_id: FileId::generate(),
-            },
+            RaftCommand::CreateFile {
+                parent_inode,
+                name,
+                mode,
+                uid,
+                gid,
+                ..
+            } => {
+                // Handle file creation
+                let (inode, file_id) = self
+                    .handle_create_file(parent_inode, &name, mode, uid, gid)
+                    .await?;
+                RaftCommandResult::FileCreated { inode, file_id }
+            }
             RaftCommand::UpdateFile { inode, updates } => {
                 // Handle file metadata updates
                 self.handle_update_file(inode, updates).await?;
@@ -516,6 +526,96 @@ impl StorageRaftMemberStub {
     }
 
     /// Handle symlink creation
+    /// Handle CreateFile command
+    async fn handle_create_file(
+        &self,
+        parent_inode: u64,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(u64, FileId), RaftError> {
+        // Get parent directory
+        let parent_record = self
+            .metadata_store
+            .get_file_by_inode(parent_inode)
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Parent not found: {}", e)))?;
+
+        if parent_record.file_type != crate::metadata_store::FileType::Directory {
+            return Err(RaftError::OperationFailed(
+                "Parent is not a directory".into(),
+            ));
+        }
+
+        // Construct full path
+        let path = parent_record.path.join(name);
+
+        // Check if file already exists
+        if let Ok(_existing) = self.metadata_store.get_file_by_path(&path).await {
+            return Err(RaftError::OperationFailed(format!(
+                "File already exists: {:?}",
+                path
+            )));
+        }
+
+        // Reserve an inode
+        let inode = self
+            .metadata_store
+            .reserve_inode()
+            .await
+            .map_err(|e| RaftError::OperationFailed(format!("Failed to reserve inode: {}", e)))?;
+
+        // Generate file ID
+        let file_id = FileId::new(uuid::Uuid::new_v4());
+
+        // Create metadata for the regular file
+        let now = std::time::SystemTime::now();
+        let metadata = crate::metadata_store::FileMetadata {
+            file_type: crate::metadata_store::FileType::RegularFile,
+            size: 0,
+            permissions: mode,
+            uid,
+            gid,
+            created_at: now,
+            modified_at: now,
+            accessed_at: now,
+            target: None,
+        };
+
+        // Create the file
+        if let Err(e) = self
+            .metadata_store
+            .create_file(file_id.clone(), &path, inode, metadata)
+            .await
+        {
+            // Clean up reserved inode on failure
+            let _ = self.metadata_store.release_inode(inode).await;
+            return Err(RaftError::OperationFailed(format!(
+                "Failed to create file: {}",
+                e
+            )));
+        }
+
+        // Confirm the inode reservation
+        if let Err(e) = self.metadata_store.confirm_inode(inode).await {
+            tracing::error!(
+                "Failed to confirm inode {} after file creation: {}",
+                inode,
+                e
+            );
+        }
+
+        tracing::info!(
+            "Created file: path={:?}, inode={}, mode={:o}",
+            path,
+            inode,
+            mode
+        );
+
+        Ok((inode, file_id))
+    }
+
     async fn handle_create_symlink(
         &self,
         parent_inode: u64,
@@ -1214,7 +1314,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_stub_create_file() {
+        use crate::metadata_store::{FileMetadata, MetadataStore};
+        use std::path::Path;
+
         let metadata_store = create_test_metadata_store().await;
+        metadata_store
+            .initialize_schema()
+            .await
+            .expect("Failed to initialize schema");
+
+        // Create root directory first (if not already exists)
+        let root_metadata = FileMetadata {
+            file_type: crate::metadata_store::FileType::Directory,
+            size: 0,
+            permissions: 0o755,
+            uid: 0,
+            gid: 0,
+            created_at: std::time::SystemTime::now(),
+            modified_at: std::time::SystemTime::now(),
+            accessed_at: std::time::SystemTime::now(),
+            target: None,
+        };
+        // Ignore error if root already exists
+        let _ = metadata_store
+            .create_file(
+                crate::file_store::FileId::generate(),
+                Path::new("/"),
+                1,
+                root_metadata,
+            )
+            .await;
+
         let stub = StorageRaftMemberStub::new(metadata_store);
         let command = RaftCommand::CreateFile {
             parent_inode: 1,

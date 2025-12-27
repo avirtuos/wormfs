@@ -125,7 +125,7 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
 
     // Create FileSystemService using the factory
     let fs_config = wormfs::filesystem_service::types::Config::default();
-    let service = FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None)
+    let service = FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None, None)
         .await
         .expect("Failed to create FileSystemService");
 

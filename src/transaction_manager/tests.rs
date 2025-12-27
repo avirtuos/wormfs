@@ -296,6 +296,10 @@ mod tests {
                 mode: 0o644,
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
+                uid: 1000,
+                gid: 1000,
+                file_type: 0, // Regular file
+                target: None,
             },
             policy: StoragePolicy {
                 data_chunks: 6,
@@ -329,6 +333,10 @@ mod tests {
                 mode: 0o644,
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
+                uid: 1000,
+                gid: 1000,
+                file_type: 0, // Regular file
+                target: None,
             },
             policy: StoragePolicy {
                 data_chunks: 6,
@@ -352,6 +360,10 @@ mod tests {
                 mode: 0o644,
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
+                uid: 1000,
+                gid: 1000,
+                file_type: 0, // Regular file
+                target: None,
             },
             policy: StoragePolicy {
                 data_chunks: 6,
@@ -384,6 +396,10 @@ mod tests {
                 mode: 0o644,
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
+                uid: 1000,
+                gid: 1000,
+                file_type: 0, // Regular file
+                target: None,
             },
             policy: StoragePolicy {
                 data_chunks: 6,
@@ -442,6 +458,10 @@ mod tests {
                 mode: 0o644,
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
+                uid: 1000,
+                gid: 1000,
+                file_type: 0, // Regular file
+                target: None,
             },
             policy: StoragePolicy {
                 data_chunks: 6,
@@ -490,6 +510,10 @@ mod tests {
                 mode: 0o644,
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
+                uid: 1000,
+                gid: 1000,
+                file_type: 0, // Regular file
+                target: None,
             },
             policy: StoragePolicy {
                 data_chunks: 6,
@@ -607,6 +631,10 @@ mod tests {
                 mode: 0o644,
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
+                uid: 1000,
+                gid: 1000,
+                file_type: 0, // Regular file
+                target: None,
             },
             policy: StoragePolicy {
                 data_chunks: 6,
@@ -657,6 +685,10 @@ mod tests {
                         mode: 0o644,
                         created: SystemTime::now(),
                         modified: SystemTime::now(),
+                        uid: 1000,
+                        gid: 1000,
+                        file_type: 0, // Regular file
+                        target: None,
                     },
                     policy: StoragePolicy {
                         data_chunks: 6,
@@ -718,6 +750,10 @@ mod tests {
                         mode: 0o644,
                         created: SystemTime::now(),
                         modified: SystemTime::now(),
+                        uid: 1000,
+                        gid: 1000,
+                        file_type: 0, // Regular file
+                        target: None,
                     },
                     policy: StoragePolicy {
                         data_chunks: 6,
@@ -742,6 +778,10 @@ mod tests {
                         mode: 0o644,
                         created: SystemTime::now(),
                         modified: SystemTime::now(),
+                        uid: 1000,
+                        gid: 1000,
+                        file_type: 0, // Regular file
+                        target: None,
                     },
                     policy: StoragePolicy {
                         data_chunks: 6,
@@ -766,6 +806,10 @@ mod tests {
                         mode: 0o644,
                         created: SystemTime::now(),
                         modified: SystemTime::now(),
+                        uid: 1000,
+                        gid: 1000,
+                        file_type: 0, // Regular file
+                        target: None,
                     },
                     policy: StoragePolicy {
                         data_chunks: 6,

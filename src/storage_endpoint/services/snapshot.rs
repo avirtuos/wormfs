@@ -77,7 +77,7 @@ impl<S: SnapshotStore + 'static> SnapshotService for SnapshotServiceImpl<S> {
         // Spawn task to stream snapshot data
         tokio::spawn(async move {
             // Create a pipe for streaming
-            let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+            let (writer, mut reader) = tokio::io::duplex(64 * 1024);
 
             // Spawn snapshot streaming task
             let stream_task = tokio::spawn(async move {

@@ -303,8 +303,8 @@ where
 
     async fn upload_chunk(
         &self,
-        chunk_data: ChunkData,
-        token: &str,
+        _chunk_data: ChunkData,
+        _token: &str,
     ) -> Result<ChunkId, EndpointError> {
         debug!("Direct chunk upload with token");
 

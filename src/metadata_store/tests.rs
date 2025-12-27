@@ -4,7 +4,7 @@
 //! using temporary SQLite databases.
 
 use super::*;
-use crate::metadata_store::{factory::MetadataStoreFactory, types::*};
+use crate::metadata_store::types::*;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
