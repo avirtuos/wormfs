@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_metrics_disabled() {
-        let mock_metrics = MockMetricService::default();
+        let mock_metrics = MockMetricService;
         let middleware = MetricsMiddleware::new(mock_metrics, false);
 
         let start = middleware.request_start("test", "method");
@@ -182,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_request_flow() {
-        let mock_metrics = MockMetricService::default();
+        let mock_metrics = MockMetricService;
         let middleware = MetricsMiddleware::new(mock_metrics, true);
 
         let start = middleware.request_start("filesystem", "create_file");
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_metrics_error_recording() {
-        let mock_metrics = MockMetricService::default();
+        let mock_metrics = MockMetricService;
         let middleware = MetricsMiddleware::new(mock_metrics, true);
 
         // Should not panic - metrics are published internally
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_metrics_stream_recording() {
-        let mock_metrics = MockMetricService::default();
+        let mock_metrics = MockMetricService;
         let middleware = MetricsMiddleware::new(mock_metrics, true);
 
         // Should not panic - metrics are published internally
