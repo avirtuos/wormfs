@@ -524,7 +524,7 @@ impl FileStore for FileStoreImpl {
             stripe_id
         );
 
-        let policy = policy.ok_or_else(|| Error::InsufficientChunks {
+        let policy = policy.ok_or(Error::InsufficientChunks {
             needed: 1,
             available: 0,
         })?;

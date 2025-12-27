@@ -434,10 +434,8 @@ impl MetadataStoreImpl {
             if let Ok(nodes) = stmt.query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             }) {
-                for node_result in nodes {
-                    if let Ok((nid, addr)) = node_result {
-                        error!("  node_id={}, address={}", nid, addr);
-                    }
+                for (nid, addr) in nodes.flatten() {
+                    error!("  node_id={}, address={}", nid, addr);
                 }
             }
         }
@@ -451,10 +449,8 @@ impl MetadataStoreImpl {
                     row.get::<_, String>(2)?,
                 ))
             }) {
-                for disk_result in disks {
-                    if let Ok((did, nid, path)) = disk_result {
-                        error!("  disk_id={}, node_id={}, path={}", did, nid, path);
-                    }
+                for (did, nid, path) in disks.flatten() {
+                    error!("  disk_id={}, node_id={}, path={}", did, nid, path);
                 }
             }
         }

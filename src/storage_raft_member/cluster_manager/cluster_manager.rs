@@ -978,7 +978,7 @@ mod tests {
         let config = Arc::new(ClusterManagerConfig::moderate());
 
         // Record a change at time T
-        let now = std::time::Instant::now();
+        let _now = std::time::Instant::now();
 
         // Simulate time passing
         let elapsed = Duration::from_secs(30); // Less than min_membership_change_interval (60s)

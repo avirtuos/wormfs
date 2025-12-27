@@ -281,7 +281,7 @@ impl BufferedFileHandleInner {
         let mut partial = 0;
         let mut total = 0;
 
-        let max_stripe_size = self.config.max_stripe_size as usize;
+        let max_stripe_size = self.config.max_stripe_size;
 
         for builder in self.builders.values() {
             let size = builder.size();
@@ -1074,7 +1074,7 @@ impl BufferedFileHandle {
             let (complete, partial): (Vec<_>, Vec<_>) = inner
                 .builders
                 .iter()
-                .partition(|(_, builder)| builder.size() == max_stripe_size as usize);
+                .partition(|(_, builder)| builder.size() == max_stripe_size);
 
             trace!(
                 force = %force,

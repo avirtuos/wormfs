@@ -34,7 +34,7 @@ pub fn encode_stripe(data: Vec<u8>, policy: &StoragePolicy) -> Result<Vec<Vec<u8
         .map_err(|e| Error::ErasureCodingFailed(format!("Failed to create encoder: {}", e)))?;
 
     // Calculate shard size (round up to ensure all data fits)
-    let shard_size = (data.len() + data_shards - 1) / data_shards;
+    let shard_size = data.len().div_ceil(data_shards);
     let total_size = shard_size * data_shards;
 
     // Pad data to fill all data shards evenly
@@ -107,10 +107,8 @@ pub fn decode_stripe(
     if all_data_present {
         // Simple case: just concatenate data shards
         let mut reconstructed = Vec::with_capacity(original_size);
-        for shard_opt in &shards[0..data_shards] {
-            if let Some(shard) = shard_opt {
-                reconstructed.extend_from_slice(shard);
-            }
+        for shard in shards[0..data_shards].iter().flatten() {
+            reconstructed.extend_from_slice(shard);
         }
         reconstructed.truncate(original_size);
         return Ok(reconstructed);
@@ -149,8 +147,8 @@ pub fn decode_stripe(
 
     // Extract data shards and concatenate
     let mut reconstructed = Vec::with_capacity(original_size);
-    for i in 0..data_shards {
-        reconstructed.extend_from_slice(&shard_data[i]);
+    for shard in shard_data.iter().take(data_shards) {
+        reconstructed.extend_from_slice(shard);
     }
 
     // Remove padding to get original data

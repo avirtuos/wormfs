@@ -766,14 +766,14 @@ impl Filesystem for FuseAdapter {
         );
 
         // Convert TimeOrNow to Option<SystemTime>
-        let atime_sys = atime.and_then(|t| match t {
-            TimeOrNow::SpecificTime(st) => Some(st),
-            TimeOrNow::Now => Some(SystemTime::now()),
+        let atime_sys = atime.map(|t| match t {
+            TimeOrNow::SpecificTime(st) => st,
+            TimeOrNow::Now => SystemTime::now(),
         });
 
-        let mtime_sys = mtime.and_then(|t| match t {
-            TimeOrNow::SpecificTime(st) => Some(st),
-            TimeOrNow::Now => Some(SystemTime::now()),
+        let mtime_sys = mtime.map(|t| match t {
+            TimeOrNow::SpecificTime(st) => st,
+            TimeOrNow::Now => SystemTime::now(),
         });
 
         match self.runtime.block_on(self.service.setattr(

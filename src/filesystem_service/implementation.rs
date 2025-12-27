@@ -1392,7 +1392,7 @@ impl FileSystemServiceImpl {
         FileAttr {
             ino: record.inode,
             size: record.size,
-            blocks: (record.size + 4095) / 4096, // 4KB blocks
+            blocks: record.size.div_ceil(4096), // 4KB blocks
             atime: record.created_at, // Return creation time as atime (we don't track access time)
             mtime: record.modified_at,
             ctime: record.modified_at, // SQLite doesn't have ctime
@@ -1423,7 +1423,7 @@ impl FileSystemServiceImpl {
         FileAttr {
             ino: inode,
             size: cached.metadata.size,
-            blocks: (cached.metadata.size + 4095) / 4096, // 4KB blocks
+            blocks: cached.metadata.size.div_ceil(4096), // 4KB blocks
             atime: cached.metadata.created_at, // Return creation time as atime (we don't track access time)
             mtime: cached.metadata.modified_at,
             ctime: cached.metadata.modified_at, // Use mtime as ctime
@@ -3197,7 +3197,7 @@ impl FileSystemService for FileSystemServiceImpl {
         let attr = FileAttr {
             ino: inode,
             size: updated_metadata.size,
-            blocks: (updated_metadata.size + 4095) / 4096,
+            blocks: updated_metadata.size.div_ceil(4096),
             atime: updated_metadata.accessed_at,
             mtime: updated_metadata.modified_at,
             ctime: now, // ctime updated on metadata change

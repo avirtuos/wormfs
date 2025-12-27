@@ -872,7 +872,7 @@ mod tests {
     fn test_would_violate_quorum() {
         // Create manager with default config - we only test the pure logic method
         // so we don't need the async setup
-        let config = Arc::new(ClusterManagerConfig::moderate());
+        let _config = Arc::new(ClusterManagerConfig::moderate());
 
         // We need to test the would_violate_quorum method directly
         // Since it doesn't need the raft field, we can create a partial manager
