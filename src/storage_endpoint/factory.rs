@@ -117,7 +117,7 @@ mod tests {
             Arc::new(MockTransactionLogStore::default()),
             Arc::new(MockStorageRaftMember::default()),
             Arc::new(MockStorageNode::default()),
-            MockMetricService::default(),
+            MockMetricService,
         )
         .await;
 
@@ -141,7 +141,7 @@ mod tests {
             Arc::new(MockTransactionLogStore::default()),
             Arc::new(MockStorageRaftMember::default()),
             Arc::new(MockStorageNode::default()),
-            MockMetricService::default(),
+            MockMetricService,
         )
         .await;
 
