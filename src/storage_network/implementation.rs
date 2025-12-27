@@ -1855,7 +1855,8 @@ impl super::StorageNetworkInner {
         // Deserialize the RPC message to determine type
         let rpc_message: RaftRpcMessage = bincode::deserialize(&request).map_err(|e| {
             error!("Failed to deserialize Raft RPC message: {:?}", e);
-            let _ = self.record_metric_counter("storage_network.request_response.handler_errors", 1);
+            let _ =
+                self.record_metric_counter("storage_network.request_response.handler_errors", 1);
             Error::SendFailed(format!("Failed to deserialize Raft RPC: {:?}", e))
         })?;
 
