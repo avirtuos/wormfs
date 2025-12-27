@@ -2605,7 +2605,7 @@ impl FileSystemService for FileSystemServiceImpl {
             .await
             .map_err(|e| {
                 // Release reserved inode on error
-                let _ = self.metadata_store.release_inode(inode);
+                std::mem::drop(self.metadata_store.release_inode(inode));
                 Error::RaftError(format!("Failed to create directory: {}", e))
             })?;
 

@@ -2004,7 +2004,7 @@ impl RaftSnapshotBuilder<WormFsTypeConfig> for WormFsStateMachine {
                     // different, but since we don't track historical membership, we use the current one
                     // with an adjusted log_id
                     StoredMembership::new(
-                        Some(snapshot_log_id.clone()),
+                        Some(*snapshot_log_id),
                         current_membership.membership().clone(),
                     )
                 }

@@ -37,7 +37,7 @@ impl MetricKey {
         }
     }
 
-    fn to_string(&self) -> String {
+    fn format_key(&self) -> String {
         if self.labels.is_empty() {
             self.name.clone()
         } else {
@@ -99,10 +99,7 @@ impl MetricRegistry {
                 self.gauges.insert(key, value);
             }
             MetricValue::Histogram(value) => {
-                self.histograms
-                    .entry(key)
-                    .or_insert_with(Vec::new)
-                    .push(value);
+                self.histograms.entry(key).or_default().push(value);
             }
         }
 
@@ -116,7 +113,7 @@ impl MetricRegistry {
         for (key, value) in &self.counters {
             if let Some((metric_type, unit)) = self.metadata.get(key) {
                 result.insert(
-                    key.to_string(),
+                    key.format_key(),
                     AggregatedMetric {
                         metric_type: *metric_type,
                         unit: *unit,
@@ -135,7 +132,7 @@ impl MetricRegistry {
         for (key, value) in &self.gauges {
             if let Some((metric_type, unit)) = self.metadata.get(key) {
                 result.insert(
-                    key.to_string(),
+                    key.format_key(),
                     AggregatedMetric {
                         metric_type: *metric_type,
                         unit: *unit,
@@ -159,7 +156,7 @@ impl MetricRegistry {
                     values.iter().sum::<f64>() / values.len() as f64
                 };
                 result.insert(
-                    key.to_string(),
+                    key.format_key(),
                     AggregatedMetric {
                         metric_type: *metric_type,
                         unit: *unit,
@@ -205,7 +202,7 @@ impl TimeSeriesStore {
 
     fn append(&mut self, event: &MetricEvent) {
         let key = MetricKey::new(event.name.clone(), event.labels.clone());
-        let series = self.series.entry(key).or_insert_with(VecDeque::new);
+        let series = self.series.entry(key).or_default();
 
         // Check if we should sample this point (downsampling)
         if let Some(last) = series.back() {
@@ -292,7 +289,7 @@ impl TimeSeriesStore {
                 .collect();
 
             if !data.is_empty() {
-                result.insert(key.to_string(), data);
+                result.insert(key.format_key(), data);
             }
         }
 

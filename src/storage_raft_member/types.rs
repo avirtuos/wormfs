@@ -52,20 +52,15 @@ impl std::fmt::Display for NodeId {
 /// - Conservative: Slower to react, fewer false positives
 /// - Moderate: Balanced approach (recommended for most deployments)
 /// - Aggressive: Fast reaction, may have more false positives
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClusterManagerPreset {
     /// Conservative: 30s heartbeat timeout, 120s min membership change interval
     Conservative,
     /// Moderate: 15s heartbeat timeout, 60s min membership change interval (default)
+    #[default]
     Moderate,
     /// Aggressive: 5s heartbeat timeout, 30s min membership change interval
     Aggressive,
-}
-
-impl Default for ClusterManagerPreset {
-    fn default() -> Self {
-        Self::Moderate
-    }
 }
 
 /// Raft configuration options.

@@ -159,7 +159,7 @@ async fn main() {
     let network_handle = node.storage_network().map(|n| Arc::new(n.clone()));
 
     // Get Raft member for Admin UI
-    let raft_member = node.storage_raft_member().map(|r| Arc::clone(r));
+    let raft_member = node.storage_raft_member().map(Arc::clone);
 
     let admin_server = AdminServer::new(
         admin_config,

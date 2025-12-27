@@ -320,10 +320,12 @@ fn load_config_from_file(
         (config.transaction_log_path, config.snapshot_dir)
     {
         eprintln!("DEBUG: Creating Raft config");
-        let mut raft_cfg = wormfs::storage_raft_member::Config::default();
-        raft_cfg.transaction_log_path = tx_log;
-        raft_cfg.snapshot_directory = snapshot_dir;
-        raft_cfg.metadata_db_path = config.metadata.database_path.clone();
+        let raft_cfg = wormfs::storage_raft_member::Config {
+            transaction_log_path: tx_log,
+            snapshot_directory: snapshot_dir,
+            metadata_db_path: config.metadata.database_path.clone(),
+            ..Default::default()
+        };
         Some(raft_cfg)
     } else {
         eprintln!("DEBUG: Raft config NOT created - one or both paths missing");
@@ -464,7 +466,7 @@ async fn setup_signal_handler(mount_point: PathBuf) {
     use signal_hook::consts::signal::*;
     use signal_hook_tokio::Signals;
 
-    let mut signals = match Signals::new(&[SIGINT, SIGTERM]) {
+    let mut signals = match Signals::new([SIGINT, SIGTERM]) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to create signal handler: {}", e);

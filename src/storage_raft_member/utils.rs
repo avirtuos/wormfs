@@ -1,4 +1,4 @@
-///! Utility functions for storage_raft_member module
+//! Utility functions for storage_raft_member module
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
 

@@ -3,6 +3,9 @@
 //! Provides file and directory operations for FUSE clients,
 //! delegating to the FileSystemService component.
 
+// Large error variants from tonic::Status (external library type)
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tonic::{Request, Response, Status};
@@ -73,7 +76,7 @@ impl<F: FileSystemService> FilesystemServiceImpl<F> {
             self.filesystem
                 .resolve_path(parent_path)
                 .await
-                .map_err(|e| filesystem_error_to_status(e))?
+                .map_err(filesystem_error_to_status)?
         };
 
         Ok((parent_inode, name))

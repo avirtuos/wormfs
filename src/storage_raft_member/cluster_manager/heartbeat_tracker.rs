@@ -9,6 +9,26 @@ use super::super::utils::current_time_ms;
 /// Arguments: (node_id, storage_endpoint_url)
 pub type NodeDiscoveryCallback = Arc<dyn Fn(String, Option<String>) + Send + Sync>;
 
+/// Parameters for Raft state information in heartbeat messages
+#[derive(Debug, Clone, Default)]
+pub struct RaftStateParams {
+    pub raft_state: Option<String>,
+    pub raft_term: Option<u64>,
+    pub last_log_index: Option<u64>,
+    pub last_log_term: Option<u64>,
+    pub current_leader: Option<u64>,
+    pub is_voter: Option<bool>,
+    pub startup_time: Option<u64>,
+}
+
+/// Parameters for storage capacity information in heartbeat messages
+#[derive(Debug, Clone, Default)]
+pub struct StorageCapacityParams {
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub chunk_count: Option<u64>,
+}
+
 /// Information about a node's heartbeat
 #[derive(Debug, Clone)]
 pub struct NodeHeartbeat {
@@ -19,18 +39,10 @@ pub struct NodeHeartbeat {
     pub storage_endpoint_url: Option<String>,
 
     // Raft state information
-    pub raft_state: Option<String>,
-    pub raft_term: Option<u64>,
-    pub last_log_index: Option<u64>,
-    pub last_log_term: Option<u64>,
-    pub current_leader: Option<u64>,
-    pub is_voter: Option<bool>,
-    pub startup_time: Option<u64>,
+    pub raft_params: RaftStateParams,
 
     // Storage capacity information
-    pub total_bytes: Option<u64>,
-    pub available_bytes: Option<u64>,
-    pub chunk_count: Option<u64>,
+    pub capacity_params: StorageCapacityParams,
 }
 
 impl NodeHeartbeat {
@@ -42,7 +54,7 @@ impl NodeHeartbeat {
 
     /// Check if this node recently started (within the grace period)
     pub fn is_in_startup_grace_period(&self, grace_period_ms: u64) -> bool {
-        if let Some(startup_time) = self.startup_time {
+        if let Some(startup_time) = self.raft_params.startup_time {
             let now = current_time_ms();
             now.saturating_sub(startup_time) < grace_period_ms
         } else {
@@ -52,7 +64,10 @@ impl NodeHeartbeat {
 
     /// Get the log lag relative to another node (positive means this node is behind)
     pub fn log_lag(&self, other: &NodeHeartbeat) -> Option<i64> {
-        match (self.last_log_index, other.last_log_index) {
+        match (
+            self.raft_params.last_log_index,
+            other.raft_params.last_log_index,
+        ) {
             (Some(my_index), Some(other_index)) => Some(other_index as i64 - my_index as i64),
             _ => None,
         }
@@ -94,16 +109,8 @@ impl HeartbeatTracker {
         sequence: u64,
         admin_url: Option<String>,
         storage_endpoint_url: Option<String>,
-        raft_state: Option<String>,
-        raft_term: Option<u64>,
-        last_log_index: Option<u64>,
-        last_log_term: Option<u64>,
-        current_leader: Option<u64>,
-        is_voter: Option<bool>,
-        startup_time: Option<u64>,
-        total_bytes: Option<u64>,
-        available_bytes: Option<u64>,
-        chunk_count: Option<u64>,
+        raft_params: RaftStateParams,
+        capacity_params: StorageCapacityParams,
     ) {
         let mut heartbeats = self.heartbeats.write();
         let is_new = !heartbeats.contains_key(&node_id);
@@ -113,10 +120,10 @@ impl HeartbeatTracker {
                 "[HeartbeatTracker] Discovered new node via heartbeat: node_id={}, storage_endpoint_url={:?}, raft_state={:?}, term={:?}, log_index={:?}, is_voter={:?}",
                 node_id,
                 storage_endpoint_url,
-                raft_state,
-                raft_term,
-                last_log_index,
-                is_voter
+                raft_params.raft_state,
+                raft_params.raft_term,
+                raft_params.last_log_index,
+                raft_params.is_voter
             );
 
             // Fire callback if registered (before creating NodeHeartbeat which moves storage_endpoint_url)
@@ -146,16 +153,8 @@ impl HeartbeatTracker {
             sequence,
             admin_url,
             storage_endpoint_url,
-            raft_state: raft_state.clone(),
-            raft_term,
-            last_log_index,
-            last_log_term,
-            current_leader,
-            is_voter,
-            startup_time,
-            total_bytes,
-            available_bytes,
-            chunk_count,
+            raft_params,
+            capacity_params,
         };
 
         heartbeats.insert(node_id, heartbeat);
@@ -199,6 +198,7 @@ impl HeartbeatTracker {
             .filter(|hb| {
                 !hb.is_stale(self.stale_threshold_ms)
                     && hb
+                        .capacity_params
                         .available_bytes
                         .map(|bytes| bytes >= min_available_bytes)
                         .unwrap_or(false)
@@ -212,7 +212,7 @@ impl HeartbeatTracker {
         self.heartbeats
             .read()
             .values()
-            .filter_map(|hb| hb.last_log_index)
+            .filter_map(|hb| hb.raft_params.last_log_index)
             .max()
     }
 
@@ -221,7 +221,7 @@ impl HeartbeatTracker {
         self.heartbeats
             .read()
             .values()
-            .filter_map(|hb| hb.raft_term)
+            .filter_map(|hb| hb.raft_params.raft_term)
             .max()
     }
 
@@ -241,7 +241,7 @@ impl HeartbeatTracker {
         // Count votes for each leader
         let mut leader_votes: HashMap<u64, usize> = HashMap::new();
         for hb in &active_hbs {
-            if let Some(leader) = hb.current_leader {
+            if let Some(leader) = hb.raft_params.current_leader {
                 *leader_votes.entry(leader).or_insert(0) += 1;
             }
         }
@@ -259,11 +259,11 @@ impl HeartbeatTracker {
         let heartbeats = self.heartbeats.read();
 
         if let Some(node_hb) = heartbeats.get(node_id) {
-            if let Some(node_index) = node_hb.last_log_index {
+            if let Some(node_index) = node_hb.raft_params.last_log_index {
                 // Compare against the highest log index in the cluster
                 let highest_index = heartbeats
                     .values()
-                    .filter_map(|hb| hb.last_log_index)
+                    .filter_map(|hb| hb.raft_params.last_log_index)
                     .max()
                     .unwrap_or(0);
 
@@ -301,16 +301,22 @@ impl HeartbeatTracker {
         let active_nodes = active_hbs.len();
         let voters = active_hbs
             .iter()
-            .filter(|hb| hb.is_voter.unwrap_or(false))
+            .filter(|hb| hb.raft_params.is_voter.unwrap_or(false))
             .count();
         let learners = active_hbs
             .iter()
-            .filter(|hb| !hb.is_voter.unwrap_or(true))
+            .filter(|hb| !hb.raft_params.is_voter.unwrap_or(true))
             .count();
 
-        let highest_log_index = active_hbs.iter().filter_map(|hb| hb.last_log_index).max();
+        let highest_log_index = active_hbs
+            .iter()
+            .filter_map(|hb| hb.raft_params.last_log_index)
+            .max();
 
-        let highest_term = active_hbs.iter().filter_map(|hb| hb.raft_term).max();
+        let highest_term = active_hbs
+            .iter()
+            .filter_map(|hb| hb.raft_params.raft_term)
+            .max();
 
         let consensus_leader = self.get_consensus_leader();
 

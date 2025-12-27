@@ -9,6 +9,9 @@
 //! - Error mapping
 //! - Optional field handling
 
+// Large error variants from tonic::Status (external library type)
+#![allow(clippy::result_large_err)]
+
 use tonic::Status;
 use uuid::Uuid;
 

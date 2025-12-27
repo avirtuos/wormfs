@@ -436,6 +436,7 @@ pub struct InnerState {
     pub(crate) event_rx: RwLock<mpsc::UnboundedReceiver<NetworkCommand>>,
 
     /// Pending request-response requests (RequestId → response channel)
+    #[allow(clippy::type_complexity)]
     pub(crate) pending_requests: RwLock<
         HashMap<
             request_response::OutboundRequestId,
@@ -958,16 +959,20 @@ impl super::StorageNetworkInner {
                     heartbeat.sequence,
                     heartbeat.admin_url.clone(),
                     heartbeat.storage_endpoint_url.clone(),
-                    heartbeat.raft_state.clone(),
-                    heartbeat.raft_term,
-                    heartbeat.last_log_index,
-                    heartbeat.last_log_term,
-                    heartbeat.current_leader,
-                    heartbeat.is_voter,
-                    heartbeat.startup_time,
-                    heartbeat.total_bytes,
-                    heartbeat.available_bytes,
-                    heartbeat.chunk_count,
+                    crate::storage_raft_member::cluster_manager::RaftStateParams {
+                        raft_state: heartbeat.raft_state.clone(),
+                        raft_term: heartbeat.raft_term,
+                        last_log_index: heartbeat.last_log_index,
+                        last_log_term: heartbeat.last_log_term,
+                        current_leader: heartbeat.current_leader,
+                        is_voter: heartbeat.is_voter,
+                        startup_time: heartbeat.startup_time,
+                    },
+                    crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+                        total_bytes: heartbeat.total_bytes,
+                        available_bytes: heartbeat.available_bytes,
+                        chunk_count: heartbeat.chunk_count,
+                    },
                 );
 
                 // Update peer's last_heartbeat time and metadata
@@ -1051,16 +1056,20 @@ impl super::StorageNetworkInner {
                         heartbeat.sequence,
                         heartbeat.admin_url.clone(),
                         heartbeat.storage_endpoint_url.clone(),
-                        heartbeat.raft_state.clone(),
-                        heartbeat.raft_term,
-                        heartbeat.last_log_index,
-                        heartbeat.last_log_term,
-                        heartbeat.current_leader,
-                        heartbeat.is_voter,
-                        heartbeat.startup_time,
-                        heartbeat.total_bytes,
-                        heartbeat.available_bytes,
-                        heartbeat.chunk_count,
+                        crate::storage_raft_member::cluster_manager::RaftStateParams {
+                            raft_state: heartbeat.raft_state.clone(),
+                            raft_term: heartbeat.raft_term,
+                            last_log_index: heartbeat.last_log_index,
+                            last_log_term: heartbeat.last_log_term,
+                            current_leader: heartbeat.current_leader,
+                            is_voter: heartbeat.is_voter,
+                            startup_time: heartbeat.startup_time,
+                        },
+                        crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+                            total_bytes: heartbeat.total_bytes,
+                            available_bytes: heartbeat.available_bytes,
+                            chunk_count: heartbeat.chunk_count,
+                        },
                     );
                 }
             }
@@ -1855,8 +1864,9 @@ impl super::StorageNetworkInner {
         // Deserialize the RPC message to determine type
         let rpc_message: RaftRpcMessage = bincode::deserialize(&request).map_err(|e| {
             error!("Failed to deserialize Raft RPC message: {:?}", e);
-            let _ =
-                self.record_metric_counter("storage_network.request_response.handler_errors", 1);
+            std::mem::drop(
+                self.record_metric_counter("storage_network.request_response.handler_errors", 1),
+            );
             Error::SendFailed(format!("Failed to deserialize Raft RPC: {:?}", e))
         })?;
 
