@@ -215,14 +215,14 @@ impl StorageRaftMemberStub {
             RaftCommand::CreateFile {
                 parent_inode,
                 name,
+                file_type,
                 mode,
                 uid,
                 gid,
-                ..
             } => {
                 // Handle file creation
                 let (inode, file_id) = self
-                    .handle_create_file(parent_inode, &name, mode, uid, gid)
+                    .handle_create_file(parent_inode, &name, file_type, mode, uid, gid)
                     .await?;
                 RaftCommandResult::FileCreated { inode, file_id }
             }
@@ -525,12 +525,12 @@ impl StorageRaftMemberStub {
         Ok(())
     }
 
-    /// Handle symlink creation
     /// Handle CreateFile command
     async fn handle_create_file(
         &self,
         parent_inode: u64,
         name: &str,
+        file_type: FileType,
         mode: u32,
         uid: u32,
         gid: u32,
@@ -568,10 +568,17 @@ impl StorageRaftMemberStub {
         // Generate file ID
         let file_id = FileId::new(uuid::Uuid::new_v4());
 
-        // Create metadata for the regular file
+        // Convert RaftFileType to MetadataFileType
+        let metadata_file_type = match file_type {
+            FileType::Regular => crate::metadata_store::FileType::RegularFile,
+            FileType::Directory => crate::metadata_store::FileType::Directory,
+            FileType::Symlink => crate::metadata_store::FileType::Symlink,
+        };
+
+        // Create metadata
         let now = std::time::SystemTime::now();
         let metadata = crate::metadata_store::FileMetadata {
-            file_type: crate::metadata_store::FileType::RegularFile,
+            file_type: metadata_file_type,
             size: 0,
             permissions: mode,
             uid,

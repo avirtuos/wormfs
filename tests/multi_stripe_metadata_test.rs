@@ -94,6 +94,7 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
         None,
         None,
         None,
+        None,
         Some(1_000_000_000),
         Some(900_000_000),
         Some(0),

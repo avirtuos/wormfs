@@ -101,6 +101,7 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
         None,
         None,
         None,
+        None,
         Some(1_000_000_000), // 1GB total
         Some(900_000_000),   // 900MB available
         Some(0),             // 0 chunks

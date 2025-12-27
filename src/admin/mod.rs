@@ -36,6 +36,7 @@
 //!     admin_config: Some(config.clone()),
 //!     network_config: None,
 //!     raft_config: None,
+//!     storage_endpoint_config: None,
 //!     mount_point: std::path::PathBuf::from("/tmp/wormfs"),
 //!     mount_options: Default::default(),
 //! });
