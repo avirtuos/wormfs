@@ -26,6 +26,11 @@ pub struct NodeHeartbeat {
     pub current_leader: Option<u64>,
     pub is_voter: Option<bool>,
     pub startup_time: Option<u64>,
+
+    // Storage capacity information
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub chunk_count: Option<u64>,
 }
 
 impl NodeHeartbeat {
@@ -96,6 +101,9 @@ impl HeartbeatTracker {
         current_leader: Option<u64>,
         is_voter: Option<bool>,
         startup_time: Option<u64>,
+        total_bytes: Option<u64>,
+        available_bytes: Option<u64>,
+        chunk_count: Option<u64>,
     ) {
         let mut heartbeats = self.heartbeats.write();
         let is_new = !heartbeats.contains_key(&node_id);
@@ -145,6 +153,9 @@ impl HeartbeatTracker {
             current_leader,
             is_voter,
             startup_time,
+            total_bytes,
+            available_bytes,
+            chunk_count,
         };
 
         heartbeats.insert(node_id, heartbeat);
@@ -176,6 +187,22 @@ impl HeartbeatTracker {
             .read()
             .values()
             .filter(|hb| hb.is_in_startup_grace_period(self.startup_grace_period_ms))
+            .cloned()
+            .collect()
+    }
+
+    /// Get active nodes with at least the specified available storage capacity
+    pub fn get_nodes_with_capacity(&self, min_available_bytes: u64) -> Vec<NodeHeartbeat> {
+        self.heartbeats
+            .read()
+            .values()
+            .filter(|hb| {
+                !hb.is_stale(self.stale_threshold_ms)
+                    && hb
+                        .available_bytes
+                        .map(|bytes| bytes >= min_available_bytes)
+                        .unwrap_or(false)
+            })
             .cloned()
             .collect()
     }
@@ -340,6 +367,9 @@ mod tests {
             Some(1),
             Some(true),
             Some(now - 30000),
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
 
         let hb = tracker.get_heartbeat("node1").unwrap();
@@ -368,6 +398,9 @@ mod tests {
             Some(1),
             Some(true),
             Some(now),
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
 
         // Old heartbeat
@@ -384,6 +417,9 @@ mod tests {
             Some(1),
             Some(true),
             Some(now - 10000),
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
 
         let active = tracker.get_active_heartbeats();
@@ -410,6 +446,9 @@ mod tests {
             None,
             Some(false),
             Some(now - 5000), // Started 5 seconds ago
+            None,             // total_bytes
+            None,             // available_bytes
+            None,             // chunk_count
         );
 
         // Node that started long ago
@@ -426,6 +465,9 @@ mod tests {
             Some(2),
             Some(true),
             Some(now - 120000), // Started 2 minutes ago
+            None,               // total_bytes
+            None,               // available_bytes
+            None,               // chunk_count
         );
 
         let grace_nodes = tracker.get_nodes_in_grace_period();
@@ -451,6 +493,9 @@ mod tests {
             None,
             None,
             None,
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
         tracker.record_heartbeat(
             "node2".to_string(),
@@ -465,6 +510,9 @@ mod tests {
             None,
             None,
             None,
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
         tracker.record_heartbeat(
             "node3".to_string(),
@@ -479,6 +527,9 @@ mod tests {
             None,
             None,
             None,
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
 
         assert_eq!(tracker.get_highest_log_index(), Some(120));
@@ -504,6 +555,9 @@ mod tests {
             Some(2),
             None,
             None,
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
         tracker.record_heartbeat(
             "node2".to_string(),
@@ -518,6 +572,9 @@ mod tests {
             Some(2),
             None,
             None,
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
         tracker.record_heartbeat(
             "node3".to_string(),
@@ -532,6 +589,9 @@ mod tests {
             Some(2),
             None,
             None,
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
 
         assert_eq!(tracker.get_consensus_leader(), Some(2));
@@ -555,6 +615,9 @@ mod tests {
             Some(1),
             Some(true),
             Some(now - 120000),
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
         tracker.record_heartbeat(
             "node2".to_string(),
@@ -569,6 +632,9 @@ mod tests {
             Some(1),
             Some(true),
             Some(now - 120000),
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
         tracker.record_heartbeat(
             "node3".to_string(),
@@ -583,6 +649,9 @@ mod tests {
             Some(1),
             Some(false),
             Some(now - 5000),
+            None, // total_bytes
+            None, // available_bytes
+            None, // chunk_count
         );
 
         let summary = tracker.get_cluster_summary();

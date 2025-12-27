@@ -74,6 +74,7 @@
 pub mod chunk_client;
 pub mod erasure_coding;
 pub mod implementation;
+pub mod placement;
 pub mod stripe_builder;
 pub mod types;
 

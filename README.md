@@ -115,13 +115,7 @@ WormFS is a work in progress that's being developed iteratively following a phas
 **Install FUSE:**
 ```bash
 # Ubuntu/Debian
-sudo apt-get install fuse3 libfuse3-dev
-
-# RHEL/CentOS/Fedora
-sudo yum install fuse3 fuse3-devel
-
-# macOS
-brew install macfuse
+sudo apt-get install fuse3 libfuse3-3 libfuse3-dev gcc g++ make cmake pkg-config protobuf-compiler
 ```
 
 ### Running the Demo
