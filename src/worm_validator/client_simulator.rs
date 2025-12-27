@@ -125,7 +125,11 @@ impl FuseClientSimulator {
     ///
     /// * `fh` - File handle
     /// * `attr` - New file attributes
-    pub async fn set_attr(&mut self, _fh: FileHandle, _attr: FileAttr) -> Result<(), ValidatorError> {
+    pub async fn set_attr(
+        &mut self,
+        _fh: FileHandle,
+        _attr: FileAttr,
+    ) -> Result<(), ValidatorError> {
         // TODO: Implement setattr via gRPC
         unimplemented!("FuseClientSimulator::set_attr")
     }

@@ -208,10 +208,7 @@ impl FileStoreImpl {
         // Extract data (everything after header)
         let data = buffer[4 + header_len..].to_vec();
 
-        Ok(ChunkData {
-            header,
-            data,
-        })
+        Ok(ChunkData { header, data })
     }
 }
 

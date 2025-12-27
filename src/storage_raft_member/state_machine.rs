@@ -26,8 +26,7 @@ use crate::snapshot_store::{CompressionAlgorithm, SnapshotStore, SnapshotStoreIm
 
 use super::raft_config::{WormFsResponse, WormFsSnapshotData, WormFsTypeConfig};
 use super::types::{
-    MetadataChangeEvent, MetadataChangeType, MetadataOperation, NodeId, TxId,
-    WormFsOperation,
+    MetadataChangeEvent, MetadataChangeType, MetadataOperation, NodeId, TxId, WormFsOperation,
 };
 use super::utils::current_time_secs;
 

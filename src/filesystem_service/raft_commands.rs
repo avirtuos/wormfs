@@ -560,11 +560,10 @@ impl StorageRaftMemberStub {
         }
 
         // Reserve an inode
-        let inode = self
-            .metadata_store
-            .reserve_inode()
-            .await
-            .map_err(|e| RaftError::OperationFailed(format!("Failed to reserve inode: {}", e)))?;
+        let inode =
+            self.metadata_store.reserve_inode().await.map_err(|e| {
+                RaftError::OperationFailed(format!("Failed to reserve inode: {}", e))
+            })?;
 
         // Generate file ID
         let file_id = FileId::new(uuid::Uuid::new_v4());
