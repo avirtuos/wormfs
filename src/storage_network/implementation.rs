@@ -1,4 +1,5 @@
 //! StorageNetwork implementation with libp2p.
+#![allow(dead_code)]
 //!
 //! This module provides the concrete implementation of the StorageNetwork trait,
 //! including swarm initialization, peer management, and event handling.
@@ -9,7 +10,6 @@ use crate::storage_network::{
     types::*,
 };
 use crate::storage_raft_member::cluster_manager::HeartbeatTracker;
-use crate::storage_raft_member::StorageRaftMember;
 use futures::StreamExt;
 use libp2p::{
     gossipsub, identify, identity, noise, ping, request_response, swarm::SwarmEvent, tcp, yamux,

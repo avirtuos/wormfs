@@ -898,11 +898,11 @@ mod tests {
     #[test]
     fn test_mount_options_default() {
         let opts = MountOptions::default();
-        assert_eq!(opts.allow_root, false);
-        assert_eq!(opts.allow_other, false);
-        assert_eq!(opts.foreground, true);
+        assert!(!opts.allow_root);
+        assert!(!opts.allow_other);
+        assert!(opts.foreground);
         assert_eq!(opts.fsname, "wormfs");
-        assert_eq!(opts.auto_unmount, false);
-        assert_eq!(opts.debug, false);
+        assert!(!opts.auto_unmount);
+        assert!(!opts.debug);
     }
 }

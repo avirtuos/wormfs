@@ -1,4 +1,5 @@
 //! # FuseClientSimulator
+#![allow(dead_code)]
 //!
 //! gRPC client that mimics FUSE filesystem operations.
 

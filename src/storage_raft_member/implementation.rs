@@ -1,4 +1,5 @@
 //! Concrete implementation of StorageRaftMember using OpenRaft.
+#![allow(dead_code)]
 //!
 //! This module provides the actual implementation of the StorageRaftMember trait
 //! using OpenRaft for distributed consensus. It follows the interior mutability pattern

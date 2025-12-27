@@ -1252,12 +1252,14 @@ pub enum RaftError {
 }
 
 // Helper functions for generating IDs in stub mode
+#[allow(dead_code)]
 fn generate_inode() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_INODE: AtomicU64 = AtomicU64::new(1000);
     NEXT_INODE.fetch_add(1, Ordering::SeqCst)
 }
 
+#[allow(dead_code)]
 fn generate_lock_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_LOCK: AtomicU64 = AtomicU64::new(1);

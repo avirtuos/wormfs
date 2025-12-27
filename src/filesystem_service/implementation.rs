@@ -9,7 +9,7 @@ use super::inode::{InodeCache, InodeManager, ROOT_INODE};
 use super::raft_commands::StorageRaftMemberStub;
 use super::types::{ClientId, Config, DirEntry, Error, FileAttr, FileType, LockType, OpenFile};
 use super::FileSystemService;
-use crate::file_store::{FileStore, FileStoreImpl};
+use crate::file_store::FileStoreImpl;
 use crate::metadata_store::{FileId, FileMetadata, FileRecord, MetadataStore, MetadataStoreImpl};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -37,6 +37,7 @@ fn checked_end_offset(offset: u64, len: usize) -> Result<u64, Error> {
 ///
 /// Returns the stripe offset if safe, otherwise returns Internal error.
 /// This prevents overflow when calculating stripe boundaries for very large files.
+#[allow(dead_code)]
 fn checked_stripe_offset(stripe_idx: u64, stripe_size: u64) -> Result<u64, Error> {
     stripe_idx.checked_mul(stripe_size).ok_or_else(|| {
         Error::Internal(format!(
@@ -1459,6 +1460,7 @@ impl FileSystemServiceImpl {
     }
 
     /// Convert ChunkRecord from MetadataStore to ChunkMetadata for FileStore.
+    #[allow(dead_code)]
     fn chunk_record_to_metadata(
         &self,
         record: &crate::metadata_store::ChunkRecord,
@@ -3790,7 +3792,7 @@ mod tests {
         let client_id = ClientId::new(1);
 
         // Create a file - the file's permissions don't matter for unlink
-        let file_attr = service
+        let _file_attr = service
             .create(ROOT_INODE, "deleteme.txt", 0o644, 1000, 1000, client_id)
             .await
             .unwrap();

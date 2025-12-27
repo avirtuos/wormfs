@@ -567,6 +567,7 @@ pub trait FileSystemService: Send + Sync {
 // =============================================================================
 
 /// Inner state for FileSystemService with interior mutability.
+#[allow(dead_code)]
 struct FileSystemServiceInner {
     /// File handle map
     file_handles: RwLock<std::collections::HashMap<FileHandle, OpenFile>>,
@@ -604,6 +605,7 @@ impl FileSystemServiceImpl {
     /// Read one or more stripes and extract requested byte range.
     ///
     /// This is a stub - implementation will handle over-scanning.
+    #[allow(dead_code)]
     async fn read_stripes(
         &self,
         _file_id: FileId,
@@ -616,6 +618,7 @@ impl FileSystemServiceImpl {
     /// Write data across one or more stripes (read-modify-write for partial).
     ///
     /// This is a stub - implementation will handle buffering and RMW.
+    #[allow(dead_code)]
     async fn write_stripes(
         &self,
         _file_id: FileId,
@@ -628,6 +631,7 @@ impl FileSystemServiceImpl {
     /// Acquire file lock (delegated to RaftMember).
     ///
     /// This is a stub - implementation will delegate to StorageRaftMember.
+    #[allow(dead_code)]
     async fn acquire_lock_internal(
         &self,
         _file_id: FileId,
@@ -639,6 +643,7 @@ impl FileSystemServiceImpl {
     /// Release file lock.
     ///
     /// This is a stub - implementation will delegate to StorageRaftMember.
+    #[allow(dead_code)]
     async fn release_lock_internal(&self, _lock_id: u64) -> Result<(), Error> {
         unimplemented!("release_lock_internal will be implemented")
     }

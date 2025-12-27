@@ -60,7 +60,7 @@ pub mod types;
 use async_trait::async_trait;
 pub use types::{
     CheckProgress, CheckResult, ChunkId, Config, ConsistencyEvent, Error, FileId, NodeId,
-    RepairPriority, RepairRequest, StripeId, VerificationProgress, WatchdogStats, WatchdogStatus,
+    RepairPriority, RepairRequest, StripeId, VerificationProgress, WatchdogStatus,
 };
 
 /// StorageWatchdog trait defines the interface for data integrity monitoring.

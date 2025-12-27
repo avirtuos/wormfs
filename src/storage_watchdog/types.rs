@@ -1,4 +1,5 @@
 //! Common types for the StorageWatchdog component.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};

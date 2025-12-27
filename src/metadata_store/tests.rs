@@ -926,7 +926,7 @@ mod schema_verification {
 
     #[tokio::test]
     async fn test_indexes_exist() {
-        let (store, _temp) = create_test_store().await;
+        let (_store, _temp) = create_test_store().await;
 
         // Query SQLite's index catalog to verify indexes were created
         // This is a bit of a hack but validates that migrations ran correctly

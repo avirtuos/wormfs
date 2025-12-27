@@ -78,10 +78,7 @@ pub async fn components_handler(
             let component = metric_name[..dot_pos].to_string();
             let metric_suffix = metric_name[dot_pos + 1..].to_string();
 
-            components
-                .entry(component)
-                .or_insert_with(Vec::new)
-                .push(metric_suffix);
+            components.entry(component).or_default().push(metric_suffix);
         }
     }
 

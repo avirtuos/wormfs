@@ -157,7 +157,7 @@ impl ChunkClientPool {
         let heartbeat = self
             .heartbeat_tracker
             .get_heartbeat(&node_id_str)
-            .ok_or_else(|| Error::NodeNotFound(node_id))?;
+            .ok_or(Error::NodeNotFound(node_id))?;
 
         let storage_endpoint_url = heartbeat.storage_endpoint_url.ok_or_else(|| {
             Error::InvalidNodeAddress(format!("Node {} has no storage_endpoint_url", node_id.0))

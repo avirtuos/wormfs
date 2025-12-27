@@ -570,6 +570,7 @@ impl StorageNetwork for StorageNetworkHandle {
         StorageNetworkHandle::disconnect_peer(self, peer_id).await
     }
 
+    #[allow(deprecated)]
     async fn validate_peer_id(
         &self,
         ip: IpAddr,

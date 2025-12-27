@@ -1,4 +1,5 @@
 //! Implementation of the SnapshotStore trait.
+#![allow(dead_code)]
 
 use super::types::{
     CompressionAlgorithm, Config, Error, SnapshotInfo, SnapshotReader, SnapshotStats,

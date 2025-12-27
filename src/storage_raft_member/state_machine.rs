@@ -1,4 +1,5 @@
 //! RaftStateMachine implementation for WormFS.
+#![allow(dead_code)]
 //!
 //! This module implements OpenRaft's RaftStateMachine trait, applying committed
 //! operations to the MetadataStore. It handles:

@@ -51,11 +51,7 @@ fn convert_timestamp(time: Option<SystemTime>, peer_id: &str, field_name: &str) 
 /// * `include_connected_since` - Whether to include the connected_since field
 fn peer_to_json(peer: &PeerInfo, include_connected_since: bool) -> serde_json::Value {
     // Extract peer ID for logging
-    let peer_id = peer
-        .node_id
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("unknown");
+    let peer_id = peer.node_id.as_deref().unwrap_or("unknown");
 
     // Convert last_heartbeat timestamp with error logging
     let last_heartbeat = convert_timestamp(peer.last_heartbeat, peer_id, "last_heartbeat");

@@ -1,4 +1,6 @@
 //! Concrete implementation of MetadataStore using tokio-rusqlite for async operations.
+#![allow(dead_code)]
+#![allow(clippy::io_other_error)]
 
 use super::{
     cache::{CacheConfig, MetadataCache},
@@ -249,7 +251,7 @@ impl MetadataStoreImpl {
 
     /// Run migrations to initialize or update the schema.
     async fn run_migrations(&self) -> Result<(), Error> {
-        let migrations = vec![
+        let migrations = [
             include_str!("migrations/001_initial_schema.sql").to_string(),
             include_str!("migrations/002_indexes.sql").to_string(),
             include_str!("migrations/003_inode_management.sql").to_string(),
@@ -1841,7 +1843,7 @@ impl MetadataStore for MetadataStoreImpl {
 
                 // Check for overflow before incrementing
                 // SQLite INTEGER is signed i64, so we can't exceed i64::MAX
-                if inode >= i64::MAX {
+                if inode == i64::MAX {
                     return Err(tokio_rusqlite::Error::Other(Box::new(
                         std::io::Error::new(
                             std::io::ErrorKind::Other,

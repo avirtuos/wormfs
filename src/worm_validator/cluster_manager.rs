@@ -1,4 +1,5 @@
 //! # ClusterManager
+#![allow(dead_code)]
 //!
 //! Responsible for bootstrapping and managing the embedded storage cluster.
 
