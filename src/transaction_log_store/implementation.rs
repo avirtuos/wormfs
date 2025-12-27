@@ -303,8 +303,7 @@ impl TransactionLogStoreImpl {
     /// * `LogError::SerializationError` - Failed to deserialize the entry data
     /// * `LogError::DatabaseError` - Database operation failed
     fn get_entry_blocking(&self, index: u64) -> Result<LogEntry, LogError> {
-        let db = recover_read_lock(&self.inner.db, "get_entry")
-            .map_err(|e| LogError::DatabaseError(e))?;
+        let db = recover_read_lock(&self.inner.db, "get_entry").map_err(LogError::DatabaseError)?;
         let read_txn = db.begin_read().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin read transaction: {}", e))
         })?;
@@ -365,8 +364,8 @@ impl TransactionLogStoreImpl {
             return Err(LogError::InvalidIndex(start_index));
         }
 
-        let db = recover_read_lock(&self.inner.db, "get_entries")
-            .map_err(|e| LogError::DatabaseError(e))?;
+        let db =
+            recover_read_lock(&self.inner.db, "get_entries").map_err(LogError::DatabaseError)?;
         let read_txn = db.begin_read().map_err(|e| {
             LogError::DatabaseError(format!("Failed to begin read transaction: {}", e))
         })?;

@@ -493,7 +493,7 @@ impl WormFsStateMachine {
                     // Convert ONLY successful operations to metadata change events
                     let changes: Vec<super::types::MetadataChange> = successful_operations
                         .iter()
-                        .filter_map(|op| Self::operation_to_change(op))
+                        .filter_map(Self::operation_to_change)
                         .collect();
 
                     // Emit change event if there are any changes
@@ -598,7 +598,7 @@ impl WormFsStateMachine {
                 // Convert successful operations to metadata change events
                 let changes: Vec<super::types::MetadataChange> = successful_operations
                     .iter()
-                    .filter_map(|op| Self::operation_to_change(op))
+                    .filter_map(Self::operation_to_change)
                     .collect();
 
                 // Emit change event if there are any changes
