@@ -84,6 +84,7 @@ async fn test_metadata_metrics_are_published() {
         metadata_store,
         file_store,
         Some(metrics.clone()),
+        None, // raft_member
     )
     .await
     .expect("Failed to create FileSystemService");

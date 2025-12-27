@@ -75,7 +75,7 @@ impl MetadataCache {
         // Build stripe records cache with eviction listener
         let stripe_records = Cache::builder()
             .max_capacity((config.stripe_cache_size_mb * 1_024 * 1_024) as u64)
-            .weigher(|_key: &StripeId, value: &Arc<StripeRecord>| -> u32 {
+            .weigher(|_key: &StripeId, _value: &Arc<StripeRecord>| -> u32 {
                 // Rough size estimate for StripeRecord
                 (std::mem::size_of::<StripeRecord>() + 64)
                     .try_into()

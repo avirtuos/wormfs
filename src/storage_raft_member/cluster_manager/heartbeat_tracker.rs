@@ -332,6 +332,7 @@ mod tests {
             now,
             1,
             Some("http://node1:8080".to_string()),
+            None, // storage_endpoint_url
             Some("Leader".to_string()),
             Some(5),
             Some(100),
@@ -359,6 +360,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             Some("Leader".to_string()),
             Some(5),
             Some(100),
@@ -374,6 +376,7 @@ mod tests {
             now - 10000,
             1,
             None,
+            None, // storage_endpoint_url
             Some("Follower".to_string()),
             Some(5),
             Some(95),
@@ -399,6 +402,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             Some("Follower".to_string()),
             Some(5),
             Some(0),
@@ -414,6 +418,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             Some("Leader".to_string()),
             Some(5),
             Some(100),
@@ -438,6 +443,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             Some(5),
             Some(100),
@@ -451,6 +457,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             Some(5),
             Some(120),
@@ -464,6 +471,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             Some(5),
             Some(95),
@@ -488,6 +496,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             Some(5),
             Some(100),
@@ -501,6 +510,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             Some(5),
             Some(105),
@@ -514,6 +524,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             None,
             Some(5),
             Some(98),
@@ -536,6 +547,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             Some("Leader".to_string()),
             Some(5),
             Some(100),
@@ -549,6 +561,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             Some("Follower".to_string()),
             Some(5),
             Some(99),
@@ -562,6 +575,7 @@ mod tests {
             now,
             1,
             None,
+            None, // storage_endpoint_url
             Some("Learner".to_string()),
             Some(5),
             Some(50),

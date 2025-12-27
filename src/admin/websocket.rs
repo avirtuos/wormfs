@@ -25,7 +25,7 @@ pub struct WsState {
     /// Shutdown signal sender (shared across clones)
     shutdown_tx: Arc<tokio::sync::broadcast::Sender<()>>,
     /// Background task handle (shared across clones, using parking_lot for sync Drop)
-    _task_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    task_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl WsState {
@@ -40,7 +40,7 @@ impl WsState {
             metrics,
             broadcast_tx,
             shutdown_tx: Arc::new(shutdown_tx),
-            _task_handle: Arc::new(parking_lot::Mutex::new(None)),
+            task_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -118,7 +118,7 @@ impl WsState {
         });
 
         // Store the handle
-        *self._task_handle.lock() = Some(task_handle);
+        *self.task_handle.lock() = Some(task_handle);
     }
 }
 

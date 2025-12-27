@@ -313,7 +313,7 @@ impl RaftLogStorage<WormFsTypeConfig> for RaftLogStorageAdapter {
         let vote_bytes = Self::vote_to_bytes(vote)?;
 
         // Create VoteData wrapper for storage
-        let vote_data = VoteData {
+        let _vote_data = VoteData {
             term: 0, // These fields are unused when we store raw bytes
             node_id: 0,
             committed: false,

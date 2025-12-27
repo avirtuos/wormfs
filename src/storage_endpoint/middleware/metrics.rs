@@ -1,6 +1,5 @@
 //! Metrics collection middleware for gRPC requests.
 
-use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error};
 

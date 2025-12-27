@@ -919,7 +919,7 @@ impl FileSystemServiceImpl {
         use crate::filesystem_service::buffered_file_handle::{
             BufferedFileHandle, BufferedFileHandleConfig,
         };
-        use crate::filesystem_service::raft_commands::RaftClientImpl;
+        
 
         // Get storage policy from default
         let storage_policy = Arc::new(self.default_storage_policy());
@@ -1151,7 +1151,7 @@ impl FileSystemServiceImpl {
 
         // Task 2: Periodic metrics publication for BufferedFileHandle memory usage
         let service_metrics = Arc::clone(&self);
-        let metrics_task = tokio::spawn(async move {
+        let _metrics_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
 
             loop {
@@ -2983,7 +2983,7 @@ impl FileSystemService for FileSystemServiceImpl {
         new_uid: Option<u32>,
         new_gid: Option<u32>,
         size: Option<u64>,
-        atime: Option<SystemTime>,
+        _atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
         req_uid: u32,
         req_gid: u32,
@@ -3298,7 +3298,7 @@ mod tests {
     use crate::file_store::FileStore;
     use crate::metadata_store::{
         factory::MetadataStoreFactory, types::Config as MetadataConfig, types::IsolationLevel,
-        types::SynchronousMode, FileMetadata, MetadataStore,
+        types::SynchronousMode, MetadataStore,
     };
     use tempfile::TempDir;
 
@@ -3362,6 +3362,7 @@ mod tests {
             fs_config,
             metadata_store,
             file_store,
+            None, // Use default RaftClient stub
         ))
     }
 

@@ -1,0 +1,25 @@
+# Clippy configuration for WormFS
+
+# Cognitive complexity threshold
+# Functions with higher complexity will trigger warnings
+# Default is 25
+cognitive-complexity-threshold = 30
+
+# Maximum number of lines for a function
+# Default is 100
+too-many-lines-threshold = 150
+
+# Maximum number of arguments for a function
+# Default is 7
+too-many-arguments-threshold = 8
+
+# Don't warn about TODO comments in tests
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+allow-panic-in-tests = true
+
+# Allow print statements in tests for debugging
+allow-print-in-tests = false
+
+# Check private items for missing documentation
+check-private-items = true
