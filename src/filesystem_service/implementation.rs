@@ -919,7 +919,6 @@ impl FileSystemServiceImpl {
         use crate::filesystem_service::buffered_file_handle::{
             BufferedFileHandle, BufferedFileHandleConfig,
         };
-        
 
         // Get storage policy from default
         let storage_policy = Arc::new(self.default_storage_policy());
@@ -3393,7 +3392,7 @@ mod tests {
             .unwrap();
 
         // Start background tasks (lock extension)
-        Arc::clone(&service).start_background_tasks();
+        let _ = Arc::clone(&service).start_background_tasks();
 
         // Sleep for 5 seconds (longer than lock_timeout of 2 seconds)
         // If lock extension is working, the lock should still be held
@@ -3453,7 +3452,7 @@ mod tests {
             .unwrap();
 
         // Start background tasks
-        Arc::clone(&service).start_background_tasks();
+        let _ = Arc::clone(&service).start_background_tasks();
 
         // Remove the client from sessions (simulate no heartbeat)
         {

@@ -8,8 +8,8 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use super::conversions::{
-    bytes_to_chunk_id, bytes_to_file_id, bytes_to_stripe_id,
-    filestore_error_to_status, proto_to_compression_algorithm, proto_to_erasure_algorithm,
+    bytes_to_chunk_id, bytes_to_file_id, bytes_to_stripe_id, filestore_error_to_status,
+    proto_to_compression_algorithm, proto_to_erasure_algorithm,
 };
 use super::GRPC_STREAM_CHANNEL_BUFFER_SIZE;
 use crate::file_store::{ChunkData, ChunkHeader, DiskId, FileStore};

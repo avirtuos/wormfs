@@ -164,6 +164,7 @@ impl TestCluster {
                 idle_connection_timeout: Duration::from_secs(60),
                 keep_alive_interval: Duration::from_secs(5),
                 admin_url: None,
+                storage_endpoint_url: None,
             };
 
             // Debug: print node configuration
@@ -454,6 +455,7 @@ async fn test_peer_discovery_via_configuration() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Node 1: Has both node 0 and node 2 configured
@@ -477,6 +479,7 @@ async fn test_peer_discovery_via_configuration() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Node 2: Only has node 1 configured
@@ -494,6 +497,7 @@ async fn test_peer_discovery_via_configuration() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Create all nodes
@@ -720,6 +724,7 @@ async fn test_autoid_mode_first_connection() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Configuration for node 2 with AutoId mode for node 1
@@ -737,6 +742,7 @@ async fn test_autoid_mode_first_connection() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Create nodes
@@ -1863,6 +1869,7 @@ async fn test_explicit_mode_reject_mismatch() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Node 2 will have a different peer ID than expected by node 1
@@ -1877,6 +1884,7 @@ async fn test_explicit_mode_reject_mismatch() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Create nodes with mismatched peer IDs
@@ -1976,6 +1984,7 @@ async fn test_autoid_mode_learn_and_enforce() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     let config2 = Config {
@@ -1992,6 +2001,7 @@ async fn test_autoid_mode_learn_and_enforce() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Create and connect nodes
@@ -2168,6 +2178,7 @@ async fn test_explicit_mode_reject_disconnects_immediately() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Node2 (with peer_id2, which doesn't match what node1 expects)
@@ -2185,6 +2196,7 @@ async fn test_explicit_mode_reject_disconnects_immediately() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Create nodes
@@ -2281,6 +2293,7 @@ async fn test_reconnection_after_network_failure() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // Node 2 configuration
@@ -2298,6 +2311,7 @@ async fn test_reconnection_after_network_failure() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // === First connection - establish initial cluster ===
@@ -2440,6 +2454,7 @@ async fn test_peer_state_recovery_after_restart() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     let config2 = Config {
@@ -2456,6 +2471,7 @@ async fn test_peer_state_recovery_after_restart() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // === Initial connection ===
@@ -2601,6 +2617,7 @@ async fn test_peer_id_store_persistence() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     let config2 = Config {
@@ -2617,6 +2634,7 @@ async fn test_peer_id_store_persistence() {
         idle_connection_timeout: Duration::from_secs(60),
         keep_alive_interval: Duration::from_secs(5),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     // === First connection - learn peer IDs ===
@@ -2785,6 +2803,7 @@ async fn test_stale_connection_cleanup() {
         idle_connection_timeout: Duration::from_secs(30),
         keep_alive_interval: Duration::from_secs(2),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     let (inner1, handle1) = StorageNetworkFactory::create(config1)
@@ -2822,6 +2841,7 @@ async fn test_stale_connection_cleanup() {
         idle_connection_timeout: Duration::from_secs(30),
         keep_alive_interval: Duration::from_secs(2),
         admin_url: None,
+        storage_endpoint_url: None,
     };
 
     let (inner2, handle2) = StorageNetworkFactory::create(config2)
