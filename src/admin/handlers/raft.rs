@@ -12,7 +12,6 @@ use axum::{
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::error;
 
 /// Convert Instant to seconds elapsed since given instant.
 ///

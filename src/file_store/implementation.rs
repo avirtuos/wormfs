@@ -171,6 +171,48 @@ impl FileStoreImpl {
 
         Ok(())
     }
+
+    /// Helper function to deserialize chunk data from raw bytes
+    fn deserialize_chunk_data(buffer: &[u8], chunk_id: ChunkId) -> Result<ChunkData, Error> {
+        if buffer.len() < 4 {
+            return Err(Error::ChunkCorrupt(
+                chunk_id,
+                "File too small to contain header".to_string(),
+            ));
+        }
+
+        // Read header length
+        let header_len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+
+        if buffer.len() < 4 + header_len {
+            return Err(Error::ChunkCorrupt(
+                chunk_id,
+                "File too small to contain complete header".to_string(),
+            ));
+        }
+
+        // Deserialize header
+        let header: ChunkHeader =
+            bincode::deserialize(&buffer[4..4 + header_len]).map_err(|e| {
+                Error::ChunkCorrupt(chunk_id, format!("Failed to deserialize header: {}", e))
+            })?;
+
+        // Verify magic bytes
+        if !header.verify_magic() {
+            return Err(Error::ChunkCorrupt(
+                header.chunk_id,
+                "Invalid magic bytes".to_string(),
+            ));
+        }
+
+        // Extract data (everything after header)
+        let data = buffer[4 + header_len..].to_vec();
+
+        Ok(ChunkData {
+            header,
+            data,
+        })
+    }
 }
 
 impl FileStoreImpl {
@@ -782,6 +824,75 @@ impl FileStore for FileStoreImpl {
         Ok(())
     }
 
+    async fn read_chunk_local(&self, chunk_id: ChunkId) -> Result<ChunkData, Error> {
+        // Search for chunk across all disks
+        // Note: This is inefficient and should be optimized with a chunk index in the future
+        let start = std::time::Instant::now();
+
+        let disks = self.inner.disks.read().await;
+        let chunk_filename = chunk_id.as_uuid().as_simple().to_string();
+
+        // Try each disk
+        for disk_info in disks.values() {
+            let wormfs_root = disk_info.path.join("wormfs");
+
+            if !wormfs_root.exists() {
+                continue;
+            }
+
+            // Search through bucket directories (0-999)
+            if let Ok(mut bucket_entries) = tokio::fs::read_dir(&wormfs_root).await {
+                while let Ok(Some(bucket_entry)) = bucket_entries.next_entry().await {
+                    if !bucket_entry.path().is_dir() {
+                        continue;
+                    }
+
+                    // Search through file_id directories
+                    if let Ok(mut file_entries) = tokio::fs::read_dir(bucket_entry.path()).await {
+                        while let Ok(Some(file_entry)) = file_entries.next_entry().await {
+                            if !file_entry.path().is_dir() {
+                                continue;
+                            }
+
+                            // Check for the chunk file
+                            let chunk_path = file_entry.path().join(&chunk_filename);
+                            if chunk_path.exists() {
+                                // Try to read and deserialize the chunk
+                                if let Ok(buffer) = tokio::fs::read(&chunk_path).await {
+                                    if let Ok(chunk_data) =
+                                        Self::deserialize_chunk_data(&buffer, chunk_id)
+                                    {
+                                        // Publish metrics if available
+                                        if let Some(ref metrics) =
+                                            *self.inner.metrics.read().unwrap()
+                                        {
+                                            let elapsed = start.elapsed().as_secs_f64();
+                                            let _ = metrics.publish_counter(
+                                                "filestore.chunk_read_local.total",
+                                                1,
+                                                crate::metric_service::UnitType::Operations,
+                                            );
+                                            let _ = metrics.publish_histogram(
+                                                "filestore.chunk_read_local.latency",
+                                                elapsed,
+                                                crate::metric_service::UnitType::Seconds,
+                                            );
+                                        }
+
+                                        return Ok(chunk_data);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Chunk not found on any disk
+        Err(Error::ChunkNotFound(chunk_id))
+    }
+
     async fn get_disk_path(&self, disk_id: DiskId) -> Result<PathBuf, Error> {
         let disks = self.inner.disks.read().await;
         match disks.get(&disk_id) {
@@ -1228,6 +1339,7 @@ mod tests {
             current_time_ms(),
             1,
             None,
+            None, // storage_endpoint_url
             None,
             None,
             None,

@@ -30,7 +30,7 @@ impl FuseClientSimulator {
     /// # Errors
     ///
     /// Returns an error if connection fails.
-    pub async fn connect(endpoint: SocketAddr) -> Result<Self, ValidatorError> {
+    pub async fn connect(_endpoint: SocketAddr) -> Result<Self, ValidatorError> {
         // TODO: Implement gRPC client connection
         // 1. Create tonic channel
         // 2. Create FilesystemServiceClient
@@ -50,8 +50,8 @@ impl FuseClientSimulator {
     /// Returns a file handle on success.
     pub async fn create_file(
         &mut self,
-        path: &str,
-        mode: u32,
+        _path: &str,
+        _mode: u32,
     ) -> Result<FileHandle, ValidatorError> {
         // TODO: Implement file creation via gRPC
         unimplemented!("FuseClientSimulator::create_file")
@@ -70,9 +70,9 @@ impl FuseClientSimulator {
     /// Returns the data read.
     pub async fn read_file(
         &mut self,
-        fh: FileHandle,
-        offset: u64,
-        size: u32,
+        _fh: FileHandle,
+        _offset: u64,
+        _size: u32,
     ) -> Result<Vec<u8>, ValidatorError> {
         // TODO: Implement file read via gRPC
         unimplemented!("FuseClientSimulator::read_file")
@@ -91,9 +91,9 @@ impl FuseClientSimulator {
     /// Returns the number of bytes written.
     pub async fn write_file(
         &mut self,
-        fh: FileHandle,
-        offset: u64,
-        data: &[u8],
+        _fh: FileHandle,
+        _offset: u64,
+        _data: &[u8],
     ) -> Result<u64, ValidatorError> {
         // TODO: Implement file write via gRPC
         unimplemented!("FuseClientSimulator::write_file")
@@ -104,7 +104,7 @@ impl FuseClientSimulator {
     /// # Arguments
     ///
     /// * `fh` - File handle
-    pub async fn delete_file(&mut self, fh: FileHandle) -> Result<(), ValidatorError> {
+    pub async fn delete_file(&mut self, _fh: FileHandle) -> Result<(), ValidatorError> {
         // TODO: Implement file deletion via gRPC
         unimplemented!("FuseClientSimulator::delete_file")
     }
@@ -114,7 +114,7 @@ impl FuseClientSimulator {
     /// # Arguments
     ///
     /// * `fh` - File handle
-    pub async fn get_attr(&mut self, fh: FileHandle) -> Result<FileAttr, ValidatorError> {
+    pub async fn get_attr(&mut self, _fh: FileHandle) -> Result<FileAttr, ValidatorError> {
         // TODO: Implement getattr via gRPC
         unimplemented!("FuseClientSimulator::get_attr")
     }
@@ -125,7 +125,7 @@ impl FuseClientSimulator {
     ///
     /// * `fh` - File handle
     /// * `attr` - New file attributes
-    pub async fn set_attr(&mut self, fh: FileHandle, attr: FileAttr) -> Result<(), ValidatorError> {
+    pub async fn set_attr(&mut self, _fh: FileHandle, _attr: FileAttr) -> Result<(), ValidatorError> {
         // TODO: Implement setattr via gRPC
         unimplemented!("FuseClientSimulator::set_attr")
     }
@@ -136,7 +136,7 @@ impl FuseClientSimulator {
     ///
     /// * `path` - Directory path
     /// * `mode` - Directory permissions (Unix mode)
-    pub async fn mkdir(&mut self, path: &str, mode: u32) -> Result<(), ValidatorError> {
+    pub async fn mkdir(&mut self, _path: &str, _mode: u32) -> Result<(), ValidatorError> {
         // TODO: Implement mkdir via gRPC
         unimplemented!("FuseClientSimulator::mkdir")
     }
@@ -146,7 +146,7 @@ impl FuseClientSimulator {
     /// # Arguments
     ///
     /// * `dir` - Directory file handle
-    pub async fn readdir(&mut self, dir: FileHandle) -> Result<Vec<DirEntry>, ValidatorError> {
+    pub async fn readdir(&mut self, _dir: FileHandle) -> Result<Vec<DirEntry>, ValidatorError> {
         // TODO: Implement readdir via gRPC
         unimplemented!("FuseClientSimulator::readdir")
     }
@@ -163,8 +163,8 @@ impl FuseClientSimulator {
     /// Returns a lock ID on success.
     pub async fn acquire_lock(
         &mut self,
-        fh: FileHandle,
-        lock_type: LockType,
+        _fh: FileHandle,
+        _lock_type: LockType,
     ) -> Result<LockId, ValidatorError> {
         // TODO: Implement lock acquisition via gRPC
         unimplemented!("FuseClientSimulator::acquire_lock")
@@ -175,7 +175,7 @@ impl FuseClientSimulator {
     /// # Arguments
     ///
     /// * `lock_id` - Lock ID to release
-    pub async fn release_lock(&mut self, lock_id: LockId) -> Result<(), ValidatorError> {
+    pub async fn release_lock(&mut self, _lock_id: LockId) -> Result<(), ValidatorError> {
         // TODO: Implement lock release via gRPC
         unimplemented!("FuseClientSimulator::release_lock")
     }

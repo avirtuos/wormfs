@@ -376,10 +376,10 @@ impl ClusterManager {
     fn spawn_heartbeat_discovery_task(&self) -> Option<JoinHandle<()>> {
         let heartbeat_tracker = self.heartbeat_tracker.as_ref()?.clone();
         let raft = self.raft.clone();
-        let membership_manager = self.membership_manager.clone();
+        let _membership_manager = self.membership_manager.clone();
         let event_sender = self.event_sender.clone();
         let is_running = self.is_running.clone();
-        let config = self.config.clone();
+        let _config = self.config.clone();
 
         Some(tokio::spawn(async move {
             let mut check_interval = interval(Duration::from_secs(5));

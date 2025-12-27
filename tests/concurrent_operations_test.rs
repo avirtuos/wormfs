@@ -121,7 +121,7 @@ async fn create_test_filesystem_service() -> (Arc<FileSystemServiceImpl>, TempDi
     let fs_config = wormfs::filesystem_service::Config::default();
 
     let service = Arc::new(
-        FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None)
+        FileSystemServiceImplFactory::create(fs_config, metadata_store, file_store, None, None)
             .await
             .unwrap(),
     );

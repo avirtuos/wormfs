@@ -8,11 +8,11 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use super::conversions::{
-    bytes_to_chunk_id, bytes_to_file_id, bytes_to_stripe_id, chunk_id_to_bytes,
+    bytes_to_chunk_id, bytes_to_file_id, bytes_to_stripe_id,
     filestore_error_to_status, proto_to_compression_algorithm, proto_to_erasure_algorithm,
 };
 use super::GRPC_STREAM_CHANNEL_BUFFER_SIZE;
-use crate::file_store::{ChunkData, ChunkHeader, DiskId, FileId, FileStore, StripeId};
+use crate::file_store::{ChunkData, ChunkHeader, DiskId, FileStore};
 use crate::storage_endpoint::proto::wormfs::chunk::chunk_service_server::ChunkService;
 use crate::storage_endpoint::proto::wormfs::chunk::*;
 
@@ -80,13 +80,22 @@ impl<F: FileStore + 'static> ChunkService for ChunkServiceImpl<F> {
         let req = request.into_inner();
         debug!("CheckChunk request");
 
-        let _chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
+        let chunk_id = bytes_to_chunk_id(&req.chunk_id)?;
 
-        // TODO: check_chunk needs file_id/stripe_id/disk_id like read_chunk does
-        // For now, return not implemented
-        Err(Status::unimplemented(
-            "check_chunk requires file_id/stripe_id/disk_id parameters",
-        ))
+        // Try to read the chunk locally to check if it exists
+        match self.file_store.read_chunk_local(chunk_id).await {
+            Ok(chunk_data) => {
+                let size = chunk_data.data.len() as u64;
+                Ok(Response::new(CheckChunkResponse { exists: true, size }))
+            }
+            Err(crate::file_store::Error::ChunkNotFound(_)) => {
+                Ok(Response::new(CheckChunkResponse {
+                    exists: false,
+                    size: 0,
+                }))
+            }
+            Err(e) => Err(Status::internal(format!("Failed to check chunk: {}", e))),
+        }
     }
 
     async fn verify_chunk(

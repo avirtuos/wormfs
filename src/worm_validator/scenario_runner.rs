@@ -29,7 +29,7 @@ impl TestScenarioRunner {
     /// # Arguments
     ///
     /// * `filter` - Optional list of scenario names or categories to load
-    pub fn load_scenarios(&mut self, filter: Option<&[String]>) {
+    pub fn load_scenarios(&mut self, _filter: Option<&[String]>) {
         // TODO: Implement scenario loading
         // 1. Instantiate all available scenarios
         // 2. Apply filter if provided

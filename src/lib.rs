@@ -31,6 +31,9 @@
 //! - **Modularity**: Clean component boundaries with well-defined traits
 //! - **Async-First**: Built on Tokio for high-performance async I/O
 
+// Clippy lints
+#![warn(clippy::used_underscore_binding)]
+
 pub mod admin;
 pub mod file_store;
 pub mod filesystem_service;

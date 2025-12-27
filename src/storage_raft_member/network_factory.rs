@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
-use tracing::debug;
 
 use crate::storage_network::NetworkHandleTrait;
 
@@ -125,8 +124,6 @@ impl RaftNetworkFactory<WormFsTypeConfig> for WormFsNetworkFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_network_factory_creation() {
         // This test just verifies the factory can be created

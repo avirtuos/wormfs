@@ -504,7 +504,7 @@ impl Filesystem for FuseAdapter {
         name: &OsStr,
         mode: u32,
         _umask: u32,
-        _flags: i32,
+        flags: i32,
         reply: fuser::ReplyCreate,
     ) {
         let name_str = name.to_string_lossy();
@@ -528,7 +528,7 @@ impl Filesystem for FuseAdapter {
             Ok(attr) => {
                 // After creating the file, open it to get a proper file handle
                 // This ensures the file is tracked in open_files and can be written to
-                let open_flags = _flags as u32;
+                let open_flags = flags as u32;
                 match self
                     .runtime
                     .block_on(self.service.open(attr.ino, open_flags, uid, gid, client_id))

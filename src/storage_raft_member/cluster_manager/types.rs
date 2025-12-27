@@ -111,7 +111,7 @@ impl NodeState {
     }
 
     /// Record a state change and apply exponential backoff if flapping detected
-    pub fn record_state_change(&mut self, old_health: NodeHealth, new_health: NodeHealth) {
+    pub fn record_state_change(&mut self, _old_health: NodeHealth, _new_health: NodeHealth) {
         // Track state change
         self.last_state_change = Some(Instant::now());
         self.recent_state_changes = self.recent_state_changes.saturating_add(1);

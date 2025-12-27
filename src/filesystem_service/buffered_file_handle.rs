@@ -1064,7 +1064,7 @@ impl BufferedFileHandle {
         let start_time = std::time::Instant::now();
 
         // 1. Flush complete builders to FileStore (or all if force=true)
-        let (builders_to_flush, config) = {
+        let (builders_to_flush, _config) = {
             let mut inner = self.inner.lock().expect(
                 "BufferedFileHandle inner lock poisoned - indicates panic during file operation",
             );
@@ -1519,7 +1519,7 @@ mod tests {
     use crate::file_store::types::CompressionAlgorithm;
     use crate::file_store::types::{
         ChunkCacheEntry, ChunkData, ChunkId, ChunkMetadata, DiskId, DiskStats,
-        Error as FileStoreError, PrefetchPolicy, PrepareVote, RebuildResult, VerificationResult,
+        Error as FileStoreError, PrefetchPolicy, RebuildResult, VerificationResult,
     };
     use crate::filesystem_service::types::FileType;
     use crate::metadata_store::{
@@ -1527,7 +1527,7 @@ mod tests {
         Config as MetadataConfig, MetadataStoreFactory,
     };
     use async_trait::async_trait;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -1597,6 +1597,10 @@ mod tests {
             _chunk_id: ChunkId,
             _chunk_data: ChunkData,
         ) -> Result<(), FileStoreError> {
+            unimplemented!()
+        }
+
+        async fn read_chunk_local(&self, _chunk_id: ChunkId) -> Result<ChunkData, FileStoreError> {
             unimplemented!()
         }
 
@@ -1675,6 +1679,48 @@ mod tests {
             &self,
             _operations: Vec<StripeOperation>,
         ) -> Result<(), crate::filesystem_service::types::Error> {
+            // Mock implementation - always succeeds
+            Ok(())
+        }
+
+        async fn propose_raft_command(
+            &self,
+            _command: crate::filesystem_service::raft_commands::RaftCommand,
+        ) -> Result<crate::filesystem_service::raft_commands::RaftCommandResult, Error> {
+            // Mock implementation - always succeeds
+            Ok(crate::filesystem_service::raft_commands::RaftCommandResult::FileUpdated)
+        }
+
+        async fn acquire_lock(
+            &self,
+            _file_id: crate::file_store::FileId,
+            _inode: u64,
+            _lock_type: crate::filesystem_service::raft_commands::LockType,
+            _client_id: u64,
+            _node_id: u64,
+            _expires_at: std::time::SystemTime,
+        ) -> Result<u64, Error> {
+            // Mock implementation - always succeeds with lock_id 1
+            Ok(1)
+        }
+
+        async fn release_lock(
+            &self,
+            _file_id: crate::file_store::FileId,
+            _inode: u64,
+            _client_id: u64,
+        ) -> Result<(), Error> {
+            // Mock implementation - always succeeds
+            Ok(())
+        }
+
+        async fn extend_lock(
+            &self,
+            _file_id: crate::file_store::FileId,
+            _inode: u64,
+            _client_id: u64,
+            _new_expiry: std::time::SystemTime,
+        ) -> Result<(), Error> {
             // Mock implementation - always succeeds
             Ok(())
         }

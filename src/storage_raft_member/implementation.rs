@@ -10,7 +10,7 @@ use openraft::{Raft, RaftMetrics as OpenRaftMetrics};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace};
@@ -955,7 +955,7 @@ impl StorageRaftMember for StorageRaftMemberImpl {
         }
 
         // Convert OpenRaft errors to our Error type
-        let response = result.map_err(|e| match e {
+        let _response = result.map_err(|e| match e {
             openraft::error::RaftError::APIError(api_err) => {
                 use openraft::error::ClientWriteError;
                 match api_err {
