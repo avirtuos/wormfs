@@ -1,4 +1,5 @@
 //! Concrete implementation of StorageNode for Phase 1.
+#![allow(dead_code)]
 //!
 //! This is a simplified StorageNode that only wires together the core Phase 1 components:
 //! - MetadataStore (SQLite persistence)

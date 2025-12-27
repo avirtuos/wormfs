@@ -274,7 +274,7 @@ async fn test_cache_statistics() {
 
     // Check stats - note that entry_count may lag due to moka's async nature
     // So we just verify stats are available, not exact counts
-    let stats = cache.stripe_stats();
+    let _stats = cache.stripe_stats();
     // At least verify weighted size increases when cache has entries
     // (this is more reliable than entry_count which may lag)
 

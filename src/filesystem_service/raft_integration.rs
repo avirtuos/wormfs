@@ -18,6 +18,7 @@ use std::time::SystemTime;
 ///
 /// This shows how metadata operations will route through Raft in Phase 2+.
 /// For Phase 1, we use StorageRaftMemberStub which immediately returns success.
+#[allow(dead_code)]
 pub struct RaftIntegratedFileSystemService {
     /// Reference to the Raft member (stub for Phase 1)
     raft_member: Arc<StorageRaftMemberStub>,

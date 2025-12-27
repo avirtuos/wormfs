@@ -109,7 +109,6 @@ mod tests {
         fn get_metrics(&self) -> crate::storage_raft_member::types::RaftMetrics {
             use crate::storage_raft_member::types::{RaftMetrics, RaftRole};
             use std::collections::HashMap;
-            use std::time::Instant;
 
             RaftMetrics {
                 current_term: 0,

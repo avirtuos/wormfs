@@ -11,7 +11,7 @@ use crate::filesystem_service::buffered_file_handle::RaftClient;
 use crate::filesystem_service::raft_client_adapter::RaftClientAdapter;
 use crate::filesystem_service::raft_commands::{RaftClientImpl, StorageRaftMemberStub};
 use crate::metadata_store::MetadataStoreImpl;
-use crate::metric_service::{MetricService, MetricServiceImpl};
+use crate::metric_service::MetricServiceImpl;
 use crate::storage_raft_member::StorageRaftMemberImpl;
 use std::sync::Arc;
 

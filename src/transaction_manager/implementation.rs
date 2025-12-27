@@ -1,4 +1,5 @@
 //! Implementation of the TransactionManager trait.
+#![allow(dead_code)]
 
 use super::types::{Config, Error, Operation, Result, TransactionBatch, TxId};
 use super::TransactionManager;
@@ -569,8 +570,6 @@ impl TransactionManager for TransactionManagerImpl {
         filter: Option<Vec<crate::storage_raft_member::types::MetadataChangeType>>,
     ) -> tokio::sync::mpsc::UnboundedReceiver<crate::storage_raft_member::types::MetadataChangeEvent>
     {
-        use crate::storage_raft_member::StorageRaftMember;
-
         // Forward the subscription request to the underlying Raft member
         self.raft_member.subscribe_metadata_changes(filter).await
     }

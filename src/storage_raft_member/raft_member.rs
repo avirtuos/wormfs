@@ -3,6 +3,7 @@
 //! This module provides the `RaftMember` type which implements OpenRaft's `RaftNetwork`
 //! trait for point-to-point communication with a specific node in the Raft cluster.
 //!
+#![allow(clippy::io_other_error)]
 //! ## Architecture
 //!
 //! Each `RaftMember` instance:

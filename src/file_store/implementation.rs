@@ -22,14 +22,17 @@ use crate::metric_service::MetricService;
 use crate::metadata_store::MetadataStore;
 
 /// Magic bytes for chunk file format
+#[allow(dead_code)]
 const CHUNK_MAGIC: &[u8; 4] = b"WORM";
 
 /// Current chunk format version
+#[allow(dead_code)]
 const CHUNK_FORMAT_VERSION: u16 = 1;
 
 /// Inner state for FileStoreImpl
 struct FileStoreInner {
     /// Configuration
+    #[allow(dead_code)]
     config: Config,
 
     /// Local disks managed by this node (async lock for disk operations)
@@ -55,6 +58,7 @@ struct FileStoreInner {
 /// Information about a local disk
 struct DiskInfo {
     /// Disk identifier
+    #[allow(dead_code)]
     disk_id: DiskId,
 
     /// Mount path
@@ -67,6 +71,7 @@ struct DiskInfo {
     free_space: u64,
 
     /// Number of chunks stored
+    #[allow(dead_code)]
     chunk_count: u64,
 }
 
@@ -1307,7 +1312,7 @@ mod tests {
         let mut store = FileStoreImpl::new(config).unwrap();
 
         // Initialize the disk
-        let disk_id = DiskId::new(1);
+        let _disk_id = DiskId::new(1);
         store.add_disk(disk_path).await.unwrap();
 
         // Get the actual disk_id (add_disk generates one)

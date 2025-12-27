@@ -21,7 +21,7 @@
 use openraft::storage::{LogFlushed, RaftLogReader, RaftLogStorage};
 use openraft::{
     AnyError, CommittedLeaderId, Entry, EntryPayload, ErrorSubject, ErrorVerb, LogId, LogState,
-    OptionalSend, RaftLogId, StorageError, StorageIOError, Vote,
+    OptionalSend, StorageError, StorageIOError, Vote,
 };
 use std::fmt::Debug;
 use std::ops::RangeBounds;

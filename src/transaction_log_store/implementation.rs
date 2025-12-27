@@ -1,6 +1,7 @@
 //! redb-based implementation of TransactionLogStore.
 //!
 //! # Lock Poisoning Handling
+#![allow(clippy::io_other_error)]
 //!
 //! This implementation uses a two-tier strategy for handling lock poisoning:
 //!
