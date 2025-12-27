@@ -27,8 +27,9 @@ fn create_test_mount_config(admin_port: u16) -> MountConfig {
             port: admin_port,
             ..Default::default()
         }),
-        network_config: None, // No network needed for these basic tests
-        raft_config: None,    // No raft needed for these basic tests
+        network_config: None,          // No network needed for these basic tests
+        raft_config: None,             // No raft needed for these basic tests
+        storage_endpoint_config: None, // No storage endpoint needed for these basic tests
         mount_point: std::path::PathBuf::from("/tmp/wormfs-test"),
         mount_options: Default::default(),
     }

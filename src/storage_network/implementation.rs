@@ -1855,7 +1855,7 @@ impl super::StorageNetworkInner {
         // Deserialize the RPC message to determine type
         let rpc_message: RaftRpcMessage = bincode::deserialize(&request).map_err(|e| {
             error!("Failed to deserialize Raft RPC message: {:?}", e);
-            self.record_metric_counter("storage_network.request_response.handler_errors", 1);
+            let _ = self.record_metric_counter("storage_network.request_response.handler_errors", 1);
             Error::SendFailed(format!("Failed to deserialize Raft RPC: {:?}", e))
         })?;
 
@@ -2283,7 +2283,7 @@ mod tests {
                     idle_connection_timeout: Duration::from_secs(600),
                     keep_alive_interval: Duration::from_secs(30),
                     admin_url: None,
-            storage_endpoint_url: None,
+                    storage_endpoint_url: None,
                 };
 
                 let (inner, handle) = super::super::StorageNetworkFactory::create(config)
