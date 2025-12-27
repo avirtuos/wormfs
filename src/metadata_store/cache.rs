@@ -186,10 +186,7 @@ impl MetadataCache {
 
         // Update secondary index
         let mut index = self.stripe_offset_index.write().unwrap();
-        index
-            .entry(file_id)
-            .or_insert_with(BTreeMap::new)
-            .insert(offset, stripe_id);
+        index.entry(file_id).or_default().insert(offset, stripe_id);
     }
 
     // ===== Chunk List Operations =====

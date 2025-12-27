@@ -546,7 +546,7 @@ impl ClusterManager {
                 node_id: *node_id,
                 old_health: previous.unwrap_or(NodeHealth::Healthy),
                 new_health: *current,
-                reason: format!("Detected by ClusterManager monitoring"),
+                reason: "Detected by ClusterManager monitoring".to_string(),
             });
 
             // Take action based on the health change

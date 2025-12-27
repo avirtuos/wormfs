@@ -18,6 +18,9 @@
 //! Votes are persisted to the VOTE_TABLE in TransactionLogStore's redb database,
 //! providing true durability across node restarts and maintaining Raft's safety guarantees.
 
+// Large error variants from openraft::StorageError (external library type)
+#![allow(clippy::result_large_err)]
+
 use openraft::storage::{LogFlushed, RaftLogReader, RaftLogStorage};
 use openraft::{
     AnyError, CommittedLeaderId, Entry, EntryPayload, ErrorSubject, ErrorVerb, LogId, LogState,

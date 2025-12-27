@@ -11,7 +11,15 @@ too-many-lines-threshold = 150
 
 # Maximum number of arguments for a function
 # Default is 7
-too-many-arguments-threshold = 8
+# Increased to 12 to accommodate Raft trait methods and gRPC service implementations
+# that require many parameters for state management
+too-many-arguments-threshold = 12
+
+# Large error type threshold
+# Default is 128 bytes
+# Increased to 256 to accommodate openraft::StorageError and tonic::Status
+# which are large but come from external libraries
+type-complexity-threshold = 260
 
 # Don't warn about TODO comments in tests
 allow-expect-in-tests = true

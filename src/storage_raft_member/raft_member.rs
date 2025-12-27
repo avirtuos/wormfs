@@ -132,7 +132,7 @@ impl RaftMember {
     ///
     /// This is a helper method that handles serialization, network communication,
     /// and deserialization for all Raft RPC types.
-    async fn send_rpc<Req, Resp>(
+    async fn send_rpc<Resp>(
         &self,
         rpc_message: RaftRpcMessage,
         rpc_name: &str,
@@ -239,7 +239,7 @@ impl RaftNetwork<WormFsTypeConfig> for RaftMember {
             self.target_peer_id
         );
         let response: RaftRpcResponse = self
-            .send_rpc::<RaftRpcMessage, RaftRpcResponse>(message, "append_entries")
+            .send_rpc::<RaftRpcResponse>(message, "append_entries")
             .await?;
         info!(
             "[RaftMember] RPC returned from peer_id={}",
@@ -278,9 +278,7 @@ impl RaftNetwork<WormFsTypeConfig> for RaftMember {
         _option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, WormFsNode, RaftError<NodeId>>> {
         let message = RaftRpcMessage::Vote(rpc);
-        let response: RaftRpcResponse = self
-            .send_rpc::<RaftRpcMessage, RaftRpcResponse>(message, "vote")
-            .await?;
+        let response: RaftRpcResponse = self.send_rpc::<RaftRpcResponse>(message, "vote").await?;
 
         match response {
             RaftRpcResponse::Vote(resp) => Ok(resp),
@@ -307,7 +305,7 @@ impl RaftNetwork<WormFsTypeConfig> for RaftMember {
 
         // Call send_rpc and convert the error type
         let response_result = self
-            .send_rpc::<RaftRpcMessage, RaftRpcResponse>(message, "install_snapshot")
+            .send_rpc::<RaftRpcResponse>(message, "install_snapshot")
             .await;
         let response: RaftRpcResponse = match response_result {
             Ok(r) => r,

@@ -443,18 +443,22 @@ pub async fn mount_filesystem(config: MountConfig) -> Result<(), Error> {
         config.filesystem_config.node_id.to_string(),
         now,
         1,
-        None,                // admin_url
-        None,                // storage_endpoint_url
-        None,                // raft_state
-        None,                // raft_term
-        None,                // last_log_index
-        None,                // last_log_term
-        None,                // current_leader
-        None,                // is_voter
-        Some(now),           // startup_time - keep node in grace period
-        Some(1_000_000_000), // total_bytes - 1GB total capacity
-        Some(900_000_000),   // available_bytes - 900MB available
-        Some(0),             // chunk_count - 0 chunks initially
+        None, // admin_url
+        None, // storage_endpoint_url
+        crate::storage_raft_member::cluster_manager::RaftStateParams {
+            raft_state: None,
+            raft_term: None,
+            last_log_index: None,
+            last_log_term: None,
+            current_leader: None,
+            is_voter: None,
+            startup_time: Some(now), // keep node in grace period
+        },
+        crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+            total_bytes: Some(1_000_000_000),   // 1GB total capacity
+            available_bytes: Some(900_000_000), // 900MB available
+            chunk_count: Some(0),               // 0 chunks initially
+        },
     );
 
     // Create placement engine configured for distributed chunk placement

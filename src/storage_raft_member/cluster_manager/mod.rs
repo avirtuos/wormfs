@@ -63,17 +63,19 @@
 /// Phase 2 (current): Foundation - types, config, skeleton components
 /// Phase 3: Full implementation with Raft integration
 /// Phase 4: Advanced features (predictive detection, geographic awareness)
-pub mod cluster_manager;
 pub mod config;
 pub mod failure_detector;
 pub mod heartbeat_tracker;
+pub mod implementation;
 pub mod membership_manager;
 pub mod types;
 
 // Re-export main types for convenience
-pub use cluster_manager::ClusterManager;
 pub use config::{ClusterManagerConfig, ConfigError};
 pub use failure_detector::FailureDetector;
-pub use heartbeat_tracker::{ClusterSummary, HeartbeatTracker, NodeHeartbeat};
+pub use heartbeat_tracker::{
+    ClusterSummary, HeartbeatTracker, NodeHeartbeat, RaftStateParams, StorageCapacityParams,
+};
+pub use implementation::ClusterManager;
 pub use membership_manager::{MembershipError, MembershipManager};
 pub use types::{ClusterEvent, MembershipAction, NodeHealth, NodeState};

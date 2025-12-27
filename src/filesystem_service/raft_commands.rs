@@ -592,7 +592,7 @@ impl StorageRaftMemberStub {
         // Create the file
         if let Err(e) = self
             .metadata_store
-            .create_file(file_id.clone(), &path, inode, metadata)
+            .create_file(file_id, &path, inode, metadata)
             .await
         {
             // Clean up reserved inode on failure
@@ -680,7 +680,7 @@ impl StorageRaftMemberStub {
         // Create the symlink
         if let Err(e) = self
             .metadata_store
-            .create_file(file_id.clone(), &path, inode, metadata)
+            .create_file(file_id, &path, inode, metadata)
             .await
         {
             // Clean up reserved inode on failure

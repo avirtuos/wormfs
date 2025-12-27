@@ -252,7 +252,10 @@ impl PlacementEngine {
         let mut score = 0.0;
 
         // Factor 1: Available capacity (40% weight)
-        if let (Some(total), Some(available)) = (node.total_bytes, node.available_bytes) {
+        if let (Some(total), Some(available)) = (
+            node.capacity_params.total_bytes,
+            node.capacity_params.available_bytes,
+        ) {
             if total > 0 {
                 let capacity_ratio = available as f64 / total as f64;
                 score += 0.4 * capacity_ratio;
@@ -264,7 +267,7 @@ impl PlacementEngine {
 
         // Factor 2: Chunk count / load balancing (30% weight)
         // Lower chunk count is better
-        if let Some(chunk_count) = node.chunk_count {
+        if let Some(chunk_count) = node.capacity_params.chunk_count {
             // Normalize to 0-1 range (assume max 10000 chunks as reference)
             let load_factor = 1.0 - (chunk_count.min(10000) as f64 / 10000.0);
             score += 0.3 * load_factor;

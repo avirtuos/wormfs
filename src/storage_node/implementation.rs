@@ -186,18 +186,22 @@ impl StorageNodeImpl {
             config.node_id.clone(),
             now,
             1,
-            None,                // admin_url
-            None,                // storage_endpoint_url
-            None,                // raft_state
-            None,                // raft_term
-            None,                // last_log_index
-            None,                // last_log_term
-            None,                // current_leader
-            None,                // is_voter
-            Some(now),           // startup_time - keep node in grace period
-            Some(1_000_000_000), // total_bytes - 1GB total capacity
-            Some(900_000_000),   // available_bytes - 900MB available
-            Some(0),             // chunk_count - 0 chunks initially
+            None, // admin_url
+            None, // storage_endpoint_url
+            crate::storage_raft_member::cluster_manager::RaftStateParams {
+                raft_state: None,
+                raft_term: None,
+                last_log_index: None,
+                last_log_term: None,
+                current_leader: None,
+                is_voter: None,
+                startup_time: Some(now), // keep node in grace period
+            },
+            crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+                total_bytes: Some(1_000_000_000),   // 1GB total capacity
+                available_bytes: Some(900_000_000), // 900MB available
+                chunk_count: Some(0),               // 0 chunks initially
+            },
         );
 
         // Create placement engine configured to always select local node
@@ -356,16 +360,16 @@ impl StorageNodeImpl {
         {
             info!("Initializing StorageRaftMember...");
 
-            let mut raft_config = crate::storage_raft_member::Config::default();
-            raft_config.transaction_log_path = config.transaction_log_path.clone();
-            raft_config.metadata_db_path = config.metadata_db_path.clone();
-            raft_config.snapshot_directory = config.snapshot_dir.clone();
-            raft_config.network_address = config.listen_address;
-            raft_config.enable_cluster_manager = true;
-
-            // Set storage_network reference (required for Raft RPC communication)
-            raft_config.storage_network = Some(Arc::new(network_handle.clone())
-                as Arc<dyn crate::storage_network::NetworkHandleTrait>);
+            let raft_config = crate::storage_raft_member::Config {
+                transaction_log_path: config.transaction_log_path.clone(),
+                metadata_db_path: config.metadata_db_path.clone(),
+                snapshot_directory: config.snapshot_dir.clone(),
+                network_address: config.listen_address,
+                enable_cluster_manager: true,
+                storage_network: Some(Arc::new(network_handle.clone())
+                    as Arc<dyn crate::storage_network::NetworkHandleTrait>),
+                ..Default::default()
+            };
 
             // Parse node_id as u64 for Raft NodeId (safe because we checked is_ok() above)
             let node_id_num = config

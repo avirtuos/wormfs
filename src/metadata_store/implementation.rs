@@ -2111,10 +2111,10 @@ impl MetadataStore for MetadataStoreImpl {
             .conn
             .call(move |conn| {
                 // Open snapshot database
-                let mut snapshot_conn = rusqlite::Connection::open(&snapshot_path_buf)?;
+                let snapshot_conn = rusqlite::Connection::open(&snapshot_path_buf)?;
 
                 // Restore from snapshot to main database
-                let backup = rusqlite::backup::Backup::new(&mut snapshot_conn, conn)?;
+                let backup = rusqlite::backup::Backup::new(&snapshot_conn, conn)?;
                 backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
 
                 Ok(())

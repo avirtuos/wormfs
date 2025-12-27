@@ -37,14 +37,8 @@ pub struct PeerConfig {
     pub peer_id: PeerIdConfig,
 }
 
-impl Default for PeerIdConfig {
-    fn default() -> Self {
-        PeerIdConfig::AutoId
-    }
-}
-
 /// Peer ID configuration mode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum PeerIdConfig {
     /// Exact peer ID required - reject connections with mismatched IDs
@@ -52,6 +46,7 @@ pub enum PeerIdConfig {
     Explicit(PeerId),
 
     /// Accept and store peer ID on first connection, enforce on subsequent connections
+    #[default]
     AutoId,
 }
 
@@ -688,6 +683,7 @@ impl HeartbeatMessage {
 
     /// Create a heartbeat message with full Raft state information.
     /// This is the primary constructor used by Raft-aware nodes for cluster discovery.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_raft_state(
         node_id: String,
         sequence: u64,

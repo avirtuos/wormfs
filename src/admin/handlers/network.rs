@@ -100,17 +100,17 @@ pub async fn network_status_handler(
     // Get local node heartbeat for chunk count
     let local_chunk_count = tracker
         .get_heartbeat(&network.config.node_id)
-        .and_then(|hb| hb.chunk_count)
+        .and_then(|hb| hb.capacity_params.chunk_count)
         .unwrap_or(0);
 
     let local_total_bytes = tracker
         .get_heartbeat(&network.config.node_id)
-        .and_then(|hb| hb.total_bytes)
+        .and_then(|hb| hb.capacity_params.total_bytes)
         .unwrap_or(0);
 
     let local_available_bytes = tracker
         .get_heartbeat(&network.config.node_id)
-        .and_then(|hb| hb.available_bytes)
+        .and_then(|hb| hb.capacity_params.available_bytes)
         .unwrap_or(0);
 
     // Convert peer info to JSON with chunk counts from heartbeats
@@ -122,9 +122,12 @@ pub async fn network_status_handler(
             // Get chunk count from heartbeat tracker
             if let Some(node_id) = &peer.node_id {
                 if let Some(heartbeat) = tracker.get_heartbeat(node_id) {
-                    peer_json["chunk_count"] = json!(heartbeat.chunk_count.unwrap_or(0));
-                    peer_json["total_bytes"] = json!(heartbeat.total_bytes.unwrap_or(0));
-                    peer_json["available_bytes"] = json!(heartbeat.available_bytes.unwrap_or(0));
+                    peer_json["chunk_count"] =
+                        json!(heartbeat.capacity_params.chunk_count.unwrap_or(0));
+                    peer_json["total_bytes"] =
+                        json!(heartbeat.capacity_params.total_bytes.unwrap_or(0));
+                    peer_json["available_bytes"] =
+                        json!(heartbeat.capacity_params.available_bytes.unwrap_or(0));
                 } else {
                     peer_json["chunk_count"] = json!(0);
                     peer_json["total_bytes"] = json!(0);

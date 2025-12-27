@@ -1422,7 +1422,7 @@ impl StorageRaftMemberImpl {
                     .membership()
                     .voter_ids()
                     .collect::<Vec<_>>();
-                let is_voter = voters.contains(&&member.inner.node_id);
+                let is_voter = voters.contains(&member.inner.node_id);
                 let startup_time = Some(member.inner.startup_time);
 
                 // Update the network layer's heartbeat data

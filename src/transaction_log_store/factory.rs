@@ -24,7 +24,7 @@ impl TransactionLogStoreFactory {
     /// - Configuration is invalid
     /// - I/O error occurs
     ///
-    pub fn new(
+    pub fn create(
         config: TransactionLogConfig,
     ) -> Result<Box<dyn super::TransactionLogStore>, LogError> {
         let store = TransactionLogStoreImpl::new(config)?;

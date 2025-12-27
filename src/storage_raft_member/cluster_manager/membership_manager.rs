@@ -174,13 +174,13 @@ impl MembershipManager {
         }
 
         // Check quorum for demotion
-        if action == MembershipAction::Demote {
-            if self.would_violate_quorum(current_voters, current_voters - 1) {
-                return Err(MembershipError::QuorumViolation(format!(
-                    "Cannot demote node {} - would lose quorum (current voters: {})",
-                    node_id, current_voters
-                )));
-            }
+        if action == MembershipAction::Demote
+            && self.would_violate_quorum(current_voters, current_voters - 1)
+        {
+            return Err(MembershipError::QuorumViolation(format!(
+                "Cannot demote node {} - would lose quorum (current voters: {})",
+                node_id, current_voters
+            )));
         }
 
         Ok(())
