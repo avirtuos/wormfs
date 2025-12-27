@@ -115,7 +115,7 @@ WormFS is a work in progress that's being developed iteratively following a phas
 **Install FUSE:**
 ```bash
 # Ubuntu/Debian
-sudo apt-get install fuse3 libfuse3-3 libfuse3-dev gcc g++ make cmake pkg-config protobuf-compiler
+sudo apt-get install fuse3 libfuse3-3 libfuse3-dev gcc g++ make cmake pkg-config protobuf-compiler libssl-dev
 ```
 
 ### Running the Demo
