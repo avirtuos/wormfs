@@ -357,7 +357,7 @@ mod tests {
         // Manually create a message that claims to be 101 bytes
         let mut malicious_data = Vec::new();
         malicious_data.extend_from_slice(&(101u32).to_be_bytes()); // Claim 101 bytes
-        malicious_data.extend_from_slice(&vec![0u8; 101]); // Actual data
+        malicious_data.extend_from_slice(&[0u8; 101]); // Actual data
 
         let mut read_cursor = Cursor::new(malicious_data);
         let result = codec

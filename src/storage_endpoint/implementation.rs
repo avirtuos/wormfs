@@ -386,7 +386,7 @@ mod tests {
             Arc::new(MockTransactionLogStore::default()),
             Arc::new(MockStorageRaftMember::default()),
             Arc::new(MockStorageNode::default()),
-            MockMetricService::default(),
+            MockMetricService,
             auth,
             rate_limiter,
         )
