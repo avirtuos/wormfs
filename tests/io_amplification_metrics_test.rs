@@ -56,16 +56,12 @@ async fn test_io_amplification_tracking() {
         1,
         None,
         None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(1_000_000_000),
-        Some(900_000_000),
-        Some(0),
+        wormfs::storage_raft_member::cluster_manager::RaftStateParams::default(),
+        wormfs::storage_raft_member::cluster_manager::StorageCapacityParams {
+            total_bytes: Some(1_000_000_000),
+            available_bytes: Some(900_000_000),
+            chunk_count: Some(0),
+        },
     );
 
     let config = PlacementConfig {
@@ -275,16 +271,12 @@ async fn test_no_amplification_for_aligned_writes() {
         1,
         None,
         None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(1_000_000_000),
-        Some(900_000_000),
-        Some(0),
+        wormfs::storage_raft_member::cluster_manager::RaftStateParams::default(),
+        wormfs::storage_raft_member::cluster_manager::StorageCapacityParams {
+            total_bytes: Some(1_000_000_000),
+            available_bytes: Some(900_000_000),
+            chunk_count: Some(0),
+        },
     );
 
     let config = PlacementConfig {

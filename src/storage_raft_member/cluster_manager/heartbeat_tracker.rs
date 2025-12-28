@@ -366,23 +366,27 @@ mod tests {
             1,
             Some("http://node1:8080".to_string()),
             None, // storage_endpoint_url
-            Some("Leader".to_string()),
-            Some(5),
-            Some(100),
-            Some(4),
-            Some(1),
-            Some(true),
-            Some(now - 30000),
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: Some("Leader".to_string()),
+                raft_term: Some(5),
+                last_log_index: Some(100),
+                last_log_term: Some(4),
+                current_leader: Some(1),
+                is_voter: Some(true),
+                startup_time: Some(now - 30000),
+            },
+            StorageCapacityParams {
+                total_bytes: None,
+                available_bytes: None,
+                chunk_count: None,
+            },
         );
 
         let hb = tracker.get_heartbeat("node1").unwrap();
         assert_eq!(hb.node_id, "node1");
-        assert_eq!(hb.raft_term, Some(5));
-        assert_eq!(hb.last_log_index, Some(100));
-        assert_eq!(hb.is_voter, Some(true));
+        assert_eq!(hb.raft_params.raft_term, Some(5));
+        assert_eq!(hb.raft_params.last_log_index, Some(100));
+        assert_eq!(hb.raft_params.is_voter, Some(true));
     }
 
     #[test]
@@ -397,16 +401,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            Some("Leader".to_string()),
-            Some(5),
-            Some(100),
-            None,
-            Some(1),
-            Some(true),
-            Some(now),
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: Some("Leader".to_string()),
+                raft_term: Some(5),
+                last_log_index: Some(100),
+                last_log_term: None,
+                current_leader: Some(1),
+                is_voter: Some(true),
+                startup_time: Some(now),
+            },
+            StorageCapacityParams::default(),
         );
 
         // Old heartbeat
@@ -416,16 +420,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            Some("Follower".to_string()),
-            Some(5),
-            Some(95),
-            None,
-            Some(1),
-            Some(true),
-            Some(now - 10000),
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: Some("Follower".to_string()),
+                raft_term: Some(5),
+                last_log_index: Some(95),
+                last_log_term: None,
+                current_leader: Some(1),
+                is_voter: Some(true),
+                startup_time: Some(now - 10000),
+            },
+            StorageCapacityParams::default(),
         );
 
         let active = tracker.get_active_heartbeats();
@@ -445,16 +449,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            Some("Follower".to_string()),
-            Some(5),
-            Some(0),
-            None,
-            None,
-            Some(false),
-            Some(now - 5000), // Started 5 seconds ago
-            None,             // total_bytes
-            None,             // available_bytes
-            None,             // chunk_count
+            RaftStateParams {
+                raft_state: Some("Follower".to_string()),
+                raft_term: Some(5),
+                last_log_index: Some(0),
+                last_log_term: None,
+                current_leader: None,
+                is_voter: Some(false),
+                startup_time: Some(now - 5000), // Started 5 seconds ago
+            },
+            StorageCapacityParams::default(),
         );
 
         // Node that started long ago
@@ -464,16 +468,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            Some("Leader".to_string()),
-            Some(5),
-            Some(100),
-            None,
-            Some(2),
-            Some(true),
-            Some(now - 120000), // Started 2 minutes ago
-            None,               // total_bytes
-            None,               // available_bytes
-            None,               // chunk_count
+            RaftStateParams {
+                raft_state: Some("Leader".to_string()),
+                raft_term: Some(5),
+                last_log_index: Some(100),
+                last_log_term: None,
+                current_leader: Some(2),
+                is_voter: Some(true),
+                startup_time: Some(now - 120000), // Started 2 minutes ago
+            },
+            StorageCapacityParams::default(),
         );
 
         let grace_nodes = tracker.get_nodes_in_grace_period();
@@ -492,16 +496,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            Some(5),
-            Some(100),
-            None,
-            None,
-            None,
-            None,
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: None,
+                raft_term: Some(5),
+                last_log_index: Some(100),
+                last_log_term: None,
+                current_leader: None,
+                is_voter: None,
+                startup_time: None,
+            },
+            StorageCapacityParams::default(),
         );
         tracker.record_heartbeat(
             "node2".to_string(),
@@ -509,16 +513,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            Some(5),
-            Some(120),
-            None,
-            None,
-            None,
-            None,
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: None,
+                raft_term: Some(5),
+                last_log_index: Some(120),
+                last_log_term: None,
+                current_leader: None,
+                is_voter: None,
+                startup_time: None,
+            },
+            StorageCapacityParams::default(),
         );
         tracker.record_heartbeat(
             "node3".to_string(),
@@ -526,16 +530,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            Some(5),
-            Some(95),
-            None,
-            None,
-            None,
-            None,
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: None,
+                raft_term: Some(5),
+                last_log_index: Some(95),
+                last_log_term: None,
+                current_leader: None,
+                is_voter: None,
+                startup_time: None,
+            },
+            StorageCapacityParams::default(),
         );
 
         assert_eq!(tracker.get_highest_log_index(), Some(120));
@@ -554,16 +558,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            Some(5),
-            Some(100),
-            None,
-            Some(2),
-            None,
-            None,
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: None,
+                raft_term: Some(5),
+                last_log_index: Some(100),
+                last_log_term: None,
+                current_leader: Some(2),
+                is_voter: None,
+                startup_time: None,
+            },
+            StorageCapacityParams::default(),
         );
         tracker.record_heartbeat(
             "node2".to_string(),
@@ -571,16 +575,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            Some(5),
-            Some(105),
-            None,
-            Some(2),
-            None,
-            None,
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: None,
+                raft_term: Some(5),
+                last_log_index: Some(105),
+                last_log_term: None,
+                current_leader: Some(2),
+                is_voter: None,
+                startup_time: None,
+            },
+            StorageCapacityParams::default(),
         );
         tracker.record_heartbeat(
             "node3".to_string(),
@@ -588,16 +592,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            Some(5),
-            Some(98),
-            None,
-            Some(2),
-            None,
-            None,
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: None,
+                raft_term: Some(5),
+                last_log_index: Some(98),
+                last_log_term: None,
+                current_leader: Some(2),
+                is_voter: None,
+                startup_time: None,
+            },
+            StorageCapacityParams::default(),
         );
 
         assert_eq!(tracker.get_consensus_leader(), Some(2));
@@ -614,16 +618,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            Some("Leader".to_string()),
-            Some(5),
-            Some(100),
-            None,
-            Some(1),
-            Some(true),
-            Some(now - 120000),
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: Some("Leader".to_string()),
+                raft_term: Some(5),
+                last_log_index: Some(100),
+                last_log_term: None,
+                current_leader: Some(1),
+                is_voter: Some(true),
+                startup_time: Some(now - 120000),
+            },
+            StorageCapacityParams::default(),
         );
         tracker.record_heartbeat(
             "node2".to_string(),
@@ -631,16 +635,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            Some("Follower".to_string()),
-            Some(5),
-            Some(99),
-            None,
-            Some(1),
-            Some(true),
-            Some(now - 120000),
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: Some("Follower".to_string()),
+                raft_term: Some(5),
+                last_log_index: Some(99),
+                last_log_term: None,
+                current_leader: Some(1),
+                is_voter: Some(true),
+                startup_time: Some(now - 120000),
+            },
+            StorageCapacityParams::default(),
         );
         tracker.record_heartbeat(
             "node3".to_string(),
@@ -648,16 +652,16 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            Some("Learner".to_string()),
-            Some(5),
-            Some(50),
-            None,
-            Some(1),
-            Some(false),
-            Some(now - 5000),
-            None, // total_bytes
-            None, // available_bytes
-            None, // chunk_count
+            RaftStateParams {
+                raft_state: Some("Learner".to_string()),
+                raft_term: Some(5),
+                last_log_index: Some(50),
+                last_log_term: None,
+                current_leader: Some(1),
+                is_voter: Some(false),
+                startup_time: Some(now - 5000),
+            },
+            StorageCapacityParams::default(),
         );
 
         let summary = tracker.get_cluster_summary();

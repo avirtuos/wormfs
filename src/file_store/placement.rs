@@ -301,16 +301,12 @@ mod tests {
             sequence: 0,
             admin_url: None,
             storage_endpoint_url: None,
-            raft_state: None,
-            raft_term: None,
-            last_log_index: None,
-            last_log_term: None,
-            current_leader: None,
-            is_voter: None,
-            startup_time: None,
-            total_bytes: Some(total_bytes),
-            available_bytes: Some(available_bytes),
-            chunk_count: Some(chunk_count),
+            raft_params: crate::storage_raft_member::cluster_manager::RaftStateParams::default(),
+            capacity_params: crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+                total_bytes: Some(total_bytes),
+                available_bytes: Some(available_bytes),
+                chunk_count: Some(chunk_count),
+            },
         }
     }
 
@@ -333,16 +329,12 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(1_000_000_000), // 1GB total
-            Some(800_000_000),   // 800MB available
-            Some(100),           // 100 chunks
+            crate::storage_raft_member::cluster_manager::RaftStateParams::default(),
+            crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+                total_bytes: Some(1_000_000_000),   // 1GB total
+                available_bytes: Some(800_000_000), // 800MB available
+                chunk_count: Some(100),             // 100 chunks
+            },
         );
         tracker.record_heartbeat(
             "2".to_string(),
@@ -350,16 +342,12 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(1_000_000_000), // 1GB total
-            Some(900_000_000),   // 900MB available
-            Some(50),            // 50 chunks
+            crate::storage_raft_member::cluster_manager::RaftStateParams::default(),
+            crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+                total_bytes: Some(1_000_000_000),   // 1GB total
+                available_bytes: Some(900_000_000), // 900MB available
+                chunk_count: Some(50),              // 50 chunks
+            },
         );
 
         let placements = engine.select_placements(3).unwrap();
@@ -388,16 +376,12 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(1_000_000_000),
-            Some(800_000_000),
-            Some(100),
+            crate::storage_raft_member::cluster_manager::RaftStateParams::default(),
+            crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+                total_bytes: Some(1_000_000_000),
+                available_bytes: Some(800_000_000),
+                chunk_count: Some(100),
+            },
         );
         tracker.record_heartbeat(
             "2".to_string(),
@@ -405,16 +389,12 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(1_000_000_000),
-            Some(900_000_000),
-            Some(50),
+            crate::storage_raft_member::cluster_manager::RaftStateParams::default(),
+            crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+                total_bytes: Some(1_000_000_000),
+                available_bytes: Some(900_000_000),
+                chunk_count: Some(50),
+            },
         );
 
         let placements = engine.select_placements(3).unwrap();

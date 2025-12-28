@@ -1342,16 +1342,12 @@ mod tests {
             1,
             None,
             None, // storage_endpoint_url
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(1_000_000_000), // 1GB total
-            Some(900_000_000),   // 900MB available
-            Some(0),             // 0 chunks
+            crate::storage_raft_member::cluster_manager::RaftStateParams::default(),
+            crate::storage_raft_member::cluster_manager::StorageCapacityParams {
+                total_bytes: Some(1_000_000_000),   // 1GB total
+                available_bytes: Some(900_000_000), // 900MB available
+                chunk_count: Some(0),               // 0 chunks
+            },
         );
 
         // Create placement engine configured to always select local node
