@@ -285,7 +285,7 @@ async fn test_concurrent_reads_same_file_should_succeed() {
             let (fh, _attr) = service_clone
                 .open(inode, libc::O_RDONLY as u32, 1000, 1000, client_id)
                 .await
-                .expect(&format!("Task {} failed to open for read", task_id));
+                .unwrap_or_else(|_| panic!("Task {} failed to open for read", task_id));
 
             println!("Task {}: ✓ Opened file (fh={})", task_id, fh);
 
@@ -293,7 +293,7 @@ async fn test_concurrent_reads_same_file_should_succeed() {
             let data = service_clone
                 .read(inode, fh, 0, 1024, 1000, 1000, client_id)
                 .await
-                .expect(&format!("Task {} failed to read", task_id));
+                .unwrap_or_else(|_| panic!("Task {} failed to read", task_id));
 
             println!("Task {}: ✓ Read {} bytes", task_id, data.len());
 
@@ -304,7 +304,7 @@ async fn test_concurrent_reads_same_file_should_succeed() {
             service_clone
                 .release(fh)
                 .await
-                .expect(&format!("Task {} failed to release", task_id));
+                .unwrap_or_else(|_| panic!("Task {} failed to release", task_id));
 
             println!("Task {}: ✓ Released file handle", task_id);
         });

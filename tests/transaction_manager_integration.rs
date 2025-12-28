@@ -18,7 +18,7 @@ use tokio::time::sleep;
 use tracing::{self, info};
 
 use stub_storage_network::StubNetworkHub;
-use wormfs::file_store::types::{ChunkId, FileId, StripeId};
+use wormfs::file_store::types::FileId;
 use wormfs::metadata_store::{MetadataStore, MetadataStoreImpl};
 use wormfs::metric_service::{MetricService, MetricServiceImpl};
 use wormfs::storage_raft_member::types::{FileMetadata, StoragePolicy};
@@ -362,7 +362,7 @@ async fn test_concurrent_transactions() {
                             gid: 1000,
                             file_type: 0,
                             target: None,
-                            size: 1024 * i as u64,
+                            size: 1024 * i,
                             mode: 0o644,
                             created: SystemTime::now(),
                             modified: SystemTime::now(),
@@ -475,7 +475,7 @@ async fn test_transaction_atomicity() {
                         gid: 1000,
                         file_type: 0,
                         target: None,
-                        size: 100 * i as u64,
+                        size: 100 * i,
                         mode: 0o644,
                         created: SystemTime::now(),
                         modified: SystemTime::now(),
@@ -686,7 +686,7 @@ async fn test_transaction_consistency_across_nodes() {
             .metadata_store
             .get_file_by_path(&path)
             .await
-            .expect(&format!("File should exist on node {}", node.id));
+            .unwrap_or_else(|_| panic!("File should exist on node {}", node.id));
 
         file_metadata.push((node.id, file.size, file.permissions));
     }

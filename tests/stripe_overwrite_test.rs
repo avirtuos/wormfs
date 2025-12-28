@@ -142,10 +142,12 @@ async fn write_pattern(
     let bytes_written = service
         .write(inode, fh, offset, data, 1000, 1000, client_id)
         .await
-        .expect(&format!(
-            "Failed to write pattern 0x{:02x} at offset {}",
-            pattern, offset
-        ));
+        .unwrap_or_else(|_| {
+            panic!(
+                "Failed to write pattern 0x{:02x} at offset {}",
+                pattern, offset
+            )
+        });
 
     assert_eq!(
         bytes_written as usize, size,
@@ -223,23 +225,14 @@ async fn test_stripe_partial_overwrite_middle() {
     println!("Phase 1: Writing 16MB (4 stripes) with distinct patterns...");
 
     // Write 4 complete stripes with different patterns
-    write_pattern(
-        &service,
-        inode,
-        fh,
-        0 * STRIPE_SIZE as u64,
-        STRIPE_SIZE,
-        0xAA,
-        client_id,
-    )
-    .await;
+    write_pattern(&service, inode, fh, 0, STRIPE_SIZE, 0xAA, client_id).await;
     println!("  Stripe 0 (0-4MB): Pattern 0xAA");
 
     write_pattern(
         &service,
         inode,
         fh,
-        1 * STRIPE_SIZE as u64,
+        STRIPE_SIZE as u64,
         STRIPE_SIZE,
         0xBB,
         client_id,
@@ -274,8 +267,8 @@ async fn test_stripe_partial_overwrite_middle() {
     println!("\nPhase 2: Overwriting 1MB in middle of Stripe 1 (offset 5MB)...");
 
     // Modify 1MB in the middle of stripe 1 (offset 5MB, which is 1MB into stripe 1)
-    let overwrite_offset = (1 * STRIPE_SIZE + 1 * MB) as u64; // 5MB
-    let overwrite_size = 1 * MB; // 1MB
+    let overwrite_offset = (STRIPE_SIZE + MB) as u64; // 5MB
+    let overwrite_size = MB; // 1MB
     write_pattern(
         &service,
         inode,
@@ -382,21 +375,12 @@ async fn test_stripe_multiple_partial_overwrites() {
     println!("Phase 1: Writing 16MB (4 stripes) with patterns...");
 
     // Write 4 complete stripes
+    write_pattern(&service, inode, fh, 0, STRIPE_SIZE, 0xAA, client_id).await;
     write_pattern(
         &service,
         inode,
         fh,
-        0 * STRIPE_SIZE as u64,
-        STRIPE_SIZE,
-        0xAA,
-        client_id,
-    )
-    .await;
-    write_pattern(
-        &service,
-        inode,
-        fh,
-        1 * STRIPE_SIZE as u64,
+        STRIPE_SIZE as u64,
         STRIPE_SIZE,
         0xBB,
         client_id,
@@ -427,16 +411,7 @@ async fn test_stripe_multiple_partial_overwrites() {
 
     // Overwrite 512KB in stripe 0 at offset 1MB
     println!("  Overwrite 1: 512KB in Stripe 0 at offset 1MB");
-    write_pattern(
-        &service,
-        inode,
-        fh,
-        1 * MB as u64,
-        512 * 1024,
-        0x11,
-        client_id,
-    )
-    .await;
+    write_pattern(&service, inode, fh, MB as u64, 512 * 1024, 0x11, client_id).await;
 
     // Overwrite 2MB in stripe 2 at offset 9MB
     println!("  Overwrite 2: 2MB in Stripe 2 at offset 9MB");
@@ -456,13 +431,13 @@ async fn test_stripe_multiple_partial_overwrites() {
     let mut all_ok = true;
 
     // Stripe 0: First 1MB unchanged (0xAA)
-    all_ok &= verify_region(&read_data, 0, 1 * MB, 0xAA, "Stripe 0 [0-1MB] unchanged");
+    all_ok &= verify_region(&read_data, 0, MB, 0xAA, "Stripe 0 [0-1MB] unchanged");
 
     // Stripe 0: 512KB modified (0x11)
     all_ok &= verify_region(
         &read_data,
-        1 * MB,
-        1 * MB + 512 * 1024,
+        MB,
+        MB + 512 * 1024,
         0x11,
         "Stripe 0 [1-1.5MB] MODIFIED",
     );
@@ -470,7 +445,7 @@ async fn test_stripe_multiple_partial_overwrites() {
     // Stripe 0: Rest unchanged (0xAA)
     all_ok &= verify_region(
         &read_data,
-        1 * MB + 512 * 1024,
+        MB + 512 * 1024,
         4 * MB,
         0xAA,
         "Stripe 0 [1.5-4MB] unchanged",
@@ -569,7 +544,7 @@ async fn test_stripe_overwrite_with_flush() {
     println!("\nPhase 3: Overwriting 1.5MB in middle of Stripe 1 (offset 5MB)...");
 
     // This should trigger read-modify-write from MetadataStore/FileStore
-    let overwrite_offset = (STRIPE_SIZE + 1 * MB) as u64; // 5MB
+    let overwrite_offset = (STRIPE_SIZE + MB) as u64; // 5MB
     write_pattern(
         &service,
         inode,

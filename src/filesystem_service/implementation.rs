@@ -3394,6 +3394,7 @@ mod tests {
             .unwrap();
 
         // Start background tasks (lock extension)
+        #[allow(clippy::let_underscore_future)]
         let _ = Arc::clone(&service).start_background_tasks();
 
         // Sleep for 5 seconds (longer than lock_timeout of 2 seconds)
@@ -3454,6 +3455,7 @@ mod tests {
             .unwrap();
 
         // Start background tasks
+        #[allow(clippy::let_underscore_future)]
         let _ = Arc::clone(&service).start_background_tasks();
 
         // Remove the client from sessions (simulate no heartbeat)

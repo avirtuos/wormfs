@@ -26,6 +26,12 @@ pub struct StubNetworkHub {
     partition_groups: Arc<RwLock<Vec<HashSet<u64>>>>,
 }
 
+impl Default for StubNetworkHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StubNetworkHub {
     pub fn new() -> Self {
         Self {

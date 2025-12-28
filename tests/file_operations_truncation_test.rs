@@ -4,7 +4,6 @@
 //! does not expose invalid data to users. The FileSystemService's read() operation should correctly
 //! clamp reads based on metadata size, preventing access to "ghost" data beyond the truncation point.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -176,11 +175,13 @@ async fn write_pattern_data(
                 client_id,
             )
             .await
-            .expect(&format!(
-                "Failed to write at offset {}, size {}",
-                offset,
-                chunk_data.len()
-            ));
+            .unwrap_or_else(|_| {
+                panic!(
+                    "Failed to write at offset {}, size {}",
+                    offset,
+                    chunk_data.len()
+                )
+            });
 
         assert_eq!(
             bytes_written as usize,

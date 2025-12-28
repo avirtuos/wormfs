@@ -168,7 +168,7 @@ async fn test_30mb_file_integrity() {
         let bytes_written = service
             .write(inode, fh, offset, chunk.to_vec(), 1000, 1000, client_id)
             .await
-            .expect(&format!("Failed to write chunk {}", chunk_num));
+            .unwrap_or_else(|_| panic!("Failed to write chunk {}", chunk_num));
 
         assert_eq!(
             bytes_written as usize,
@@ -241,6 +241,7 @@ async fn test_30mb_file_integrity() {
             let start = offset.saturating_sub(10);
             let end = (offset + 10).min(FILE_SIZE);
             eprint!("    Expected: ");
+            #[allow(clippy::needless_range_loop)]
             for i in start..end {
                 if i == offset {
                     eprint!("[{:02x}] ", data[i]);
@@ -250,6 +251,7 @@ async fn test_30mb_file_integrity() {
             }
             eprintln!();
             eprint!("    Actual:   ");
+            #[allow(clippy::needless_range_loop)]
             for i in start..end {
                 if i == offset {
                     eprint!("[{:02x}] ", read_data[i]);

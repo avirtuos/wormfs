@@ -288,7 +288,7 @@ mod tests {
         let elapsed = instant_to_seconds_ago(&five_secs_ago, &now);
         assert!(elapsed.is_some());
         let elapsed = elapsed.unwrap();
-        assert!(elapsed >= 4.9 && elapsed <= 5.1); // Allow small tolerance
+        assert!((4.9..=5.1).contains(&elapsed)); // Allow small tolerance
     }
 
     #[test]

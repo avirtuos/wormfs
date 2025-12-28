@@ -405,7 +405,7 @@ async fn test_mkdir_rmdir_cycle() {
         let attrs = service
             .mkdir(1, "cycledir", 0o755, 1000, 1000, client_id)
             .await
-            .expect(&format!("Failed to create directory on iteration {}", i));
+            .unwrap_or_else(|_| panic!("Failed to create directory on iteration {}", i));
 
         assert_eq!(
             attrs.kind,
@@ -415,7 +415,7 @@ async fn test_mkdir_rmdir_cycle() {
         service
             .rmdir(1, "cycledir", 1000, 1000, client_id)
             .await
-            .expect(&format!("Failed to remove directory on iteration {}", i));
+            .unwrap_or_else(|_| panic!("Failed to remove directory on iteration {}", i));
     }
 
     println!("✓ mkdir/rmdir cycle works correctly");
@@ -426,7 +426,7 @@ async fn test_mkdir_various_modes() {
     let (service, _temp) = create_test_filesystem_service().await;
     let client_id = ClientId::new(1);
 
-    let test_modes = vec![
+    let test_modes = [
         0o755, // rwxr-xr-x
         0o700, // rwx------
         0o777, // rwxrwxrwx
@@ -439,7 +439,7 @@ async fn test_mkdir_various_modes() {
         let attrs = service
             .mkdir(1, &name, *mode, 1000, 1000, client_id)
             .await
-            .expect(&format!("Failed to create directory with mode {:o}", mode));
+            .unwrap_or_else(|_| panic!("Failed to create directory with mode {:o}", mode));
 
         assert_eq!(
             attrs.perm, *mode as u16,
@@ -462,7 +462,7 @@ async fn test_readdir_after_mkdir() {
         service
             .mkdir(1, &name, 0o755, 1000, 1000, client_id)
             .await
-            .expect(&format!("Failed to create {}", name));
+            .unwrap_or_else(|_| panic!("Failed to create {}", name));
     }
 
     // Read directory entries

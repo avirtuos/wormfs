@@ -1,6 +1,7 @@
 //! Unit tests for TransactionManager.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::implementation::TransactionManagerImpl;
     use super::super::types::{Config, Error, Operation};

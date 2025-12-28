@@ -81,7 +81,7 @@ async fn test_create_1000_files_and_query() {
         store
             .create_file(file_id, &path, inode, metadata.clone())
             .await
-            .expect(&format!("Failed to create file {}", i));
+            .unwrap_or_else(|_| panic!("Failed to create file {}", i));
 
         store
             .confirm_inode(inode)
@@ -105,7 +105,7 @@ async fn test_create_1000_files_and_query() {
         let file = store
             .get_file_by_path(&path)
             .await
-            .expect(&format!("Failed to get file {}", i));
+            .unwrap_or_else(|_| panic!("Failed to get file {}", i));
 
         assert_eq!(file.path, path);
         assert_eq!(file.size, metadata.size);
@@ -127,7 +127,7 @@ async fn test_create_1000_files_and_query() {
         let file = store
             .get_file_by_inode(i)
             .await
-            .expect(&format!("Failed to get file with inode {}", i));
+            .unwrap_or_else(|_| panic!("Failed to get file with inode {}", i));
 
         assert_eq!(file.inode, i);
     }
@@ -206,10 +206,12 @@ async fn test_concurrent_reads() {
                 let file_idx = (task_id * 20 + i) % 100;
                 let path = PathBuf::from(format!("/concurrent/file_{:03}.txt", file_idx));
 
-                let file = store_clone.get_file_by_path(&path).await.expect(&format!(
-                    "Task {} failed to read file {}",
-                    task_id, file_idx
-                ));
+                let file = store_clone
+                    .get_file_by_path(&path)
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("Task {} failed to read file {}", task_id, file_idx)
+                    });
 
                 assert_eq!(file.path, path);
             }
@@ -274,7 +276,7 @@ async fn test_parent_child_relationships() {
         store
             .create_file(file_id, &path, inode, metadata.clone())
             .await
-            .expect(&format!("Failed to create {}", path_str));
+            .unwrap_or_else(|_| panic!("Failed to create {}", path_str));
         store.confirm_inode(inode).await.unwrap();
     }
 

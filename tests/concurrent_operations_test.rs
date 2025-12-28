@@ -589,7 +589,7 @@ async fn test_multiple_users_different_permissions() {
             service_clone.release(fh).await.ok();
             result
         } else {
-            open_result.map(|_| 0).map_err(|e| e)
+            open_result.map(|_| 0)
         };
 
         assert!(
