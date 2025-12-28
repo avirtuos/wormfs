@@ -4,7 +4,7 @@
 //! These tests mount an actual WormFS filesystem and verify all Phase 1 features.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -249,10 +249,11 @@ fn test_file_size_variants() {
         let file_path = mount_point.join(filename);
 
         // Write the file
-        fs::write(&file_path, &content).expect(&format!("Failed to write {}", filename));
+        fs::write(&file_path, &content).unwrap_or_else(|_| panic!("Failed to write {}", filename));
 
         // Read it back
-        let read_content = fs::read(&file_path).expect(&format!("Failed to read {}", filename));
+        let read_content =
+            fs::read(&file_path).unwrap_or_else(|_| panic!("Failed to read {}", filename));
 
         // Verify content matches
         assert_eq!(
@@ -323,7 +324,7 @@ fn test_erasure_coding_verification() {
         if let Ok(mut file) = fs::OpenOptions::new()
             .write(true)
             .truncate(true)
-            .open(&chunk_path)
+            .open(chunk_path)
         {
             // Write garbage
             let _ = file.write_all(b"CORRUPTED");
@@ -439,7 +440,7 @@ fn test_stress_many_files() {
         let content = format!("This is file number {}", i);
         let file_path = mount_point.join(&filename);
 
-        fs::write(&file_path, &content).expect(&format!("Failed to write {}", filename));
+        fs::write(&file_path, &content).unwrap_or_else(|_| panic!("Failed to write {}", filename));
 
         if (i + 1) % 100 == 0 {
             println!("  Created {} files...", i + 1);
@@ -471,8 +472,8 @@ fn test_stress_many_files() {
     for i in test_indices {
         let filename = format!("file_{:04}.txt", i);
         let file_path = mount_point.join(&filename);
-        let content =
-            fs::read_to_string(&file_path).expect(&format!("Failed to read {}", filename));
+        let content = fs::read_to_string(&file_path)
+            .unwrap_or_else(|_| panic!("Failed to read {}", filename));
 
         let expected = format!("This is file number {}", i);
         assert_eq!(content, expected, "Content mismatch for {}", filename);
@@ -484,7 +485,7 @@ fn test_stress_many_files() {
     for i in 0..num_files {
         let filename = format!("file_{:04}.txt", i);
         let file_path = mount_point.join(&filename);
-        fs::remove_file(&file_path).expect(&format!("Failed to delete {}", filename));
+        fs::remove_file(&file_path).unwrap_or_else(|_| panic!("Failed to delete {}", filename));
 
         if (i + 1) % 100 == 0 {
             println!("  Deleted {} files...", i + 1);

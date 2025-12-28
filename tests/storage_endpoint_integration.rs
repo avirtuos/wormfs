@@ -58,7 +58,7 @@ async fn test_server_lifecycle() {
         Arc::new(MockTransactionLogStore::default()),
         Arc::new(MockStorageRaftMember::default()),
         Arc::new(MockStorageNode::default()),
-        MockMetricService::default(),
+        MockMetricService,
     )
     .await
     .expect("Failed to create endpoint");

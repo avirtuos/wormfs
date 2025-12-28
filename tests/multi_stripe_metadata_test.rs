@@ -148,7 +148,7 @@ async fn test_multi_stripe_metadata_persistence() {
     // Write 12MB in 4MB chunks (3 stripes)
     let mut data = Vec::with_capacity(TOTAL_SIZE);
     for i in 0..NUM_STRIPES {
-        let stripe_data = vec![(i as u8); STRIPE_SIZE];
+        let stripe_data = vec![i as u8; STRIPE_SIZE];
         data.extend_from_slice(&stripe_data);
     }
 
@@ -211,7 +211,7 @@ async fn test_stripe_lookup_at_boundaries() {
     // Write 3 stripes with distinct patterns
     for i in 0..3 {
         let offset = (i * STRIPE_SIZE) as u64;
-        let data = vec![(i as u8 + 10); STRIPE_SIZE]; // Patterns: 10, 11, 12
+        let data = vec![i as u8 + 10; STRIPE_SIZE]; // Patterns: 10, 11, 12
 
         service
             .write(inode, fh, offset, data, 1000, 1000, client_id)
@@ -239,7 +239,7 @@ async fn test_stripe_lookup_at_boundaries() {
         let data = service
             .read(inode, fh, offset, size, 1000, 1000, client_id)
             .await
-            .expect(&format!("Failed to read at {}", description));
+            .unwrap_or_else(|_| panic!("Failed to read at {}", description));
 
         assert_eq!(data.len(), size as usize, "{}: wrong size", description);
         assert!(
@@ -276,7 +276,7 @@ async fn test_stripe_metadata_after_truncation() {
     // Write 3 full stripes (12MB)
     for i in 0..3 {
         let offset = (i * STRIPE_SIZE) as u64;
-        let data = vec![(i as u8 + 20); STRIPE_SIZE];
+        let data = vec![i as u8 + 20; STRIPE_SIZE];
 
         service
             .write(inode, fh, offset, data, 1000, 1000, client_id)
@@ -350,7 +350,7 @@ async fn test_large_file_stripe_consistency() {
     let mut expected_data = Vec::with_capacity(TOTAL_SIZE);
     for i in 0..NUM_STRIPES {
         let offset = (i * STRIPE_SIZE) as u64;
-        let pattern = (i as u8 + 100);
+        let pattern = i as u8 + 100;
         let data = vec![pattern; STRIPE_SIZE];
 
         service

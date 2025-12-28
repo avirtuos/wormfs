@@ -25,7 +25,6 @@ fn create_test_mount_config(admin_port: u16) -> MountConfig {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port: admin_port,
-            ..Default::default()
         }),
         network_config: None,          // No network needed for these basic tests
         raft_config: None,             // No raft needed for these basic tests
@@ -61,7 +60,6 @@ async fn test_network_status_endpoint_no_network() {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port: 29090,
-            ..Default::default()
         },
         Arc::new(mount_config),
         metrics,
@@ -122,7 +120,6 @@ async fn test_peers_endpoint_no_network() {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port: 29091,
-            ..Default::default()
         },
         Arc::new(mount_config),
         metrics,
@@ -177,7 +174,6 @@ async fn test_admin_server_health_endpoint() {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port: 29092,
-            ..Default::default()
         },
         Arc::new(mount_config),
         metrics,
@@ -229,7 +225,6 @@ async fn test_concurrent_admin_requests() {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port: 29093,
-            ..Default::default()
         },
         Arc::new(mount_config),
         metrics,

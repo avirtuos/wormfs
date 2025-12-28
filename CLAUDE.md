@@ -18,6 +18,7 @@ WormFS, short for write-once-read-many file system, is intended to be user-space
 10. Do not remove or mark tests as ignored without explaining why the change is needed and asking for approval before doing so.
 11. Do not create new documents (e.g. design docs) without asking first.
 12. Use tracing subscriber (e.g. info!) for logging instead of print or eprint statements. Do not use any special characters in log or print statements, only regular alpha-numeric and punctuation characters.
+13. Ensure we adhiure to rust code standards by ensuring no errors and limited warnings from "cargo clippy --all-targets --all-features" command.
 
 ## Specific Instructions for Claude
 

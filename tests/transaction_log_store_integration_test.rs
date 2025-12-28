@@ -362,7 +362,7 @@ async fn test_checksum_integrity() {
     let store = TransactionLogStoreImpl::new(config).unwrap();
 
     // Add entries with various data sizes
-    let test_data = vec![
+    let test_data = [
         b"small".to_vec(),
         vec![0xFFu8; 1024],       // 1KB
         vec![0xAAu8; 10 * 1024],  // 10KB

@@ -1252,7 +1252,7 @@ async fn test_vote_persistence_across_restart() {
     let log_path = data_dir.join("raft_log.redb");
 
     // Phase 1: Create node, initialize, and become leader
-    let (expected_term, expected_node_id) = async {
+    let (expected_term, _expected_node_id) = async {
         // Create a single-node Raft instance using the helper
         // We can't use create_single_node because it creates its own temp_dir
         // Instead we'll create the node manually with our controlled data_dir
@@ -2152,7 +2152,7 @@ async fn test_node_restart_recovery() {
             .raft
             .propose_operation(operation)
             .await
-            .expect(&format!("Failed to submit operation {}", i));
+            .unwrap_or_else(|_| panic!("Failed to submit operation {}", i));
     }
     eprintln!("✅ Submitted 10 operations");
 
@@ -2194,7 +2194,7 @@ async fn test_node_restart_recovery() {
             .raft
             .propose_operation(operation)
             .await
-            .expect(&format!("Failed to submit operation {}", i));
+            .unwrap_or_else(|_| panic!("Failed to submit operation {}", i));
     }
     eprintln!("✅ Submitted 10 more operations (11-20)");
 

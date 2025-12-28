@@ -3,7 +3,6 @@
 //! This test validates that the metrics system correctly tracks I/O amplification
 //! when performing read-modify-write operations on erasure-coded stripes.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::Duration;
 use wormfs::file_store::{FileStore, FileStoreImpl, StoragePolicy};

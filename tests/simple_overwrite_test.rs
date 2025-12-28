@@ -159,7 +159,7 @@ async fn test_simple_overwrite() {
 
     // Now try to overwrite 1MB in the middle of stripe 1 (at offset 5MB)
     println!("Overwriting 1MB at offset 5MB...");
-    let overwrite_data = vec![0xBB; 1 * 1024 * 1024];
+    let overwrite_data = vec![0xBB; 1024 * 1024];
 
     println!("  About to call write...");
     let written2 = service
@@ -175,7 +175,7 @@ async fn test_simple_overwrite() {
         .await
         .expect("Failed to overwrite");
     println!("  Overwrote {} bytes", written2);
-    assert_eq!(written2 as usize, 1 * 1024 * 1024);
+    assert_eq!(written2 as usize, 1024 * 1024);
 
     println!("✓ Test passed!");
 }

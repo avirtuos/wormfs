@@ -41,8 +41,6 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
-use tracing;
-use tracing_subscriber;
 use wormfs::storage_network::types::{Config, ConnectionState, PeerConfig, PeerId, PeerIdConfig};
 use wormfs::storage_network::{StorageNetworkFactory, StorageNetworkHandle};
 
@@ -925,7 +923,7 @@ async fn test_basic_broadcast_propagation() {
         .expect("Nodes failed to connect");
 
     // All nodes subscribe to the same topic
-    let (_tx0, mut rx0) = cluster
+    let (_tx0, _rx0) = cluster
         .node(0)
         .handle
         .join_topic("test-broadcast")
@@ -2151,7 +2149,7 @@ async fn test_explicit_mode_reject_disconnects_immediately() {
     let mut seed2 = [0u8; 32];
     seed2[0] = 221;
     let keypair2 = identity::Keypair::ed25519_from_bytes(seed2).expect("Failed to create keypair");
-    let peer_id2 = PeerId::new(libp2p::PeerId::from(keypair2.public()).to_bytes());
+    let _peer_id2 = PeerId::new(libp2p::PeerId::from(keypair2.public()).to_bytes());
 
     // Create a WRONG peer ID that node1 will expect (not peer_id2)
     let mut seed_wrong = [0u8; 32];
@@ -3003,7 +3001,7 @@ async fn test_topic_subscription_under_load() {
         .expect("Nodes failed to connect");
 
     // Define multiple topics for testing
-    let topics = vec!["topic-a", "topic-b", "topic-c"];
+    let topics = ["topic-a", "topic-b", "topic-c"];
 
     // Subscribe all nodes to topic-a initially
     let (_tx0_a, mut rx0_a) = cluster
@@ -3279,11 +3277,11 @@ async fn test_peer_connection_events() {
     // Nodes 0 and 1 should still be connected to each other
     // Node 0 may have 1 peer (node 1) or possibly reconnected to node 2
     assert!(
-        peers0_after.len() >= 1,
+        !peers0_after.is_empty(),
         "Node 0 should have at least 1 peer after disconnect"
     );
     assert!(
-        peers1_after.len() >= 1,
+        !peers1_after.is_empty(),
         "Node 1 should have at least 1 peer after disconnect"
     );
 
