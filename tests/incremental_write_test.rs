@@ -92,16 +92,12 @@ async fn create_test_filesystem_service() -> (FileSystemServiceImpl, TempDir) {
         1,
         None,
         None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(1_000_000_000),
-        Some(900_000_000),
-        Some(0),
+        wormfs::storage_raft_member::cluster_manager::RaftStateParams::default(),
+        wormfs::storage_raft_member::cluster_manager::StorageCapacityParams {
+            total_bytes: Some(1_000_000_000),
+            available_bytes: Some(900_000_000),
+            chunk_count: Some(0),
+        },
     );
 
     let config = PlacementConfig {

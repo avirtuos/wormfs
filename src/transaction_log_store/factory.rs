@@ -50,7 +50,7 @@ mod tests {
             max_log_age_days: 7,
         };
 
-        let result = TransactionLogStoreFactory::new(config);
+        let result = TransactionLogStoreFactory::create(config);
         assert!(result.is_ok());
         assert!(db_path.exists());
     }

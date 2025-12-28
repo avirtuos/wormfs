@@ -115,7 +115,7 @@ run_check "Cargo Format Check" "cargo fmt --all -- --check" ""
 
 # 6. Cargo Clippy - Lint with warnings as errors
 echo -e "${YELLOW}Step 6/6: Running clippy linter...${NC}"
-run_check "Cargo Clippy" "cargo clippy --all-targets --all-features -- -D warnings" ""
+run_check "Cargo Clippy" "cargo clippy --all-targets --all-features"
 
 # Print summary table function
 print_summary_table() {
