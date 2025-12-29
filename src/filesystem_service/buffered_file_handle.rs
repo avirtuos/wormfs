@@ -186,7 +186,10 @@ pub enum StripeOperation {
         stripe: StripeMetadata,
     },
     /// Delete a stripe
-    Delete { stripe_id: StripeId },
+    Delete {
+        stripe_id: StripeId,
+        file_id: FileId,
+    },
     /// Update file attributes
     UpdateAttributes {
         file_id: FileId,
@@ -1235,6 +1238,7 @@ impl BufferedFileHandle {
                     );
                     ops.push(StripeOperation::Delete {
                         stripe_id: *old_stripe_id,
+                        file_id: inner.file_id,
                     });
                 }
             }
@@ -1243,6 +1247,7 @@ impl BufferedFileHandle {
             for stripe_id in &inner.tombstones {
                 ops.push(StripeOperation::Delete {
                     stripe_id: *stripe_id,
+                    file_id: inner.file_id,
                 });
             }
 

@@ -58,14 +58,8 @@ impl RaftClientAdapter {
                     });
                     metadata_ops.push(Self::create_stripe_operation(file_id, stripe)?);
                 }
-                StripeOperation::Delete { stripe_id } => {
-                    // Note: We don't have file_id here. This is a limitation.
-                    // For now, use a generated FileId - the MetadataStore doesn't actually
-                    // use file_id for deletion
-                    metadata_ops.push(MetadataOperation::DeleteStripe {
-                        stripe_id,
-                        file_id: crate::file_store::types::FileId::generate(),
-                    });
+                StripeOperation::Delete { stripe_id, file_id } => {
+                    metadata_ops.push(MetadataOperation::DeleteStripe { stripe_id, file_id });
                 }
                 StripeOperation::UpdateAttributes {
                     file_id,
