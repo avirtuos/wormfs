@@ -860,7 +860,10 @@ impl StorageRaftMemberStub {
                 StripeOperation::Update { file_id, stripe } => {
                     updates.push((file_id, stripe));
                 }
-                StripeOperation::Delete { stripe_id } => {
+                StripeOperation::Delete {
+                    stripe_id,
+                    file_id: _,
+                } => {
                     deletes.push(stripe_id);
                 }
                 StripeOperation::UpdateAttributes {
