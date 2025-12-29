@@ -103,6 +103,58 @@ impl FileStoreImpl {
             .join(chunk_str)
     }
 
+    /// Get disk space information using statvfs system call.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the disk/directory to query
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (total_space, free_space) in bytes
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the statvfs call fails
+    fn get_disk_space(path: &Path) -> Result<(u64, u64), Error> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        // Convert path to C string
+        let path_cstr =
+            CString::new(path.as_os_str().as_bytes()).map_err(|e| Error::DiskInitFailed {
+                path: path.to_path_buf(),
+                reason: format!("Invalid path (contains null byte): {}", e),
+            })?;
+
+        // Call statvfs
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let result = unsafe { libc::statvfs(path_cstr.as_ptr(), &mut stat) };
+
+        if result != 0 {
+            let errno = std::io::Error::last_os_error();
+            return Err(Error::DiskInitFailed {
+                path: path.to_path_buf(),
+                reason: format!("statvfs failed: {}", errno),
+            });
+        }
+
+        // Calculate total and free space
+        // f_blocks: total data blocks in filesystem
+        // f_bavail: free blocks available to non-privileged process
+        // f_frsize: fragment size (or f_bsize if f_frsize is 0)
+        let block_size = if stat.f_frsize > 0 {
+            stat.f_frsize as u64
+        } else {
+            stat.f_bsize as u64
+        };
+
+        let total_space = stat.f_blocks as u64 * block_size;
+        let free_space = stat.f_bavail as u64 * block_size;
+
+        Ok((total_space, free_space))
+    }
+
     /// Initialize disk directories
     async fn initialize_disk(&self, disk_id: DiskId, path: PathBuf) -> Result<(), Error> {
         // Create base directory if it doesn't exist
@@ -121,10 +173,8 @@ impl FileStoreImpl {
                 reason: format!("Failed to get disk metadata: {}", e),
             })?;
 
-        // For now, use simple heuristics for space
-        // TODO: Use statvfs or similar for accurate disk space
-        let total_space = 1_000_000_000_000; // 1TB default
-        let free_space = 500_000_000_000; // 500GB default
+        // Get actual disk space using statvfs
+        let (total_space, free_space) = Self::get_disk_space(&path)?;
 
         let disk_info = DiskInfo {
             disk_id,
