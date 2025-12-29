@@ -82,18 +82,76 @@ pub trait ChunkClient: Send + Sync {
 }
 
 /// Configuration for ChunkClientPool
+///
+/// # Performance Implications
+///
+/// The timeout and retry settings directly impact system performance and latency:
+///
+/// - **Total Operation Time**: In the worst case, a chunk operation can take:
+///   `(request_timeout + retry_backoff) * (max_retries + 1)`
+///
+///   With defaults: `(30s + 0.1s) * 4 = ~120 seconds` for a single chunk operation
+///   (initial attempt + 3 retries with exponential backoff: 100ms, 200ms, 400ms)
+///
+/// - **Impact on File Operations**: Since file reads/writes may require multiple chunks,
+///   total latency can be: `chunk_count * max_operation_time`
+///
+///   For a 10MB file with 2+1 erasure coding (3 chunks per stripe):
+///   Up to 360 seconds (6 minutes) if all chunks fail and retry
+///
+/// - **Blocking Behavior**: Chunk operations block the calling thread, which can
+///   cause FUSE operations to timeout if they exceed kernel timeouts (typically 30-60s)
+///
+/// # Recommendations
+///
+/// - **Low-latency deployments**: Reduce timeouts and retries:
+///   ```rust
+///   ChunkClientConfig {
+///       request_timeout: Duration::from_secs(5),
+///       max_retries: 1,
+///       ..Default::default()
+///   }
+///   ```
+///
+/// - **High-latency/unreliable networks**: Use longer timeouts but implement
+///   application-level circuit breakers to fail fast on persistently failing nodes
+///
+/// - **Production deployments**: Monitor `chunk_operation_timeout` and
+///   `chunk_retry_count` metrics to tune these values based on observed latencies
 #[derive(Debug, Clone)]
 pub struct ChunkClientConfig {
-    /// Connection timeout for gRPC clients
+    /// Connection timeout for establishing gRPC connections
+    ///
+    /// This timeout applies when initially connecting to a remote node.
+    /// Should be set based on network latency (typically 1-10 seconds).
     pub connect_timeout: Duration,
 
-    /// Request timeout for chunk operations
+    /// Request timeout for individual chunk operations
+    ///
+    /// Maximum time to wait for a single chunk RPC (store/read/delete).
+    /// Should account for: network RTT + remote disk I/O + encoding/decoding.
+    ///
+    /// **Default: 30 seconds** - Suitable for typical deployments with HDD storage
+    /// and moderate network latency. May need adjustment for:
+    /// - SSD storage: Can reduce to 10-15 seconds
+    /// - High-latency networks (WAN): May need 60+ seconds
+    /// - NVMe storage with low-latency network: Can reduce to 5 seconds
     pub request_timeout: Duration,
 
     /// Maximum number of retry attempts for failed operations
+    ///
+    /// **Default: 3 retries** - Provides resilience against transient failures
+    /// while avoiding excessive delays.
+    ///
+    /// Note: Total attempts = max_retries + 1 (initial attempt)
     pub max_retries: u32,
 
-    /// Initial backoff duration for retries
+    /// Initial backoff duration for retries (in milliseconds)
+    ///
+    /// Uses exponential backoff: each retry doubles the delay.
+    /// **Default: 100ms** results in delays of: 100ms, 200ms, 400ms, 800ms...
+    ///
+    /// Increase for rate-limiting scenarios, decrease for faster recovery.
     pub retry_backoff_ms: u64,
 }
 
