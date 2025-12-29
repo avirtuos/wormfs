@@ -1563,12 +1563,38 @@ async fn test_leader_election_after_failure() {
         .await
         .expect("Failed to shutdown leader");
 
-    // Wait for election timeout and new leader election
-    // Election timeout is 1500-3000ms, so wait 5 seconds to be safe
+    // Wait for new leader election with timeout
+    // Election timeout is 1500-3000ms, but worst case includes:
+    // - Heartbeat detection: 1000-1500ms (2-3 intervals)
+    // - Election timeout: 1500-3000ms
+    // - Election process: 500-1000ms
+    // - Potential split vote retry: +1500-3000ms
+    // Total worst case: ~8.5 seconds, so use 15 second timeout to be safe
     eprintln!("Waiting for new leader election...");
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    let election_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut elected = false;
 
-    // Verify exactly one leader exists among remaining nodes
+    while tokio::time::Instant::now() < election_deadline {
+        let leader_count = cluster.leader_count();
+        if leader_count == 1 {
+            elected = true;
+            break;
+        }
+
+        eprintln!(
+            "  No leader yet (leader_count={}), waiting 500ms...",
+            leader_count
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    assert!(
+        elected,
+        "Failed to elect new leader within 15 seconds (leader_count={})",
+        cluster.leader_count()
+    );
+
+    // Double-check exactly one leader exists
     let leader_count = cluster.leader_count();
     assert_eq!(
         leader_count, 1,
