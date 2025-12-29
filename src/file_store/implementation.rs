@@ -144,13 +144,13 @@ impl FileStoreImpl {
         // f_bavail: free blocks available to non-privileged process
         // f_frsize: fragment size (or f_bsize if f_frsize is 0)
         let block_size = if stat.f_frsize > 0 {
-            stat.f_frsize as u64
+            stat.f_frsize
         } else {
-            stat.f_bsize as u64
+            stat.f_bsize
         };
 
-        let total_space = stat.f_blocks as u64 * block_size;
-        let free_space = stat.f_bavail as u64 * block_size;
+        let total_space = stat.f_blocks * block_size;
+        let free_space = stat.f_bavail * block_size;
 
         Ok((total_space, free_space))
     }

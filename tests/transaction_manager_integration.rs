@@ -8,6 +8,9 @@
 //! - Leader failover during transactions
 //! - Crash recovery
 
+// Allow dead code in test utilities - methods may be used in future tests
+#![allow(dead_code)]
+
 mod stub_storage_network;
 
 use std::path::PathBuf;

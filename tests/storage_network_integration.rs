@@ -35,6 +35,9 @@
 //! with isolated configurations and automatic cleanup. Tests that check for
 //! network events use exponential backoff polling to be both fast and resilient.
 
+// Allow dead code in test utilities - methods may be used in future tests
+#![allow(dead_code)]
+
 use futures::future;
 use libp2p::identity;
 use std::sync::atomic::{AtomicU16, Ordering};

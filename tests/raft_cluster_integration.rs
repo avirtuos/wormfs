@@ -15,6 +15,9 @@
 //!
 //! Real network integration is tested separately in network-specific tests.
 
+// Allow dead code in test utilities - methods may be used in future tests
+#![allow(dead_code)]
+
 mod stub_storage_network;
 
 use std::sync::Arc;

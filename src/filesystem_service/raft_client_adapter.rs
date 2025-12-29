@@ -918,15 +918,13 @@ mod tests {
 
         // Generate first inode
         let count1 = counter.fetch_add(1, Ordering::SeqCst) & 0xFFFF;
-        let inode1 = ((node_id & 0xFFFF) << 48)
-            | ((timestamp & 0xFFFF_FFFF) << 16)
-            | (count1 & 0xFFFF);
+        let inode1 =
+            ((node_id & 0xFFFF) << 48) | ((timestamp & 0xFFFF_FFFF) << 16) | (count1 & 0xFFFF);
 
         // Generate second inode
         let count2 = counter.fetch_add(1, Ordering::SeqCst) & 0xFFFF;
-        let inode2 = ((node_id & 0xFFFF) << 48)
-            | ((timestamp & 0xFFFF_FFFF) << 16)
-            | (count2 & 0xFFFF);
+        let inode2 =
+            ((node_id & 0xFFFF) << 48) | ((timestamp & 0xFFFF_FFFF) << 16) | (count2 & 0xFFFF);
 
         // Inodes should be unique
         assert_ne!(inode1, inode2);
@@ -960,13 +958,11 @@ mod tests {
         let node2_id = 2u64;
         let counter = 0u64;
 
-        let inode1 = ((node1_id & 0xFFFF) << 48)
-            | ((timestamp & 0xFFFF_FFFF) << 16)
-            | (counter & 0xFFFF);
+        let inode1 =
+            ((node1_id & 0xFFFF) << 48) | ((timestamp & 0xFFFF_FFFF) << 16) | (counter & 0xFFFF);
 
-        let inode2 = ((node2_id & 0xFFFF) << 48)
-            | ((timestamp & 0xFFFF_FFFF) << 16)
-            | (counter & 0xFFFF);
+        let inode2 =
+            ((node2_id & 0xFFFF) << 48) | ((timestamp & 0xFFFF_FFFF) << 16) | (counter & 0xFFFF);
 
         // Different nodes produce different inodes even with same timestamp/counter
         assert_ne!(inode1, inode2);
@@ -988,15 +984,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let inode_boot1 = ((node_id & 0xFFFF) << 48)
-            | ((timestamp1 & 0xFFFF_FFFF) << 16)
-            | (0u64 & 0xFFFF);
+        let inode_boot1 = ((node_id & 0xFFFF) << 48) | ((timestamp1 & 0xFFFF_FFFF) << 16);
 
         // Simulate restart (1 second later): counter resets to 0, but timestamp advanced
         let timestamp2 = timestamp1 + 1;
-        let inode_boot2 = ((node_id & 0xFFFF) << 48)
-            | ((timestamp2 & 0xFFFF_FFFF) << 16)
-            | (0u64 & 0xFFFF);
+        let inode_boot2 = ((node_id & 0xFFFF) << 48) | ((timestamp2 & 0xFFFF_FFFF) << 16);
 
         // Even though counter reset to 0, timestamp changed so no collision
         assert_ne!(inode_boot1, inode_boot2);
