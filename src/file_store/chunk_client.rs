@@ -216,18 +216,21 @@ impl ChunkClientPool {
             chunk_id: chunk_data.header.chunk_id.0.as_bytes().to_vec(),
             stripe_id: chunk_data.header.stripe_id.0.as_bytes().to_vec(),
             file_id: chunk_data.header.file_id.0.as_bytes().to_vec(),
-            chunk_index: chunk_data.header.chunk_index as u32,
+            // Safe: u8 -> u32 conversion is always safe (0-255 fits in u32)
+            chunk_index: chunk_data.header.chunk_index.into(),
             data: chunk_data.data.clone(),
             chunk_checksum: chunk_data.header.chunk_checksum,
             stripe_checksum: chunk_data.header.stripe_checksum,
             stripe_start_offset: chunk_data.header.stripe_start_offset,
             stripe_end_offset: chunk_data.header.stripe_end_offset,
-            data_shards: chunk_data.header.data_shards as u32,
-            parity_shards: chunk_data.header.parity_shards as u32,
+            // Safe: u8 -> u32 conversions are always safe (0-255 fits in u32)
+            data_shards: chunk_data.header.data_shards.into(),
+            parity_shards: chunk_data.header.parity_shards.into(),
             erasure_algorithm: 0,     // ReedSolomon
             compression_algorithm: 0, // None
-            r#type: if (chunk_data.header.chunk_index as usize)
-                < chunk_data.header.data_shards as usize
+            // Safe: u8 -> usize conversions are always safe
+            r#type: if usize::from(chunk_data.header.chunk_index)
+                < usize::from(chunk_data.header.data_shards)
             {
                 0 // DATA
             } else {
