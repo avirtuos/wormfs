@@ -335,6 +335,10 @@ pub enum Error {
     #[error("Invalid node address: {0}")]
     InvalidNodeAddress(String),
 
+    /// Invalid node ID
+    #[error("Invalid node ID: {0}")]
+    InvalidNodeId(String),
+
     /// Connection to remote node failed
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),

@@ -152,9 +152,13 @@ impl PlacementEngine {
             let is_local = node.node_id == self.my_node_id.0.to_string();
             selected_nodes.push(node.node_id.clone());
 
+            let node_id = node.node_id.parse().map_err(|e| {
+                Error::InvalidNodeId(format!("Failed to parse node_id '{}': {}", node.node_id, e))
+            })?;
+
             placements.push(ChunkPlacement {
                 chunk_index: chunk_index as u8,
-                target_node_id: NodeId(node.node_id.parse().unwrap_or(0)),
+                target_node_id: NodeId(node_id),
                 is_local,
             });
         }
