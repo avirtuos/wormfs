@@ -246,8 +246,9 @@ impl ChunkClientPool {
 
         let response = client.store_chunk(request).await.map_err(|e| {
             Error::RemoteOperationFailed(format!(
-                "StoreChunk RPC failed for node {}: {}",
-                target.0, e
+                "StoreChunk RPC failed for node {} (chunk_id={:?}, file_id={:?}, stripe_id={:?}): {}",
+                target.0, chunk_data.header.chunk_id, chunk_data.header.file_id,
+                chunk_data.header.stripe_id, e
             ))
         })?;
 
@@ -258,8 +259,12 @@ impl ChunkClientPool {
                 .map(|e| e.message)
                 .unwrap_or_else(|| "Unknown error".to_string());
             return Err(Error::RemoteOperationFailed(format!(
-                "StoreChunk failed on node {}: {}",
-                target.0, error_msg
+                "StoreChunk failed on node {} (chunk_id={:?}, file_id={:?}, stripe_id={:?}): {}",
+                target.0,
+                chunk_data.header.chunk_id,
+                chunk_data.header.file_id,
+                chunk_data.header.stripe_id,
+                error_msg
             )));
         }
 
@@ -295,17 +300,20 @@ impl ChunkClient for ChunkClientPool {
                 Err(e) => {
                     if retries >= self.config.max_retries {
                         error!(
-                            "Failed to store chunk on node {} after {} retries: {}",
-                            target.0, retries, e
+                            "Failed to store chunk on node {} after {} retries (chunk_id={:?}, file_id={:?}): {}",
+                            target.0, retries, chunk_data.header.chunk_id,
+                            chunk_data.header.file_id, e
                         );
                         return Err(e);
                     }
 
                     warn!(
-                        "Retry {}/{} for storing chunk on node {}: {}",
+                        "Retry {}/{} for storing chunk on node {} (chunk_id={:?}, file_id={:?}): {}",
                         retries + 1,
                         self.config.max_retries,
                         target.0,
+                        chunk_data.header.chunk_id,
+                        chunk_data.header.file_id,
                         e
                     );
 
@@ -336,16 +344,16 @@ impl ChunkClient for ChunkClientPool {
 
         let response = client.delete_chunk(request).await.map_err(|e| {
             Error::RemoteOperationFailed(format!(
-                "DeleteChunk RPC failed for node {}: {}",
-                target.0, e
+                "DeleteChunk RPC failed for node {} (chunk_id={:?}): {}",
+                target.0, chunk_id, e
             ))
         })?;
 
         let inner = response.into_inner();
         if !inner.success {
             return Err(Error::RemoteOperationFailed(format!(
-                "DeleteChunk failed on node {}",
-                target.0
+                "DeleteChunk failed on node {} (chunk_id={:?})",
+                target.0, chunk_id
             )));
         }
 
@@ -387,8 +395,8 @@ impl ChunkClient for ChunkClientPool {
 
         let response = client.read_chunk(request).await.map_err(|e| {
             Error::RemoteOperationFailed(format!(
-                "ReadChunk RPC failed for node {}: {}",
-                source.0, e
+                "ReadChunk RPC failed for node {} (chunk_id={:?}, file_id={:?}, stripe_id={:?}): {}",
+                source.0, chunk_id, file_id, stripe_id, e
             ))
         })?;
 
