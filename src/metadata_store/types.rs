@@ -37,8 +37,26 @@ pub struct Config {
 
     /// SQLite page cache size in MB (default: 10MB, maximum: 2047MB)
     ///
-    /// Values above 2047 will cause initialization to fail with `Error::ConfigInvalid`
-    /// to prevent integer overflow when converting to KB.
+    /// This controls the amount of memory SQLite uses for caching database pages.
+    /// Larger caches improve performance by reducing disk I/O for frequently accessed data.
+    ///
+    /// **Maximum: 2047 MB** - This limit exists because SQLite's `PRAGMA cache_size`
+    /// accepts values in KB as a negative i32. The conversion is:
+    /// ```text
+    /// cache_size_pragma = -(cache_size_mb * 1024)
+    /// ```
+    /// Maximum safe value: `2047 * 1024 = 2,096,128 KB` fits in i32 range.
+    /// Exceeding 2047 MB would cause integer overflow and undefined behavior.
+    ///
+    /// **Recommendations:**
+    /// - **Small databases (<100MB)**: 10-50 MB cache is sufficient
+    /// - **Medium databases (100MB-1GB)**: 50-200 MB cache recommended
+    /// - **Large databases (>1GB)**: 200-1000 MB cache for optimal performance
+    /// - **Memory-constrained systems**: Keep below 50 MB to preserve RAM
+    ///
+    /// Note: Setting too high a cache on small databases wastes memory without benefit.
+    ///
+    /// Values above 2047 MB will cause initialization to fail with `Error::ConfigInvalid`.
     pub cache_size_mb: usize,
 
     /// Enable foreign key constraints
