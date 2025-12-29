@@ -467,3 +467,386 @@ impl RaftClient for RaftClientAdapter {
             .map_err(|e| Error::Internal(format!("Failed to extend lock: {}", e)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_store::types::StripeMetadata;
+    use crate::filesystem_service::types::FileAttr;
+    use crate::filesystem_service::types::FileType as FsFileType;
+
+    /// Test convert_operations with Create operation
+    #[test]
+    fn test_convert_operations_create() {
+        let file_id = crate::file_store::types::FileId::generate();
+        let stripe_id = crate::file_store::types::StripeId::generate();
+        let chunk_id = crate::file_store::types::ChunkId::generate();
+        let node_id = crate::file_store::types::NodeId(1);
+        let disk_id = crate::file_store::types::DiskId::new(100);
+
+        let stripe = StripeMetadata {
+            stripe_id,
+            file_id,
+            offset: 0,
+            size: 1024,
+            checksum: 0, // Test value
+            chunks: vec![crate::file_store::types::ChunkMetadata::new(
+                chunk_id, node_id, disk_id, 0,
+            )],
+        };
+
+        let operations = vec![StripeOperation::Create {
+            file_id,
+            stripe: stripe.clone(),
+        }];
+
+        let result = RaftClientAdapter::convert_operations(operations);
+        assert!(result.is_ok());
+
+        let metadata_ops = result.unwrap();
+        assert_eq!(metadata_ops.len(), 1);
+
+        match &metadata_ops[0] {
+            MetadataOperation::CreateStripe {
+                file_id: f,
+                stripe_id: s,
+                ..
+            } => {
+                assert_eq!(*f, file_id);
+                assert_eq!(*s, stripe_id);
+            }
+            _ => panic!("Expected CreateStripe operation"),
+        }
+    }
+
+    /// Test convert_operations with Update operation (should create Delete + Create)
+    #[test]
+    fn test_convert_operations_update() {
+        let file_id = crate::file_store::types::FileId::generate();
+        let stripe_id = crate::file_store::types::StripeId::generate();
+        let chunk_id = crate::file_store::types::ChunkId::generate();
+        let node_id = crate::file_store::types::NodeId(1);
+        let disk_id = crate::file_store::types::DiskId::new(100);
+
+        let stripe = StripeMetadata {
+            stripe_id,
+            file_id,
+            offset: 0,
+            size: 1024,
+            checksum: 0, // Test value
+            chunks: vec![crate::file_store::types::ChunkMetadata::new(
+                chunk_id, node_id, disk_id, 0,
+            )],
+        };
+
+        let operations = vec![StripeOperation::Update {
+            file_id,
+            stripe: stripe.clone(),
+        }];
+
+        let result = RaftClientAdapter::convert_operations(operations);
+        assert!(result.is_ok());
+
+        let metadata_ops = result.unwrap();
+        // Update should produce DeleteStripe + CreateStripe
+        assert_eq!(metadata_ops.len(), 2);
+
+        match &metadata_ops[0] {
+            MetadataOperation::DeleteStripe {
+                stripe_id: s,
+                file_id: f,
+            } => {
+                assert_eq!(*s, stripe_id);
+                assert_eq!(*f, file_id);
+            }
+            _ => panic!("Expected DeleteStripe as first operation"),
+        }
+
+        match &metadata_ops[1] {
+            MetadataOperation::CreateStripe {
+                file_id: f,
+                stripe_id: s,
+                ..
+            } => {
+                assert_eq!(*f, file_id);
+                assert_eq!(*s, stripe_id);
+            }
+            _ => panic!("Expected CreateStripe as second operation"),
+        }
+    }
+
+    /// Test convert_operations with Delete operation
+    #[test]
+    fn test_convert_operations_delete() {
+        let file_id = crate::file_store::types::FileId::generate();
+        let stripe_id = crate::file_store::types::StripeId::generate();
+
+        let operations = vec![StripeOperation::Delete { stripe_id, file_id }];
+
+        let result = RaftClientAdapter::convert_operations(operations);
+        assert!(result.is_ok());
+
+        let metadata_ops = result.unwrap();
+        assert_eq!(metadata_ops.len(), 1);
+
+        match &metadata_ops[0] {
+            MetadataOperation::DeleteStripe {
+                stripe_id: s,
+                file_id: f,
+            } => {
+                assert_eq!(*s, stripe_id);
+                assert_eq!(*f, file_id);
+            }
+            _ => panic!("Expected DeleteStripe operation"),
+        }
+    }
+
+    /// Test convert_operations with UpdateAttributes operation
+    #[test]
+    fn test_convert_operations_update_attributes() {
+        use std::time::SystemTime;
+
+        let file_id = crate::file_store::types::FileId::generate();
+        let inode = 12345;
+        let now = SystemTime::now();
+
+        let attributes = FileAttr {
+            ino: inode,
+            size: 2048,
+            blocks: 4,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FsFileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        };
+
+        let operations = vec![StripeOperation::UpdateAttributes {
+            file_id,
+            inode,
+            attributes: attributes.clone(),
+        }];
+
+        let result = RaftClientAdapter::convert_operations(operations);
+        assert!(result.is_ok());
+
+        let metadata_ops = result.unwrap();
+        assert_eq!(metadata_ops.len(), 1);
+
+        match &metadata_ops[0] {
+            MetadataOperation::FileUpdate {
+                file_id: f,
+                inode: i,
+                metadata,
+                ..
+            } => {
+                assert_eq!(*f, file_id);
+                assert_eq!(*i, inode);
+                assert_eq!(metadata.size, 2048);
+                assert_eq!(metadata.uid, 1000);
+                assert_eq!(metadata.gid, 1000);
+                assert_eq!(metadata.mode, 0o644);
+            }
+            _ => panic!("Expected FileUpdate operation"),
+        }
+    }
+
+    /// Test convert_operations with multiple operations
+    #[test]
+    fn test_convert_operations_multiple() {
+        let file_id = crate::file_store::types::FileId::generate();
+        let stripe_id1 = crate::file_store::types::StripeId::generate();
+        let stripe_id2 = crate::file_store::types::StripeId::generate();
+        let chunk_id = crate::file_store::types::ChunkId::generate();
+        let node_id = crate::file_store::types::NodeId(1);
+        let disk_id = crate::file_store::types::DiskId::new(100);
+
+        let stripe1 = StripeMetadata {
+            stripe_id: stripe_id1,
+            file_id,
+            offset: 0,
+            size: 1024,
+            checksum: 0, // Test value
+            chunks: vec![crate::file_store::types::ChunkMetadata::new(
+                chunk_id, node_id, disk_id, 0,
+            )],
+        };
+
+        let operations = vec![
+            StripeOperation::Create {
+                file_id,
+                stripe: stripe1,
+            },
+            StripeOperation::Delete {
+                stripe_id: stripe_id2,
+                file_id,
+            },
+        ];
+
+        let result = RaftClientAdapter::convert_operations(operations);
+        assert!(result.is_ok());
+
+        let metadata_ops = result.unwrap();
+        assert_eq!(metadata_ops.len(), 2);
+    }
+
+    /// Test convert_operations with empty operations list
+    #[test]
+    fn test_convert_operations_empty() {
+        let operations: Vec<StripeOperation> = vec![];
+
+        let result = RaftClientAdapter::convert_operations(operations);
+        assert!(result.is_ok());
+
+        let metadata_ops = result.unwrap();
+        assert_eq!(metadata_ops.len(), 0);
+    }
+
+    /// Test create_stripe_operation with valid stripe metadata
+    #[test]
+    fn test_create_stripe_operation() {
+        let file_id = crate::file_store::types::FileId::generate();
+        let stripe_id = crate::file_store::types::StripeId::generate();
+        let chunk_id = crate::file_store::types::ChunkId::generate();
+        let node_id = crate::file_store::types::NodeId(1);
+        let disk_id = crate::file_store::types::DiskId::new(100);
+
+        let stripe = StripeMetadata {
+            stripe_id,
+            file_id,
+            offset: 1024 * 1024, // 1MB offset
+            size: 2048,
+            checksum: 0, // Test value
+            chunks: vec![crate::file_store::types::ChunkMetadata::new(
+                chunk_id, node_id, disk_id, 0,
+            )],
+        };
+
+        let result = RaftClientAdapter::create_stripe_operation(file_id, stripe);
+        assert!(result.is_ok());
+
+        let operation = result.unwrap();
+        match operation {
+            MetadataOperation::CreateStripe {
+                file_id: f,
+                stripe_id: s,
+                stripe_index,
+                offset,
+                size,
+                chunks,
+                ..
+            } => {
+                assert_eq!(f, file_id);
+                assert_eq!(s, stripe_id);
+                assert_eq!(stripe_index, 1); // 1MB / 1MB = index 1
+                assert_eq!(offset, 1024 * 1024);
+                assert_eq!(size, 2048);
+                assert_eq!(chunks.len(), 1);
+                assert_eq!(chunks[0].chunk_id, chunk_id);
+                assert_eq!(chunks[0].node_id, NodeId(1));
+            }
+            _ => panic!("Expected CreateStripe operation"),
+        }
+    }
+
+    /// Test UpdateAttributes with Directory type
+    #[test]
+    fn test_convert_operations_update_attributes_directory() {
+        use std::time::SystemTime;
+
+        let file_id = crate::file_store::types::FileId::generate();
+        let inode = 12345;
+        let now = SystemTime::now();
+
+        let attributes = FileAttr {
+            ino: inode,
+            size: 4096,
+            blocks: 8,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FsFileType::Directory,
+            perm: 0o755,
+            nlink: 2,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        };
+
+        let operations = vec![StripeOperation::UpdateAttributes {
+            file_id,
+            inode,
+            attributes,
+        }];
+
+        let result = RaftClientAdapter::convert_operations(operations);
+        assert!(result.is_ok());
+
+        let metadata_ops = result.unwrap();
+        assert_eq!(metadata_ops.len(), 1);
+
+        match &metadata_ops[0] {
+            MetadataOperation::FileUpdate { metadata, .. } => {
+                assert_eq!(metadata.file_type, 1); // Directory = 1
+            }
+            _ => panic!("Expected FileUpdate operation"),
+        }
+    }
+
+    /// Test UpdateAttributes with Symlink type
+    #[test]
+    fn test_convert_operations_update_attributes_symlink() {
+        use std::time::SystemTime;
+
+        let file_id = crate::file_store::types::FileId::generate();
+        let inode = 12345;
+        let now = SystemTime::now();
+
+        let attributes = FileAttr {
+            ino: inode,
+            size: 10,
+            blocks: 1,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FsFileType::Symlink,
+            perm: 0o777,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        };
+
+        let operations = vec![StripeOperation::UpdateAttributes {
+            file_id,
+            inode,
+            attributes,
+        }];
+
+        let result = RaftClientAdapter::convert_operations(operations);
+        assert!(result.is_ok());
+
+        let metadata_ops = result.unwrap();
+        assert_eq!(metadata_ops.len(), 1);
+
+        match &metadata_ops[0] {
+            MetadataOperation::FileUpdate { metadata, .. } => {
+                assert_eq!(metadata.file_type, 2); // Symlink = 2
+            }
+            _ => panic!("Expected FileUpdate operation"),
+        }
+    }
+}

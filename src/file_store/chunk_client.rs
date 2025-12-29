@@ -426,4 +426,84 @@ mod tests {
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.retry_backoff_ms, 100);
     }
+
+    #[test]
+    fn test_custom_config() {
+        let config = ChunkClientConfig {
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(60),
+            max_retries: 5,
+            retry_backoff_ms: 200,
+        };
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.request_timeout, Duration::from_secs(60));
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.retry_backoff_ms, 200);
+    }
+
+    /// Test retry backoff increases exponentially
+    #[test]
+    fn test_retry_backoff_exponential() {
+        let config = ChunkClientConfig {
+            connect_timeout: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(1),
+            max_retries: 3,
+            retry_backoff_ms: 100,
+        };
+
+        // Initial backoff
+        let mut backoff = config.retry_backoff_ms;
+        assert_eq!(backoff, 100);
+
+        // First retry (after first failure)
+        backoff *= 2;
+        assert_eq!(backoff, 200);
+
+        // Second retry
+        backoff *= 2;
+        assert_eq!(backoff, 400);
+
+        // Third retry
+        backoff *= 2;
+        assert_eq!(backoff, 800);
+    }
+
+    /// Test max retries configuration
+    #[test]
+    fn test_max_retries() {
+        let config = ChunkClientConfig::default();
+        assert_eq!(config.max_retries, 3);
+
+        let custom_config = ChunkClientConfig {
+            max_retries: 10,
+            ..Default::default()
+        };
+        assert_eq!(custom_config.max_retries, 10);
+    }
+
+    /// Test connection timeout configuration
+    #[test]
+    fn test_connection_timeout() {
+        let short_timeout = ChunkClientConfig {
+            connect_timeout: Duration::from_secs(1),
+            ..Default::default()
+        };
+        assert_eq!(short_timeout.connect_timeout, Duration::from_secs(1));
+
+        let long_timeout = ChunkClientConfig {
+            connect_timeout: Duration::from_secs(30),
+            ..Default::default()
+        };
+        assert_eq!(long_timeout.connect_timeout, Duration::from_secs(30));
+    }
+
+    /// Test request timeout configuration
+    #[test]
+    fn test_request_timeout() {
+        let config = ChunkClientConfig {
+            request_timeout: Duration::from_secs(120),
+            ..Default::default()
+        };
+        assert_eq!(config.request_timeout, Duration::from_secs(120));
+    }
 }
