@@ -3,6 +3,9 @@
 //! This provides a fake network that allows multiple Raft nodes to communicate
 //! via channels instead of real libp2p networking, making tests faster and more reliable.
 
+// Allow dead code in test utilities - methods may be used in future tests
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

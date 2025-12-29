@@ -106,11 +106,14 @@ pub trait ChunkClient: Send + Sync {
 ///
 /// - **Low-latency deployments**: Reduce timeouts and retries:
 ///   ```rust
+///   use std::time::Duration;
+///   use wormfs::file_store::ChunkClientConfig;
+///
 ///   ChunkClientConfig {
 ///       request_timeout: Duration::from_secs(5),
 ///       max_retries: 1,
 ///       ..Default::default()
-///   }
+///   };
 ///   ```
 ///
 /// - **High-latency/unreliable networks**: Use longer timeouts but implement
